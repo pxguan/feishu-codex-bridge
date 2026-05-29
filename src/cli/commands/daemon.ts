@@ -1,4 +1,4 @@
-import { ensureOnboarded } from '../../bot/onboarding';
+import { ensureOnboarded, confirmReadyForDaemon } from '../../bot/onboarding';
 import { getServiceAdapter, type ServiceStatus } from '../../service/adapter';
 
 /**
@@ -10,6 +10,13 @@ import { getServiceAdapter, type ServiceStatus } from '../../service/adapter';
 export async function runStart(): Promise<void> {
   const ready = await ensureOnboarded({ allowCreate: true });
   if (!ready) {
+    process.exitCode = 1;
+    return;
+  }
+  // Don't daemonize a bot that can't receive messages — block until the
+  // operator has finished authorizing (scopes granted, events subscribed,
+  // version published).
+  if (!(await confirmReadyForDaemon(ready))) {
     process.exitCode = 1;
     return;
   }

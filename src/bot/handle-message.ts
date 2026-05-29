@@ -763,7 +763,7 @@ export function createOrchestrator(
       if (!dmAdmin(evt.operator?.openId)) return;
       const conn = channel.getConnectionStatus?.()?.state ?? 'unknown';
       await channel
-        .send(evt.chatId, { markdown: `🔄 长连接状态：**${conn}**\nSDK 会自动重连；若长期断开，请在终端重启 \`feishu-codex-bridge start\`。` }, { replyTo: evt.messageId })
+        .send(evt.chatId, { markdown: `🔄 长连接状态：**${conn}**\nSDK 会自动重连；若长期断开，请在终端重跑 \`feishu-codex-bridge run\`（前台）或 \`feishu-codex-bridge restart\`（后台守护）。` }, { replyTo: evt.messageId })
         .catch(() => undefined);
     })
     .on(DM.rmConfirm, async ({ evt, value }) => {

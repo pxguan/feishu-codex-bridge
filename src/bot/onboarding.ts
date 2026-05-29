@@ -1,3 +1,4 @@
+import { createInterface } from 'node:readline/promises';
 import { loadConfig, saveConfig, buildEncryptedAccountConfig } from '../config/store';
 import { setSecret } from '../config/keystore';
 import { isComplete, secretKeyForApp, type AppConfig } from '../config/schema';
@@ -14,6 +15,8 @@ import { ensureRegistry, addBot, currentBot, loadBots, uniqueName, type BotEntry
 export interface OnboardResult {
   cfg: AppConfig;
   secret: string;
+  /** required scopes still ungranted at validation time (undefined = couldn't check). */
+  missingScopes?: string[];
 }
 
 /** Verify codex CLI is present (needed to run AND to spawn the per-session app-server). */
@@ -58,9 +61,9 @@ export async function ensureOnboarded(opts: { allowCreate?: boolean } = {}): Pro
     console.error(`✗ 当前机器人「${entry.name}」(${entry.appId}) 配置缺失或损坏。可 \`bot rm ${entry.name}\` 后重新 \`bot init\`。`);
     return null;
   }
-  const secret = await validateAndReport(cfg);
-  if (secret === null) return null;
-  return { cfg, secret };
+  const r = await validateAndReport(cfg);
+  if (r === null) return null;
+  return { cfg, secret: r.secret, missingScopes: r.missingScopes };
 }
 
 /**
@@ -110,11 +113,11 @@ export async function registerNewBot(desiredName?: string): Promise<OnboardResul
   showScopeGrant(cfg, v.missingScopes);
 
   const secret = await resolveAppSecret(cfg);
-  return { cfg, secret };
+  return { cfg, secret, missingScopes: v.missingScopes };
 }
 
-/** Resolve secret, validate credentials, print result + scope-grant link. Returns secret or null. */
-async function validateAndReport(cfg: AppConfig): Promise<string | null> {
+/** Resolve secret, validate credentials, print result + scope-grant link. */
+async function validateAndReport(cfg: AppConfig): Promise<{ secret: string; missingScopes?: string[] } | null> {
   const secret = await resolveAppSecret(cfg);
   const v = await validateAppCredentials(cfg.accounts.app.id, secret, cfg.accounts.app.tenant);
   if (!v.ok) {
@@ -125,7 +128,52 @@ async function validateAndReport(cfg: AppConfig): Promise<string | null> {
   console.log(`✓ 凭据校验通过  bot: ${v.botName ?? '-'}  appId: ${cfg.accounts.app.id}`);
   log.info('onboard', 'credentials-ok', { appId: cfg.accounts.app.id, bot: v.botName ?? null });
   showScopeGrant(cfg, v.missingScopes);
-  return secret;
+  return { secret, missingScopes: v.missingScopes };
+}
+
+/**
+ * Interactive gate used by `start` before daemonizing: don't install a launchd
+ * service for a bot that can't actually receive messages. Blocks until the
+ * operator has (1) granted the missing scopes — re-checked live against the
+ * Feishu API, scopes take effect immediately — and (2) confirmed they've
+ * subscribed events + published a version (neither has an API to verify).
+ * No-op off a TTY (scripted re-install of an already-ready bot). Returns false
+ * only on a credential error.
+ */
+export async function confirmReadyForDaemon(result: OnboardResult): Promise<boolean> {
+  if (!process.stdin.isTTY) return true;
+  const { app } = result.cfg.accounts;
+  let missing = result.missingScopes;
+
+  while (missing && missing.length > 0) {
+    const url = buildScopeGrantUrl(app.id, app.tenant);
+    console.log(`\n⏳ 还差 ${missing.length} 项权限未开通，后台服务暂不安装。`);
+    console.log(`   开通页：${url}`);
+    await promptEnter('   在浏览器勾选全部权限并确认后，按 Enter 重新检测（Ctrl+C 取消）… ');
+    const v = await validateAppCredentials(app.id, result.secret, app.tenant);
+    if (!v.ok) {
+      console.error(`✗ 凭据校验失败：${v.reason}`);
+      return false;
+    }
+    missing = v.missingScopes;
+    if (missing && missing.length > 0) console.log(`   仍缺：${missing.join('  ')}`);
+  }
+  console.log('✓ 权限已开通。');
+
+  console.log('\n最后两步（开放平台后台，没有 API 可校验，需你自己确认）：');
+  console.log('  ① 事件与回调 → 长连接 → 订阅 im.message.receive_v1 / card.action.trigger / application.bot.menu_v6');
+  console.log('  ② 创建并发布应用版本');
+  await promptEnter('完成以上两步后按 Enter 安装后台服务（Ctrl+C 取消）… ');
+  return true;
+}
+
+async function promptEnter(message: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await rl.question(message);
+  } finally {
+    rl.close();
+  }
 }
 
 /**
