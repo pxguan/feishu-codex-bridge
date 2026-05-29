@@ -54,3 +54,14 @@ export function buildScopeGrantUrl(
   const q = encodeURIComponent(scopes.join(','));
   return `https://${host}/app/${encodeURIComponent(appId)}/auth?q=${q}`;
 }
+
+/**
+ * Developer-console "事件与回调" page for the app. Unlike scopes there is **no**
+ * `?q=` pre-select and **no** API to subscribe events/callbacks for a self-built
+ * app — both the 事件配置 (im.message.receive_v1, application.bot.menu_v6) and
+ * 回调配置 (card.action.trigger / 卡片回传交互) tabs must be filled in by hand.
+ * The best we can do is deep-link to the page and auto-open it.
+ */
+export function buildEventConfigUrl(appId: string, tenant: TenantBrand): string {
+  return `https://${HOSTS[tenant]}/app/${encodeURIComponent(appId)}/event`;
+}

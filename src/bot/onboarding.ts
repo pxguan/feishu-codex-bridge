@@ -5,7 +5,7 @@ import { isComplete, secretKeyForApp, type AppConfig } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
 import { runRegistrationWizard } from './wizard';
 import { validateAppCredentials } from '../utils/feishu-auth';
-import { buildScopeGrantUrl } from '../config/scopes';
+import { buildScopeGrantUrl, buildEventConfigUrl } from '../config/scopes';
 import { resolveCodexBin } from '../agent/codex-appserver/locate';
 import { openUrl } from '../utils/open-url';
 import { log } from '../core/logger';
@@ -160,10 +160,25 @@ export async function confirmReadyForDaemon(result: OnboardResult): Promise<bool
   }
   console.log('✓ 权限已开通。');
 
-  console.log('\n最后两步（开放平台后台，没有 API 可校验，需你自己确认）：');
-  console.log('  ① 事件与回调 → 长连接 → 订阅 im.message.receive_v1 / card.action.trigger / application.bot.menu_v6');
-  console.log('  ② 创建并发布应用版本');
-  await promptEnter('完成以上两步后按 Enter 安装后台服务（Ctrl+C 取消）… ');
+  // Events AND callbacks have no API at all (not even a read to verify), and no
+  // deep-preselect — only scopes have those. So this is the one truly-manual,
+  // un-checkable step: print exact click-paths and trust the operator's Enter.
+  // The classic trap: card.action.trigger is a *callback* (回调配置 tab), NOT an
+  // event — searching for it under 「添加事件」 finds nothing. Spell out the tabs.
+  const eventUrl = buildEventConfigUrl(app.id, app.tenant);
+  const opened = openUrl(eventUrl);
+  console.log('\n最后这几步飞书没有 API/深链可代办（连查询订阅状态的接口都没有），需你手动点：\n');
+  console.log(`  【1】事件与回调（${opened ? '已自动打开' : '打开下面链接'}）：${eventUrl}`);
+  console.log('       这页顶部有三个标签：「事件配置」「回调配置」「加密策略」。');
+  console.log('       • 切到「事件配置」标签 → 「订阅方式」改「长连接」→ 点「添加事件」搜并勾选：');
+  console.log('           im.message.receive_v1（接收消息）、application.bot.menu_v6（机器人菜单）');
+  console.log('       • 切到「回调配置」标签 → 「订阅方式」改「长连接」→ 点「添加回调」勾选：');
+  console.log('           card.action.trigger（卡片回传交互）');
+  console.log('           ⚠️ 它是「回调」不是「事件」——在上面「添加事件」里搜不到，必须切到「回调配置」这个标签。');
+  console.log('  【2】左侧栏「应用发布 → 版本管理与发布」→ 创建一个版本并发布。');
+  console.log('\n  （保存「长连接」订阅方式要求长连接在线；若提示连接未建立，');
+  console.log('    先开另一个终端跑 `feishu-codex-bridge run` 把桥连上，再回这页保存。）');
+  await promptEnter('\n以上都点完后按 Enter 安装后台服务（Ctrl+C 取消）… ');
   return true;
 }
 
