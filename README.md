@@ -68,13 +68,13 @@
 
 ```bash
 # 推荐：全局安装到稳定路径（后台 daemon 需要稳定的 CLI 路径）
-npm i -g github:modelzen/feishu-codex-bridge
+npm i -g @modelzen/feishu-codex-bridge
 
-# 或：免安装、单次前台运行（首次会自动构建）
-npx -y github:modelzen/feishu-codex-bridge run
+# 或：免安装、单次前台运行
+npx -y @modelzen/feishu-codex-bridge run
 ```
 
-> 安装只装命令、**不会自动建机器人**（`prepare` 钩子自动构建）；装好后命令名是 `feishu-codex-bridge`。
+> 安装只装命令、**不会自动建机器人**（包已预编译，安装即用）；装好后命令名是 `feishu-codex-bridge`。
 
 ### 2. 前台启动（`run`）
 
