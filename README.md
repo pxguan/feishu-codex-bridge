@@ -187,7 +187,6 @@ feishu-codex-bridge start              后台 daemon 启动（装 launchd 开机
 feishu-codex-bridge stop|restart|status|logs   后台 daemon 生命周期
 feishu-codex-bridge bot init|list|use|rm       多飞书机器人：注册 / 列表 / 切当前 / 移除
 feishu-codex-bridge doctor             本地自检：codex / 登录 / lark-cli / 当前机器人
-feishu-codex-bridge secrets get|set <id>|list|remove <id>    本地加密密钥库
 ```
 
 ---

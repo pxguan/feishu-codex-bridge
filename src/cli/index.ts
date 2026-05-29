@@ -91,7 +91,10 @@ program
     await runDoctor();
   });
 
-const secrets = program.command('secrets').description('本地加密密钥库');
+// Internal plumbing — the `secrets-getter` wrapper execs `secrets get` to
+// resolve the App Secret from the keystore. Users never call it, so hide it
+// from --help (still fully functional, just unlisted).
+const secrets = program.command('secrets', { hidden: true }).description('本地加密密钥库（内部）');
 secrets
   .command('get')
   .description('exec-provider 端点（从 stdin 读 JSON 请求）')
