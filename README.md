@@ -7,6 +7,8 @@
 一句话：你在飞书群里发「帮我加个登录接口」，机器人就在这个群绑定的代码目录里跑 Codex，边跑边把推理、命令、改动、结果更新到一张卡片上；点 ⏹ 可随时终止。
 
 > 🚀 **最快上手：把这个仓库链接 `https://github.com/modelzen/feishu-codex-bridge` 交给 Codex / Claude，照着本 README 它就能帮你把整套装好跑起来。**
+>
+> 🎀 **想先看它在飞书里长啥样、能干嘛？** 看这篇图文介绍 👉 [《让 Codex 当你飞书里的同事》](https://my.feishu.cn/docx/AFKNdf4QaooL5OxSR8bc5H7vn7b)
 
 ```
 飞书群消息 ──长连接(WSClient)──▶ bridge ──JSON-RPC/stdio──▶ codex app-server (每会话一进程)
@@ -242,6 +244,7 @@ src/
 
 ## 💬 文档 & 交流
 
+- 🎀 **图文介绍（先看它能干嘛）**：<https://my.feishu.cn/docx/AFKNdf4QaooL5OxSR8bc5H7vn7b> —— 配大量截图，讲清它在飞书里长什么样、有哪些细节、可以怎么用。
 - 📖 **命令手册（飞书文档）**：<https://my.feishu.cn/wiki/PZ23wGr7JiKK5RkIG4rcZXzGn5g> —— 各场景可用命令速查（机器人建群时也会自动挂成群标签页）。
 - 🐛 **反馈 / 贡献**：<https://github.com/modelzen/feishu-codex-bridge/issues>
 - 👥 **交流群**：扫码加入「Vonvon 灵感研究所」👇
