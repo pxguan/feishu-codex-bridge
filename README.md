@@ -55,33 +55,46 @@
 
 ---
 
-## 🚀 快速开始
+## 🚀 安装与启动
+
+### 1. 安装
 
 ```bash
-git clone https://github.com/modelzen/feishu-codex-bridge.git
-cd feishu-codex-bridge
+# 推荐：全局安装到稳定路径（后台常驻服务需要稳定的 CLI 路径）
+npm i -g github:modelzen/feishu-codex-bridge
 
-# 方式一：一键脚本（装依赖 → 构建 → 前台启动）
-./scripts/dev-run.sh
-
-# 方式二：手动
-npm ci          # 或 npm install
-npm run build
-npm start       # = node bin/feishu-codex-bridge.mjs start
+# 或：只想先试一下 / 只为完成首次扫码（免安装，单次运行）
+npx -y github:modelzen/feishu-codex-bridge start
 ```
 
-首次 `start` 会按顺序：
+> 安装时自动构建（`prepare` 钩子，无需手动 `npm run build`）。
+> 发布到 npm 后会更短：`npm i -g feishu-codex-bridge` / `npx -y feishu-codex-bridge@latest start`。
 
-1. 检查 codex CLI 是否可用（不可用会给出安装/登录提示）；
-2. 没有配置 → 进入**扫码向导**：用飞书 App 扫码，自动创建/授权一个机器人应用，密钥写入本地加密库；
-3. 校验凭据，并**打印一条「一键开通全部权限」的链接**（飞书没有「扫码即授权」接口，所以权限要点这条链接一次性开通，见下）；
-4. 起长连接，开始监听消息。
-
-随时可跑自检：
+### 2. 首次扫码 onboarding（前台跑一次，一次性）
 
 ```bash
-feishu-codex-bridge doctor   # 或 npm start 之外：node bin/feishu-codex-bridge.mjs doctor
+feishu-codex-bridge start
 ```
+
+这是**交互式扫码**，需前台跑一次：检查 codex → 扫码自动创建/授权飞书应用（密钥进本地加密库）→ 校验凭据并**打印「一键开通全部权限」链接**（点开一次性开通）→ 起长连接。完成后还要去飞书后台**订阅事件**（见下节），然后 Ctrl-C 退出。
+
+### 3. 转后台常驻（推荐 —— 日常就这么跑）
+
+onboarding 完成后注册成后台服务：**开机自启、崩溃自动拉起、关掉终端也照跑**。
+
+```bash
+feishu-codex-bridge service install launchd   # macOS launchd 用户代理
+feishu-codex-bridge service status            # 状态 / pid / 上次退出码
+feishu-codex-bridge service logs              # 跟踪日志
+feishu-codex-bridge service restart
+feishu-codex-bridge service uninstall
+```
+
+> ⚠️ **后台服务必须用全局安装（`npm i -g`），不要用 npx 跑服务**：launchd plist 里硬编码了 CLI 路径，而 npx 的临时缓存（`~/.npm/_npx/...`）会被清理，缓存一没服务就起不来。前台 `start` 扫码用 npx 没问题（单次进程）。
+>
+> 前台直接跑（`feishu-codex-bridge start` / `./scripts/dev-run.sh`）只适合**首次扫码或开发调试**，不要用来长期挂着。
+
+自检随时可用：`feishu-codex-bridge doctor`。
 
 ---
 
@@ -149,18 +162,6 @@ feishu-codex-bridge doctor   # 或 npm start 之外：node bin/feishu-codex-brid
 
 ---
 
-## 🖥 常驻后台服务（macOS / launchd）
-
-```bash
-feishu-codex-bridge service install launchd   # 注册并开机自启
-feishu-codex-bridge service status
-feishu-codex-bridge service logs
-feishu-codex-bridge service restart
-feishu-codex-bridge service uninstall
-```
-
----
-
 ## 🛠 CLI 一览
 
 ```
@@ -180,6 +181,8 @@ npm run build         # tsup → dist/
 npm test              # vitest
 npm run dev           # tsup --watch
 ```
+
+本地开发：`git clone https://github.com/modelzen/feishu-codex-bridge.git && cd feishu-codex-bridge && npm i`（`prepare` 自动构建），前台跑 `npm start` 或 `./scripts/dev-run.sh`。
 
 目录结构：
 
@@ -209,6 +212,18 @@ src/
 | 提示某项「权限不足」 | 点 `start` 打印的一键开通链接补齐权限（即时生效） |
 | 按钮「时灵时不灵」 | 检查是否**重复启动了两个 bridge 进程**抢回调；本桥有单实例锁，正常会拒绝第二个 |
 | 点 ⏹ 没反应 / 卡片不收尾 | 同群另一话题在跑长任务占住了串行队列；稍候或重连 |
+
+---
+
+## 💬 文档 & 交流
+
+- 📖 **命令手册（飞书文档）**：<https://my.feishu.cn/wiki/PZ23wGr7JiKK5RkIG4rcZXzGn5g> —— 各场景可用命令速查（机器人建群时也会自动挂成群标签页）。
+- 🐛 **反馈 / 贡献**：<https://github.com/modelzen/feishu-codex-bridge/issues>
+- 👥 **交流群**：扫码加入「Vonvon 灵感研究所」👇
+
+<p align="center"><img src="docs/assets/vonvon-group-qr.png" alt="Vonvon 灵感研究所 群二维码" width="260"></p>
+
+> 该群二维码永久有效，扫码即可加入。
 
 ---
 

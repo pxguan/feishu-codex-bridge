@@ -23,7 +23,8 @@
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "start": "node bin/feishu-codex-bridge.mjs start"
+    "start": "node bin/feishu-codex-bridge.mjs start",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.65.0",
