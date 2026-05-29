@@ -61,14 +61,13 @@
 
 ```bash
 # 推荐：全局安装到稳定路径（后台常驻服务需要稳定的 CLI 路径）
-npm i -g @modelzen/feishu-codex-bridge
+npm i -g github:modelzen/feishu-codex-bridge
 
 # 或：只想先试一下 / 只为完成首次扫码（免安装，单次运行）
-npx -y @modelzen/feishu-codex-bridge@latest start
+npx -y github:modelzen/feishu-codex-bridge start
 ```
 
-> 装好后命令名是 `feishu-codex-bridge`（不带 scope）。
-> 也可从源码装：`npm i -g github:modelzen/feishu-codex-bridge`（`prepare` 钩子自动构建）。
+> 安装时会自动构建（`prepare` 钩子，无需手动 `npm run build`）；装好后命令名是 `feishu-codex-bridge`。
 
 ### 2. 首次扫码 onboarding（前台跑一次，一次性）
 
