@@ -17,6 +17,6 @@ fi
 echo "==> [2/3] 构建 (tsup)"
 npm run build
 
-echo "==> [3/3] 前台启动 (node bin/feishu-codex-bridge.mjs start)"
+echo "==> [3/3] 前台启动 (node bin/feishu-codex-bridge.mjs run)"
 echo "    Ctrl-C 退出。"
 exec npm run start

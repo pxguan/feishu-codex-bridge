@@ -51,7 +51,7 @@
 | **Node.js ≥ 20** | 运行时 | <https://nodejs.org> 或 `nvm install 20` |
 | **Codex CLI** | 后端，bridge 会 spawn `codex app-server` | `npm i -g @openai/codex`，或安装 Codex.app，或用环境变量 `CODEX_BIN` 指向已有二进制 |
 | **Codex 已登录** | app-server 需要 `~/.codex/auth.json` | 运行 `codex login` |
-| **飞书 / Lark 账号** | 且该租户允许「扫码创建应用」（个人/开发者租户一般可以；部分企业租户由管理员限制） | 首次 `start` 时扫码即可创建 |
+| **飞书 / Lark 账号** | 且该租户允许「扫码创建应用」（个人/开发者租户一般可以；部分企业租户由管理员限制） | 首次 `run` 时扫码即可创建 |
 
 > 不需要单独安装 `lark-cli`：出入站全部走 `@larksuiteoapi/node-sdk` 的长连接。
 
@@ -62,38 +62,51 @@
 ### 1. 安装
 
 ```bash
-# 推荐：全局安装到稳定路径（后台常驻服务需要稳定的 CLI 路径）
+# 推荐：全局安装到稳定路径（后台 daemon 需要稳定的 CLI 路径）
 npm i -g github:modelzen/feishu-codex-bridge
 
-# 或：只想先试一下 / 只为完成首次扫码（免安装，单次运行）
-npx -y github:modelzen/feishu-codex-bridge start
+# 或：免安装、单次前台运行（首次会自动构建）
+npx -y github:modelzen/feishu-codex-bridge run
 ```
 
-> 安装时会自动构建（`prepare` 钩子，无需手动 `npm run build`）；装好后命令名是 `feishu-codex-bridge`。
+> 安装只装命令、**不会自动建机器人**（`prepare` 钩子自动构建）；装好后命令名是 `feishu-codex-bridge`。
 
-### 2. 首次扫码 onboarding（前台跑一次，一次性）
+### 2. 前台启动（`run`）
 
 ```bash
-feishu-codex-bridge start
+feishu-codex-bridge run
 ```
 
-这是**交互式扫码**，需前台跑一次：检查 codex → 扫码自动创建/授权飞书应用（密钥进本地加密库）→ 校验凭据并**打印「一键开通全部权限」链接**（点开一次性开通）→ 起长连接。完成后还要去飞书后台**订阅事件**（见下节），然后 Ctrl-C 退出。
+`run` 没配置时会**先扫码 init**：检查 codex → 扫码创建/授权飞书应用（密钥进本地加密库）→ 校验凭据并**自动打开浏览器到「一键开通全部权限」页**（同时打印链接）→ 起长连接。**Ctrl+C 优雅退出**（关掉所有 codex 子进程，无孤儿）。支持 npx。
 
-### 3. 转后台常驻（推荐 —— 日常就这么跑）
+> 权限即时生效：`run` 跑着时直接在浏览器开通权限即可，无需重启。另外还要去飞书后台**订阅事件 + 发布版本**（见下节）。
 
-onboarding 完成后注册成后台服务：**开机自启、崩溃自动拉起、关掉终端也照跑**。
+### 3. 后台 daemon（`start` —— 日常这么跑）
 
 ```bash
-feishu-codex-bridge service install launchd   # macOS launchd 用户代理
-feishu-codex-bridge service status            # 状态 / pid / 上次退出码
-feishu-codex-bridge service logs              # 跟踪日志
-feishu-codex-bridge service restart
-feishu-codex-bridge service uninstall
+feishu-codex-bridge start      # 装 launchd 并启动：开机自启、崩溃自动拉起、关终端照跑
+feishu-codex-bridge status     # 状态 / pid / 日志路径 / 上次退出码
+feishu-codex-bridge logs -f    # 跟踪日志
+feishu-codex-bridge restart    # 重启
+feishu-codex-bridge stop       # 停止并关闭开机自启
 ```
 
-> ⚠️ **后台服务必须用全局安装（`npm i -g`），不要用 npx 跑服务**：launchd plist 里硬编码了 CLI 路径，而 npx 的临时缓存（`~/.npm/_npx/...`）会被清理，缓存一没服务就起不来。前台 `start` 扫码用 npx 没问题（单次进程）。
->
-> 前台直接跑（`feishu-codex-bridge start` / `./scripts/dev-run.sh`）只适合**首次扫码或开发调试**，不要用来长期挂着。
+`start` 会**先在当前终端完成 init**（没配置则扫码），并**阻塞到授权完成**——权限全部开通、且你确认已订阅事件/发布版本——才真正装服务，绝不会装一个收不到消息的空壳。daemon 体跑的就是 `run`。
+
+> ⚠️ **后台 daemon 必须全局安装（`npm i -g`），不要用 npx**：launchd plist 里硬编码了 CLI 路径，而 npx 的临时缓存（`~/.npm/_npx/...`）会被清理，缓存一没服务就起不来。前台 `run` 用 npx 没问题（单次进程）。
+
+### 4. 多飞书机器人（可选）
+
+一台机器可保存多个机器人配置，运行时只用「当前」一个：
+
+```bash
+feishu-codex-bridge bot init [名]   # 再注册一个飞书应用并授权（额外机器人）
+feishu-codex-bridge bot list        # 列出已注册机器人（👉 标当前）
+feishu-codex-bridge bot use <名>    # 切换 run / start 启动时使用的机器人
+feishu-codex-bridge bot rm <名>     # 移除一个机器人配置
+```
+
+每个机器人的 projects / sessions 各自独立（`~/.feishu-codex-bridge/bots/<appId>/`）。切换后前台 `run` 直接生效，后台 `restart` 生效。
 
 自检随时可用：`feishu-codex-bridge doctor`。
 
@@ -105,7 +118,7 @@ feishu-codex-bridge service uninstall
 
 ### 1）开通权限（Scope）
 
-启动时若有缺失权限，终端会打印形如 `https://open.feishu.cn/app/<app_id>/auth?q=...` 的链接，**点开 → 一次性勾选全部 → 确认**即可（即时生效、无需重启）。
+启动时若有缺失权限，会**自动打开浏览器**到形如 `https://open.feishu.cn/app/<app_id>/auth?q=...` 的页面（同时在终端打印链接），**一次性勾选全部 → 确认**即可（即时生效、无需重启）。`start`（后台 daemon）会阻塞到这步开通完成才装服务。
 
 本桥需要的全部权限以 [`src/config/scopes.ts`](src/config/scopes.ts) 的 `REQUIRED_SCOPES` 为权威清单，包含：收群 @ 消息 / 全量群消息（免 @）/ 私聊消息、以机器人身份发消息与回话题、消息置顶、表情回复、上传下载资源、建群 / 转让群主、群公告读写、置顶横幅、群标签页、交互卡片。**这些都在首次开通链接里一并申请，正常用不会再遇到「权限不足」。**
 
@@ -145,11 +158,14 @@ feishu-codex-bridge service uninstall
 
 | 文件 | 内容 |
 |------|------|
-| `config.json` | 应用 id / 租户 / 偏好（**不含明文密钥**） |
-| `secrets.enc` + `.keystore.salt` | AES-256-GCM 加密的应用密钥（密钥由机器 + 用户派生） |
-| `projects.json` | 群 → 目录 + 默认参数 注册表 |
-| `sessions.json` | 话题 → Codex thread_id + cwd |
+| `bots.json` | 已注册机器人列表 + 当前选中（`current`） |
+| `bots/<appId>/config.json` | 该机器人的 id / 租户 / 偏好（**不含明文密钥**） |
+| `bots/<appId>/projects.json` | 群 → 目录 + 默认参数 注册表（**按机器人隔离**） |
+| `bots/<appId>/sessions.json` | 话题 → Codex thread_id + cwd（**按机器人隔离**） |
+| `secrets.enc` + `.keystore.salt` | AES-256-GCM 加密的应用密钥（按 appId 存，多机器人共用一库；密钥由机器 + 用户派生） |
 | `media/` | 临时媒体 |
+
+> 旧版单机器人布局（顶层 `config.json` / `projects.json` / `sessions.json`）会在首次运行时**自动迁移**为名为 `default` 的机器人。
 
 环境变量：
 
@@ -166,10 +182,12 @@ feishu-codex-bridge service uninstall
 ## 🛠 CLI 一览
 
 ```
-feishu-codex-bridge start              扫码 onboarding + 启动 bot（前台）
-feishu-codex-bridge doctor             本地自检：codex / 登录 / lark-cli / 配置
+feishu-codex-bridge run                前台启动（没配置先扫码 init；Ctrl+C 优雅退出）
+feishu-codex-bridge start              后台 daemon 启动（装 launchd 开机自启；阻塞到授权完成）
+feishu-codex-bridge stop|restart|status|logs   后台 daemon 生命周期
+feishu-codex-bridge bot init|list|use|rm       多飞书机器人：注册 / 列表 / 切当前 / 移除
+feishu-codex-bridge doctor             本地自检：codex / 登录 / lark-cli / 当前机器人
 feishu-codex-bridge secrets get|set <id>|list|remove <id>    本地加密密钥库
-feishu-codex-bridge service ...        后台常驻服务（见上）
 ```
 
 ---
@@ -193,9 +211,9 @@ src/
   card/       流式运行卡片、命令卡、回调分发
   agent/      Codex app-server 后端（进程生命周期、JSON-RPC、事件映射、协议类型）
   project/    项目注册表、建群/公告/标签页 onboarding、生命周期
-  config/     加密密钥库、密钥解析、配置存储、scope 清单、路径
+  config/     加密密钥库、密钥解析、配置存储、多机器人注册表、scope 清单、路径
   core/       watchdog、单实例锁、日志
-  cli/        commander 命令（start / doctor / secrets / service）
+  cli/        commander 命令（run / start / stop / restart / status / logs / bot / doctor / secrets）
   service/    launchd 后台服务
 ```
 
@@ -208,9 +226,9 @@ src/
 | 现象 | 排查 |
 |------|------|
 | `✗ 未找到 codex CLI` | 装 Codex 并 `codex login`；或设 `CODEX_BIN`。`doctor` 会显示解析到的路径 |
-| `应用凭据校验失败` | 应用可能被禁用/未发布；重跑 `start` 走扫码 |
+| `应用凭据校验失败` | 应用可能被禁用/未发布；重跑 `run` 重新校验，或 `bot rm <名>` 后 `bot init` 重新扫码 |
 | @ 机器人没反应 | 多半是**事件未订阅**（长连接模式）或**版本未发布**；按上面「后台配置」检查 |
-| 提示某项「权限不足」 | 点 `start` 打印的一键开通链接补齐权限（即时生效） |
+| 提示某项「权限不足」 | 点 `run`/`start` 打印（或自动打开）的一键开通链接补齐权限（即时生效） |
 | 按钮「时灵时不灵」 | 检查是否**重复启动了两个 bridge 进程**抢回调；本桥有单实例锁，正常会拒绝第二个 |
 | 点 ⏹ 没反应 / 卡片不收尾 | 同群另一话题在跑长任务占住了串行队列；稍候或重连 |
 
