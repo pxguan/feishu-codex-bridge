@@ -1,4 +1,4 @@
-import type { CardActionEvent, LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
+import type { CardActionEvent, CommentEvent, LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { createBackend } from '../agent';
 import type { AgentRun, AgentThread, ModelInfo, ReasoningEffort } from '../agent/types';
 import {
@@ -17,6 +17,7 @@ import { saveConfig } from '../config/store';
 import { CardDispatcher } from '../card/dispatcher';
 import { sendManagedCard, updateManagedCard } from '../card/managed';
 import { RunRender } from '../card/run-render';
+import { finalMessageText, initialState, reduce, type RunState } from '../card/run-state';
 import {
   buildHelpCard,
   buildModelCard,
@@ -51,6 +52,16 @@ import { refreshBranch } from '../project/announcement';
 import { transferOwnership } from '../project/group-ops';
 import { getSession, listSessions, patchSession, upsertSession, type SessionRecord } from './session-store';
 import { handleDmConsole } from './dm-console';
+import {
+  addCommentReaction,
+  buildCommentPrompt,
+  postCommentReply,
+  removeCommentReaction,
+  REPLY_MAX_CHARS,
+  resolveComment,
+  stripMarkdown,
+  SUPPORTED_FILE_TYPES,
+} from './comments';
 import { Semaphore, withIdleTimeout } from './watchdog';
 
 interface ActiveState {
@@ -76,6 +87,8 @@ interface RunReaction {
 
 export interface Orchestrator {
   onMessage: (msg: NormalizedMessage) => Promise<void>;
+  /** `comment` event handler: @bot in a cloud-doc comment → reply in-thread. */
+  onComment: (evt: CommentEvent) => Promise<void>;
   dispatcher: CardDispatcher;
   /** Close every live codex session (SIGKILLs the app-server children) so a
    *  graceful exit leaves no orphan processes. */
@@ -109,6 +122,8 @@ export function createOrchestrator(
   const backend = createBackend();
   const sessions = new Map<string, AgentThread>();
   const active = new Map<string, ActiveState>();
+  /** Per-doc serialization for comment runs (see {@link withDocLock}). */
+  const docLocks = new Map<string, Promise<void>>();
   const sema = new Semaphore(getMaxConcurrentRuns(cfg));
   const idleMs = getRunIdleTimeoutMs(cfg) ?? 0;
   // pendingPolicy is read per-message (settings card can change it live)
@@ -1109,6 +1124,164 @@ export function createOrchestrator(
     }
   }
 
+  // ── cloud-doc comments ────────────────────────────────────────────
+  /**
+   * `comment` event: someone @-mentioned the bot in a Feishu doc comment
+   * (drive.notice.comment_add_v1). There's no streaming card here — we mark the
+   * triggering reply with a "Typing" reaction, run one codex turn, and post the
+   * answer back into the same comment thread. One codex thread per document
+   * (keyed `doc:<fileToken>`), so repeated @-mentions in a doc continue the same
+   * conversation; it shares the session store + concurrency semaphore with the
+   * group run loop. Comment runs aren't interruptible (no ⏹ card) — the idle
+   * watchdog is the only kill switch.
+   */
+  const onComment = async (evt: CommentEvent): Promise<void> => {
+    await withTrace({ chatId: 'comment' }, async () => {
+      log.info('comment', 'enter', {
+        doc: evt.fileToken,
+        fileType: evt.fileType,
+        commentId: evt.commentId,
+        replyId: evt.replyId ?? null,
+        mentionedBot: evt.mentionedBot,
+        sender: evt.operator.openId,
+      });
+      if (!evt.mentionedBot) return log.info('comment', 'skip', { reason: 'not-mentioned' });
+      if (!SUPPORTED_FILE_TYPES.has(evt.fileType))
+        return log.info('comment', 'skip', { reason: 'unsupported-fileType', fileType: evt.fileType });
+      if (!isUserAllowed(cfg, evt.operator.openId))
+        return log.info('comment', 'skip', { reason: 'not-allowed' });
+
+      const resolved = await resolveComment(channel, evt);
+      if (!resolved) return log.info('comment', 'skip', { reason: 'no-target-or-empty' });
+      const { target, ctx } = resolved;
+      log.info('comment', 'parsed', { isWhole: ctx.isWhole, hasQuote: Boolean(ctx.quote) });
+
+      const prompt = buildCommentPrompt(target, ctx, cfg.accounts.app.tenant);
+      const sessionKey = `doc:${evt.fileToken}`;
+
+      // Best-effort "received" feedback up-front (comments have no streaming
+      // UI). Added before the per-doc lock so a queued mention still acks
+      // immediately; cleared in the finally regardless of how the run ends.
+      const reacted = ctx.targetReplyId
+        ? await addCommentReaction(channel, target, ctx.targetReplyId)
+        : false;
+
+      try {
+        // Serialize per document: one codex thread can't run two turns at once
+        // (they'd both consume the thread's single app-server notification
+        // stream and steal each other's events), so concurrent @-mentions in
+        // the SAME doc must queue. Different docs run in parallel (distinct
+        // threads); the global cap is still `sema`, acquired inside the lock.
+        await withDocLock(sessionKey, async () => {
+          const release = await sema.acquire();
+          try {
+            const thread = await resolveDocThread(sessionKey, ctx.question);
+            const rec = await getSession(sessionKey);
+            const run = thread.runStreamed({ text: prompt }, { model: rec?.model, effort: rec?.effort });
+
+            let state: RunState = initialState;
+            let timedOut = false;
+            const guarded = withIdleTimeout(run.events, idleMs, () => {
+              timedOut = true;
+            });
+            for await (const ev of guarded) state = reduce(state, ev);
+
+            if (timedOut) {
+              const tid = run.turnId();
+              // Recycle the thread so the hung turn's never-terminating stream
+              // doesn't poison the next comment; the doc resumes from the
+              // persisted thread on its next @-mention. Fire-and-forget the
+              // interrupt — turn/interrupt is an unbounded JSON-RPC round-trip,
+              // and close() SIGKILLs the child anyway, so awaiting it here would
+              // pin both the per-doc lock and a global semaphore slot if it
+              // hangs. sessions.delete stays synchronous + before release() so
+              // the next queued same-doc comment always starts fresh.
+              if (tid) void thread.abort(tid).catch(() => undefined);
+              void thread.close().catch(() => undefined);
+              sessions.delete(sessionKey);
+            } else {
+              await patchSession(sessionKey, { updatedAt: Date.now() });
+            }
+
+            let reply = stripMarkdown(finalMessageText(state)).trim();
+            if (state.terminal === 'error' && state.errorMsg) reply = `⚠️ 出错了：${state.errorMsg}`;
+            if (!reply) reply = timedOut ? '（处理超时，请重试或把问题问得更具体些）' : '（没有可回复的内容）';
+            if (reply.length > REPLY_MAX_CHARS) reply = `${reply.slice(0, REPLY_MAX_CHARS - 1)}…`;
+
+            await postCommentReply(channel, target, evt, reply).catch((err) =>
+              log.fail('comment', err, { step: 'postCommentReply' }),
+            );
+            log.info('comment', 'done', { terminal: state.terminal, timedOut, len: reply.length });
+          } finally {
+            release();
+          }
+        });
+      } catch (err) {
+        log.fail('comment', err, { step: 'run' });
+      } finally {
+        if (reacted && ctx.targetReplyId)
+          await removeCommentReaction(channel, target, ctx.targetReplyId).catch(() => undefined);
+      }
+    }).catch((err) => log.fail('comment', err));
+  };
+
+  /**
+   * Run `fn` serially per `key`: each call chains after the previous one for the
+   * same key (so same-doc comment turns never overlap), while different keys run
+   * concurrently. The map entry is dropped once its chain fully drains.
+   */
+  function withDocLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = docLocks.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn); // run regardless of the prior call's outcome
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    docLocks.set(key, tail);
+    void tail.then(() => {
+      if (docLocks.get(key) === tail) docLocks.delete(key);
+    });
+    return run;
+  }
+
+  /** Reuse the in-memory codex thread for a doc, else resume the persisted one,
+   * else start a fresh thread bound to `doc:<fileToken>` (cwd = fallbackCwd —
+   * doc replies rarely touch the filesystem, but we keep a sane default). */
+  async function resolveDocThread(sessionKey: string, question: string): Promise<AgentThread> {
+    const live = sessions.get(sessionKey);
+    if (live) return live;
+    const rec = await getSession(sessionKey);
+    if (rec) {
+      try {
+        const resumed = await backend.resumeThread({
+          cwd: rec.cwd,
+          codexThreadId: rec.codexThreadId,
+          model: rec.model,
+          effort: rec.effort,
+        });
+        sessions.set(sessionKey, resumed);
+        return resumed;
+      } catch (err) {
+        log.fail('agent', err, { phase: 'comment-resume', sessionKey });
+      }
+    }
+    const { model, effort } = pickDefault(await listModels());
+    const fresh = await backend.startThread({ cwd: fallbackCwd, model, effort });
+    sessions.set(sessionKey, fresh);
+    await upsertSession({
+      threadId: sessionKey,
+      chatId: sessionKey,
+      cwd: fallbackCwd,
+      codexThreadId: fresh.codexThreadId,
+      model,
+      effort,
+      summary: question.slice(0, 80),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    return fresh;
+  }
+
   async function shutdown(): Promise<void> {
     const live = [...sessions.values()];
     sessions.clear();
@@ -1118,7 +1291,7 @@ export function createOrchestrator(
     log.info('bridge', 'shutdown', { closed: live.length });
   }
 
-  return { onMessage, dispatcher, shutdown };
+  return { onMessage, onComment, dispatcher, shutdown };
 }
 
 /** Resolve a message's thread_id via raw API (reply response omits it). */

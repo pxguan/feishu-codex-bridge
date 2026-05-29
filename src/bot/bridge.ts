@@ -46,6 +46,9 @@ export async function startBridge(opts: BridgeOptions): Promise<BridgeHandle> {
   const orchestrator = createOrchestrator(channel, opts.cfg, opts.fallbackCwd);
   channel.on('message', orchestrator.onMessage);
   channel.on('cardAction', orchestrator.dispatcher.handle);
+  // Cloud-doc comments: @bot in a doc comment (drive.notice.comment_add_v1) →
+  // reply in the same comment thread.
+  channel.on('comment', orchestrator.onComment);
   channel.on('reject', (evt) => log.info('intake', 'reject', { reason: evt.reason, msgId: evt.messageId }));
   channel.on('error', (err) => log.fail('ws', err));
   channel.on('reconnecting', () => log.info('ws', 'reconnecting'));

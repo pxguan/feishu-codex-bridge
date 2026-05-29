@@ -172,6 +172,9 @@ export async function confirmReadyForDaemon(result: OnboardResult): Promise<bool
   console.log('       这页顶部有三个标签：「事件配置」「回调配置」「加密策略」。');
   console.log('       • 切到「事件配置」标签 → 「订阅方式」改「长连接」→ 点「添加事件」搜并勾选：');
   console.log('           im.message.receive_v1（接收消息）、application.bot.menu_v6（机器人菜单）');
+  console.log('       • （可选）想要「在飞书文档评论里 @机器人就自动回复」，再加这一个事件：');
+  console.log('           drive.notice.comment_add_v1（云文档新增评论）');
+  console.log('           它依赖「文档评论」权限（docs:document.comment:read / :create，授权链接已预勾选）；不加则该功能静默关闭。');
   console.log('       • 切到「回调配置」标签 → 「订阅方式」改「长连接」→ 点「添加回调」勾选：');
   console.log('           card.action.trigger（卡片回传交互）');
   console.log('           ⚠️ 它是「回调」不是「事件」——在上面「添加事件」里搜不到，必须切到「回调配置」这个标签。');

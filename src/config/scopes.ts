@@ -11,7 +11,9 @@ import type { TenantBrand } from './schema';
  * we point the user at one console URL that pre-selects *all* of these at
  * once — scan once, click once. See {@link buildScopeGrantUrl}.
  *
- * `drive:drive` (cloud-doc comments) is optional and intentionally omitted.
+ * Cloud-doc comment scopes live in {@link COMMENT_SCOPES}, NOT here: the
+ * comment-reply feature is an opt-in enhancement, so it must never block the
+ * daemon-install scope gate (which loops on REQUIRED_SCOPES until granted).
  */
 export const REQUIRED_SCOPES = [
   // Feishu has split the old umbrella scopes (`im:chat`, `im:message`) into
@@ -34,6 +36,32 @@ export const REQUIRED_SCOPES = [
   'cardkit:card:write', // interactive button cards (CardKit entities)
 ] as const;
 
+/**
+ * Optional scopes for the cloud-doc comment-reply feature (@bot inside a Feishu
+ * doc comment → reply in-thread). Pre-selected in the one-click grant URL so a
+ * user who wants the feature gets them in the same click, but deliberately NOT
+ * in {@link REQUIRED_SCOPES}: the daemon-install gate loops on REQUIRED_SCOPES
+ * until granted, and we must not block the (messaging) bot on an opt-in extra.
+ * Without these, the comment event simply isn't pushed / the API calls fail and
+ * we log + skip — everything else still works.
+ *
+ * Names are exact Feishu fine-grained tokens (verified against the API docs +
+ * the official lark CLI scope registry). `:read` covers reading the comment AND
+ * receiving the `drive.notice.comment_add_v1` event; `:create` covers posting
+ * the reply and the comment "Typing" reaction; `wiki:wiki:readonly` (umbrella
+ * readonly — chosen over the fine-grained `wiki:node:read` to dodge the
+ * singular/plural scope-name pitfall, cf. c6317e7) resolves knowledge-base
+ * (wiki) nodes to their underlying doc token.
+ */
+export const COMMENT_SCOPES = [
+  'docs:document.comment:read',
+  'docs:document.comment:create',
+  'wiki:wiki:readonly',
+] as const;
+
+/** Everything the one-click grant URL pre-selects: required + opt-in comment. */
+export const GRANT_SCOPES = [...REQUIRED_SCOPES, ...COMMENT_SCOPES] as const;
+
 const HOSTS: Record<TenantBrand, string> = {
   feishu: 'open.feishu.cn',
   lark: 'open.larksuite.com',
@@ -43,12 +71,14 @@ const HOSTS: Record<TenantBrand, string> = {
  * Developer-console URL that pre-selects every scope in `scopes` for the app,
  * so the user enables them all on a single page. Mirrors larksuite/cli's
  * format (`/app/<id>/auth?q=<comma-joined>`); scopes are URL-encoded so a
- * stray `&`/`#` can't inject extra query params.
+ * stray `&`/`#` can't inject extra query params. Defaults to {@link GRANT_SCOPES}
+ * (required + opt-in comment) so the comment feature is one click away; the
+ * missing-scope gate still only enforces {@link REQUIRED_SCOPES}.
  */
 export function buildScopeGrantUrl(
   appId: string,
   tenant: TenantBrand,
-  scopes: readonly string[] = REQUIRED_SCOPES,
+  scopes: readonly string[] = GRANT_SCOPES,
 ): string {
   const host = HOSTS[tenant];
   const q = encodeURIComponent(scopes.join(','));

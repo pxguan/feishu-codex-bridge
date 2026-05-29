@@ -65,6 +65,21 @@ export function reasoningContent(state: RunState): string {
     .join('\n\n');
 }
 
+/**
+ * The agent's FINAL message — the content of the last non-empty text block.
+ * Codex emits several agentMessage items per turn (progress/preamble messages
+ * plus the actual answer); for a one-shot reply with no streaming UI (a
+ * cloud-doc comment) we want only the last one, not all of them concatenated.
+ * Returns '' if the turn produced no text.
+ */
+export function finalMessageText(state: RunState): string {
+  for (let i = state.blocks.length - 1; i >= 0; i--) {
+    const b = state.blocks[i];
+    if (b && b.kind === 'text' && b.content.trim()) return b.content.trim();
+  }
+  return '';
+}
+
 function closeStreamingText(blocks: Block[]): Block[] {
   return blocks.map((b) => (b.kind === 'text' && b.streaming ? { ...b, streaming: false } : b));
 }
