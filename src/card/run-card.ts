@@ -3,6 +3,7 @@ import {
   button,
   card,
   collapsiblePanel,
+  collapsiblePanelEl,
   md,
   noteMd,
   type CardElement,
@@ -25,6 +26,14 @@ export const RC = {
 const REASONING_MAX = 1500;
 /** Collapse N tool calls into one summary panel at/above this count. */
 const COLLAPSE_TOOL_THRESHOLD = 3;
+/**
+ * Serialized-size budget for the terminal "过程" panel's body. Nesting every
+ * reasoning/tool panel under one collapsible_panel can push that single element
+ * past Feishu's ~30KB per-element limit and 400 the card; over budget we degrade
+ * tool blocks to header-only summaries (no output bodies). Mirrors the
+ * history-card budget guard. Kept under 30KB for wrapper/answer headroom.
+ */
+const PROCESS_BODY_BUDGET = 22_000;
 
 /** Routing + render inputs for one run card. */
 export interface RunCardState {
@@ -44,10 +53,22 @@ export interface RunCardState {
  * calls as collapsible panels; text streams in order). Modeled on
  * zara/feishu-claude-code-bridge `src/card/run-renderer.ts`. While running the
  * card carries streaming_mode so whole-card updates animate the text delta.
+ *
+ * Two layouts: while RUNNING everything streams expanded (reasoning, tools and
+ * preamble text inline) so the user watches progress live; once TERMINAL the
+ * whole "process" (reasoning + tools + every text block except the final one)
+ * folds into a single collapsed panel and only the final answer stays open —
+ * see {@link renderTerminal}.
  */
 export function buildRunCard(rc: RunCardState): CardObject {
   const state = rc.rs;
   const running = state.terminal === 'running';
+  const elements = running ? renderRunning(state, rc) : renderTerminal(state, rc);
+  return card(elements, { streaming: running, summary: summaryText(state) });
+}
+
+/** Live layout: reasoning + tools + text all inline, plus footer status and ⏹. */
+function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
   const elements: CardElement[] = [];
 
   const reasoning = reasoningContent(state);
@@ -58,9 +79,48 @@ export function buildRunCard(rc: RunCardState): CardObject {
     if (group.kind === 'text') {
       if (group.content.trim()) elements.push(md(group.content));
     } else {
-      elements.push(...renderToolGroup(group.tools, !running));
+      elements.push(...renderToolGroup(group.tools, false));
     }
   }
+
+  if (state.footer) elements.push(footerStatus(state.footer));
+  if (rc.cardKey) elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')]));
+  return elements;
+}
+
+/**
+ * Terminal layout: fold the process (reasoning + tools + every non-final text
+ * block) into one collapsed panel and surface only the final answer below it.
+ * The final answer is the last non-empty text block (codex emits preamble /
+ * progress messages before the real reply). Interrupt / error / timeout still
+ * land here — whatever process happened folds away and the status note shows;
+ * a partial answer (if any text streamed) stays visible above the note.
+ */
+function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
+  const elements: CardElement[] = [];
+
+  const answerIdx = lastTextIndex(state.blocks);
+  const answer = answerIdx >= 0 ? (state.blocks[answerIdx] as Extract<Block, { kind: 'text' }>).content.trim() : '';
+
+  // Everything except the final answer block is "process". (A block after the
+  // answer can only be a trailing tool call — keep it folded with the rest.)
+  const processBlocks = state.blocks.filter((_, i) => i !== answerIdx);
+  const blocks = rc.showTools === false ? processBlocks.filter((b) => b.kind !== 'tool') : processBlocks;
+  const reasoning = reasoningContent(state);
+  const processEls = buildProcessBody(reasoning, blocks);
+  if (processEls.length > 0) {
+    const toolCount = blocks.reduce((n, b) => (b.kind === 'tool' ? n + 1 : n), 0);
+    elements.push(
+      collapsiblePanelEl({
+        title: processTitle(Boolean(reasoning), toolCount),
+        expanded: false,
+        border: 'grey',
+        elements: processEls,
+      }),
+    );
+  }
+
+  if (answer) elements.push(md(answer));
 
   if (state.terminal === 'interrupted') {
     elements.push(noteMd('_⏹ 已被中断_'));
@@ -68,16 +128,60 @@ export function buildRunCard(rc: RunCardState): CardObject {
     elements.push(noteMd(`_⏱ ${state.idleTimeoutMinutes ?? 0} 分钟无响应，已自动终止_`));
   } else if (state.terminal === 'error' && state.errorMsg) {
     elements.push(noteMd(`⚠️ agent 失败：${state.errorMsg}`));
-  } else if (state.terminal === 'done' && elements.length === 0) {
+  } else if (state.terminal === 'done' && !answer) {
     elements.push(noteMd('_（未返回内容）_'));
   }
 
-  if (running) {
-    if (state.footer) elements.push(footerStatus(state.footer));
-    if (rc.cardKey) elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')]));
-  }
+  return elements;
+}
 
-  return card(elements, { streaming: running, summary: summaryText(state) });
+/** Index of the last non-empty text block (the final answer), or -1 if none. */
+function lastTextIndex(blocks: Block[]): number {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    if (b && b.kind === 'text' && b.content.trim()) return i;
+  }
+  return -1;
+}
+
+/**
+ * Body of the terminal "过程" panel. Renders reasoning + interleaved text/tool
+ * groups (tools finalized). Guards the ~30KB per-element limit: if the rich body
+ * (with tool-output bodies) exceeds {@link PROCESS_BODY_BUDGET}, rebuild it with
+ * every tool group degraded to a header-only summary.
+ */
+function buildProcessBody(reasoning: string, blocks: Block[]): CardElement[] {
+  const rich = processElements(reasoning, blocks, false);
+  if (estimateSize(rich) <= PROCESS_BODY_BUDGET) return rich;
+  return processElements(reasoning, blocks, true);
+}
+
+function processElements(reasoning: string, blocks: Block[], compactTools: boolean): CardElement[] {
+  const out: CardElement[] = [];
+  if (reasoning) out.push(reasoningPanel(reasoning, false));
+  for (const group of groupBlocks(blocks)) {
+    if (group.kind === 'text') {
+      if (group.content.trim()) out.push(md(group.content));
+    } else {
+      out.push(...renderToolGroup(group.tools, true, compactTools));
+    }
+  }
+  return out;
+}
+
+function processTitle(hasReasoning: boolean, toolCount: number): string {
+  const parts: string[] = [];
+  if (hasReasoning) parts.push('🧠 思考');
+  if (toolCount > 0) parts.push(`🧰 ${toolCount} 个工具调用`);
+  const detail = parts.length > 0 ? `：${parts.join(' · ')}` : '';
+  return `🗂 **过程${detail}**（点击展开）`;
+}
+
+/** Rough serialized size of an element list, for the process-panel budget. */
+function estimateSize(els: CardElement[]): number {
+  let n = 0;
+  for (const el of els) n += JSON.stringify(el).length;
+  return n;
 }
 
 /** Button-less version — used to demote a previous turn's card. */
@@ -111,8 +215,10 @@ function* groupBlocks(blocks: Block[]): Generator<Group> {
   if (toolBuf.length > 0) yield { kind: 'tools', tools: toolBuf };
 }
 
-function renderToolGroup(tools: ToolEntry[], finalized: boolean): CardElement[] {
+function renderToolGroup(tools: ToolEntry[], finalized: boolean, compact = false): CardElement[] {
   if (tools.length === 0) return [];
+  // compact (process-panel over budget): header-only summary, drop output bodies.
+  if (compact) return [collapsedToolSummary(tools, true)];
   if (tools.length < COLLAPSE_TOOL_THRESHOLD) {
     return tools.map((t) => toolPanel(t, false));
   }
