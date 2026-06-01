@@ -6,6 +6,7 @@ import {
 } from '../config/schema';
 import type { Project } from '../project/registry';
 import type { SessionRecord } from '../bot/session-store';
+import { labelScope } from '../config/scopes';
 import { actions, button, card, form, hr, input, linkButton, md, note, submitButton, type CardElement, type CardObject } from './cards';
 import { relativeTime } from './command-cards';
 
@@ -255,8 +256,8 @@ function scopeDiagnosis(i: DoctorInfo): CardElement[] {
     return [md('- 飞书权限：✅ 必需权限已全部开通')];
   }
   return [
-    md(`- 飞书权限：❌ 缺 ${i.missingScopes.length} 项 —— 开通前相关功能（收发消息 / 卡片 / 建群等）不可用`),
-    note(`待开通：${i.missingScopes.join('　')}`),
+    md(`- 飞书权限：❌ 缺 ${i.missingScopes.length} 项 —— 开通前相关功能（收发消息 / 卡片 / 图片 / 建群等）不可用`),
+    note(`待开通：\n${i.missingScopes.map((s) => `· ${labelScope(s)}`).join('\n')}`),
     actions([linkButton('🔑 一键去开通这些权限', i.scopeGrantUrl)]),
   ];
 }

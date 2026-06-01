@@ -35,6 +35,8 @@ import {
 import { buildHistoryCard, type HistoryCardState } from '../card/history-card';
 import { buildRunCard, buildRunCardPlain, RC, type RunCardState } from '../card/run-card';
 import { RunCardStream } from '../card/run-card-stream';
+import { buildCleanCard, extractCardFences } from '../card/markdown-render';
+import { imageSources, uploadOutboundImages } from '../card/outbound-images';
 import { log, withTrace } from '../core/logger';
 import {
   buildDmMenuCard,
@@ -1249,11 +1251,33 @@ export function createOrchestrator(
         const finalMsgId = cardMsgId;
         await adoptThreadId(finalMsgId);
         rc.cardKey = finalMsgId;
+
+        // Outbound images + 卡片围栏 — only at terminal (uploads are slow; while
+        // streaming, ![](path) refs and ```feishu-card fences show as text). Scan
+        // the final answer once: upload every image ref (cached; covers both the
+        // run-card's inline images and any clean-card images), then post each
+        // ```feishu-card fence as a standalone clean card. Best-effort: a failed
+        // upload leaves the original markdown in place, a failed card is logged.
+        const answerText = finalMessageText(rc.rs);
+        const { fences } = extractCardFences(answerText);
+        const imgSources = imageSources(answerText);
+        if (imgSources.length > 0) {
+          rc.images = await uploadOutboundImages(channel, imgSources, opts.cwd ?? fallbackCwd);
+        }
+
         // terminal whole-card update: final render with streaming off (clears the
         // typewriter cursor) and no ⏹ button.
         await stream.updateCard(channel, buildRunCard(rc));
         runsByCard.delete(cardMsgId);
         promoteCard(finalMsgId, rc);
+
+        for (const fence of fences) {
+          try {
+            await sendManagedCard(channel, opts.chatId, buildCleanCard(fence, rc.images), finalMsgId, !opts.flat);
+          } catch (err) {
+            log.fail('card', err, { phase: 'clean-card' });
+          }
+        }
         if (topicThreadId) await patchSession(topicThreadId, { updatedAt: Date.now() });
         replyTo = finalMsgId;
         replyInThread = !opts.flat; // stay in the topic for queued turns (single: stay flat)

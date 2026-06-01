@@ -63,6 +63,39 @@ export const COMMENT_SCOPES = [
 /** Everything the one-click grant URL pre-selects: required + opt-in comment. */
 export const GRANT_SCOPES = [...REQUIRED_SCOPES, ...COMMENT_SCOPES] as const;
 
+/**
+ * Human-readable Chinese labels per scope token, so the doctor card can show
+ * *which capability* a missing scope gates ("图片上传/下载") instead of a cryptic
+ * `im:resource`. Keep keys in sync with {@link GRANT_SCOPES}; unknown tokens
+ * fall back to the raw name (see {@link labelScope}).
+ */
+export const SCOPE_LABELS: Record<string, string> = {
+  'im:message.group_at_msg:readonly': '接收群里 @机器人 的消息',
+  'im:message.group_msg': '接收群内所有消息（免@）',
+  'im:message.p2p_msg:readonly': '接收私聊消息（管理台）',
+  'im:message:send_as_bot': '发送消息 / 卡片',
+  'im:message.pins:write_only': '置顶消息到群 Pin',
+  'im:message.reactions:write_only': '消息表情回复（运行状态）',
+  'im:resource': '图片 / 文件上传与下载',
+  'im:chat:create': '创建项目群',
+  'im:chat:update': '转移群主（解绑时）',
+  'im:chat.managers:write_only': '设置群管理员',
+  'im:chat.announcement:read': '读取群公告',
+  'im:chat.announcement:write_only': '编辑群公告',
+  'im:chat.top_notice:write_only': '置顶群公告横幅',
+  'im:chat.tabs:write_only': '添加群标签页',
+  'cardkit:card:write': '交互按钮卡片',
+  'docs:document.comment:read': '读取文档评论',
+  'docs:document.comment:create': '发表文档评论回复',
+  'wiki:wiki:readonly': '读取知识库节点',
+};
+
+/** `<中文说明>（<token>）` for a known scope, else the raw token. */
+export function labelScope(scope: string): string {
+  const label = SCOPE_LABELS[scope];
+  return label ? `${label}（${scope}）` : scope;
+}
+
 const HOSTS: Record<TenantBrand, string> = {
   feishu: 'open.feishu.cn',
   lark: 'open.larksuite.com',

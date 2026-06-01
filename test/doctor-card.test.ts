@@ -125,6 +125,12 @@ describe('buildDoctorCard — 飞书权限自检', () => {
     expect(collectUrls(card)).toContain(GRANT); // grant button → developer-console auth page
   });
 
+  it('labels the image-upload scope so a missing im:resource reads as 图片, not a raw token', () => {
+    const json = JSON.stringify(buildDoctorCard(info({ missingScopes: ['im:resource'], scopeGrantUrl: GRANT })));
+    expect(json).toContain('图片'); // friendly label surfaces the capability
+    expect(json).toContain('im:resource'); // raw token still shown for the console
+  });
+
   it('confirms all granted (no grant button, stays blue) when missingScopes is empty', () => {
     const card = buildDoctorCard(info({ missingScopes: [], scopeGrantUrl: GRANT }));
     expect((card as { header: { template: string } }).header.template).toBe('blue');

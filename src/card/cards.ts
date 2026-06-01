@@ -75,6 +75,23 @@ export function mdStream(content: string, elementId: string): CardElement {
   return { tag: 'markdown', element_id: elementId, content };
 }
 
+/**
+ * An image element (schema 2.0 `img`). Renders an already-uploaded Feishu image
+ * by its `img_key` (from `im.v1.image.create`) — markdown `![](…)` syntax never
+ * renders in a card, so outbound images must be uploaded first (see
+ * {@link ../card/outbound-images}). `alt` is required by the schema (kept as the
+ * markdown alt text); `preview:true` lets the user tap to enlarge;
+ * `mode:'fit_horizontal'` shows the whole image at card width (no center-crop). */
+export function image(imgKey: string, alt = ''): CardElement {
+  return {
+    tag: 'img',
+    img_key: imgKey,
+    alt: { tag: 'plain_text', content: alt },
+    mode: 'fit_horizontal',
+    preview: true,
+  };
+}
+
 /** A grey note line (smaller, muted) — good for metadata. Schema 2.0 dropped
  * the `note` component; the equivalent is a plain-text block at `notation`
  * size in grey (lark_md so `code`/**bold** still render). */

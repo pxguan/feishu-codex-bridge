@@ -16,6 +16,7 @@ import {
   type RunState,
   type ToolEntry,
 } from './run-state';
+import { renderRichText } from './markdown-render';
 import { toolBodyMd, toolHeaderText } from './tool-render';
 
 /** Action ids for the in-topic run card. */
@@ -46,6 +47,9 @@ export interface RunCardState {
   requesterOpenId?: string;
   /** drop tool blocks from the render (pref) */
   showTools?: boolean;
+  /** `![](src) → image_key` for the final answer's images (populated at terminal
+   * after upload; absent while streaming, so refs show as text until then). */
+  images?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -120,7 +124,10 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
     );
   }
 
-  if (answer) elements.push(md(answer));
+  // Terminal answer: split out uploaded images into img elements and drop any
+  // ```feishu-card fence (it's hoisted into a standalone clean card). Streaming
+  // still renders plain md (renderRunning) — images aren't uploaded until now.
+  if (answer) elements.push(...renderRichText(answer, rc.images));
 
   if (state.terminal === 'interrupted') {
     elements.push(noteMd('_⏹ 已被中断_'));
