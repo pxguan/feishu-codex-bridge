@@ -1,6 +1,6 @@
 import type { CardActionEvent, CommentEvent, LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { createBackend } from '../agent';
-import type { AgentRun, AgentThread, ModelInfo, ReasoningEffort } from '../agent/types';
+import type { AgentInput, AgentRun, AgentThread, ModelInfo, ReasoningEffort } from '../agent/types';
 import {
   getMaxConcurrentRuns,
   getPendingPolicy,
@@ -72,6 +72,7 @@ import { refreshBranch } from '../project/announcement';
 import { transferOwnership } from '../project/group-ops';
 import { getSession, listSessions, patchSession, upsertSession, type SessionRecord } from './session-store';
 import { handleDmConsole } from './dm-console';
+import { collectInboundImages, messageHasImages } from './media';
 import {
   addCommentReaction,
   buildCommentPrompt,
@@ -88,7 +89,8 @@ interface ActiveState {
   /** unset only during the brief "reserved, still resolving the thread" window */
   thread?: AgentThread;
   run?: AgentRun;
-  queue: string[];
+  /** follow-up turns queued mid-run; each carries its own text + downloaded images */
+  queue: AgentInput[];
   /** who started this run — gates destructive ⏹ (design §5) */
   requesterOpenId?: string;
   /** ⏹ 终止: abort the codex turn AND end the local consume loop. Set per-turn
@@ -369,33 +371,73 @@ export function createOrchestrator(
     // Mid-turn: steer (引导) or queue (排队).
     const existing = active.get(sessionKey);
     if (existing) {
-      if (getPendingPolicy(cfg) === 'steer' && existing.run && existing.thread) {
-        const tid = existing.run.turnId();
+      // Download any images first (best-effort) so the steered/queued turn can
+      // carry them. Awaited here — the session is already held by a running
+      // turn, so there's no reservation race to protect; gated on
+      // messageHasImages so the common text path stays await-free and fast.
+      const images = messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined;
+      // The turn may have finished while images downloaded — re-read the session.
+      // If it's gone, start a fresh run (carrying the images we already fetched).
+      const cur = active.get(sessionKey);
+      if (!cur) {
+        startReservedRun(msg, text, sessionKey, flat, project, images);
+        return;
+      }
+      if (getPendingPolicy(cfg) === 'steer' && cur.run && cur.thread) {
+        const tid = cur.run.turnId();
         if (tid) {
           try {
-            await existing.thread.steer({ text }, tid);
-            log.info('intake', 'steer', { tid });
+            await cur.thread.steer({ text, images }, tid);
+            log.info('intake', 'steer', { tid, images: images?.length ?? 0 });
             return;
           } catch (err) {
             log.warn('intake', 'steer-failed', { err: String(err) });
           }
         }
       }
-      existing.queue.push(text);
-      log.info('intake', 'queued', { depth: existing.queue.length });
+      cur.queue.push({ text, images });
+      log.info('intake', 'queued', { depth: cur.queue.length });
       return;
     }
 
-    // Reserve the session synchronously (before any await) so a second message
-    // racing in through the SDK's per-chatId queue sees it and queues instead
-    // of double-launching. Then run **detached**: onMessage must return fast or
-    // it holds the chatId queue for the whole codex run, blocking sibling
-    // topics and the ⏹ card-action (design: 话题=独立 session，应并行).
+    startReservedRun(msg, text, sessionKey, flat, project);
+  }
+
+  /**
+   * Reserve `sessionKey` synchronously (before any await) so a second message
+   * racing in through the SDK's per-chatId queue sees it and queues instead of
+   * double-launching — including a message whose image download just finished
+   * and discovered the prior run had ended (handleTurn's fall-through). The
+   * synchronous check-then-set is the critical section; everything slow (image
+   * download, thread resolution, the codex run) runs **detached** so onMessage
+   * returns fast — holding the chatId queue would block sibling topics and the
+   * ⏹ card-action (design: 话题=独立 session，应并行).
+   */
+  function startReservedRun(
+    msg: NormalizedMessage,
+    text: string,
+    sessionKey: string,
+    flat: boolean,
+    project?: Project,
+    preloadedImages?: string[],
+  ): void {
+    const existing = active.get(sessionKey);
+    if (existing) {
+      // A run appeared between handleTurn's check and here (we awaited an image
+      // download) — queue onto it rather than launch a second turn.
+      existing.queue.push({ text, images: preloadedImages });
+      log.info('intake', 'queued', { depth: existing.queue.length });
+      return;
+    }
     const reserved: ActiveState = { queue: [], requesterOpenId: msg.senderId };
     active.set(sessionKey, reserved);
     void withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
       const reaction = runReaction(msg.messageId, !sema.hasFree());
       try {
+        // Images preloaded by handleTurn's fall-through, else fetch them now
+        // (inside the detached run, after the synchronous reservation).
+        const images =
+          preloadedImages ?? (messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined);
         let thread = await resolveThread(sessionKey, msg.chatId);
         if (!thread) {
           // Unknown session (created before this bridge, or store lost): treat as
@@ -422,6 +464,7 @@ export function createOrchestrator(
             flat,
             thread,
             firstText: text,
+            images,
             knownThreadId: sessionKey,
             requesterOpenId: msg.senderId,
           },
@@ -489,7 +532,9 @@ export function createOrchestrator(
         return;
       }
       const firstText = text || '你好，我们开始吧。';
-      log.info('card', 'start', { project: project?.name ?? '(unregistered)', model, effort });
+      // Download any attached/forwarded images so the opening turn can see them.
+      const images = messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined;
+      log.info('card', 'start', { project: project?.name ?? '(unregistered)', model, effort, images: images?.length ?? 0 });
       await launchRun(
         {
           chatId: msg.chatId,
@@ -497,6 +542,7 @@ export function createOrchestrator(
           replyInThread: true,
           thread,
           firstText,
+          images,
           model,
           effort,
           cwd,
@@ -1031,6 +1077,8 @@ export function createOrchestrator(
     replyInThread?: boolean;
     thread: AgentThread;
     firstText: string;
+    /** local image paths for the FIRST turn (codex reads them as localImage) */
+    images?: string[];
     /** when the topic thread_id is already known (turn in an existing topic) */
     knownThreadId?: string;
     model?: string;
@@ -1094,7 +1142,7 @@ export function createOrchestrator(
     // if the stream producer throws mid-turn (avoids leaking a stale stop target)
     let curCardKey: string | undefined;
     try {
-      let turnText = opts.firstText;
+      let turnInput: AgentInput = { text: opts.firstText, images: opts.images };
       let replyTo = opts.replyTo;
       let replyInThread = opts.flat ? false : (opts.replyInThread ?? Boolean(opts.knownThreadId));
       for (;;) {
@@ -1102,7 +1150,7 @@ export function createOrchestrator(
         const rec = topicThreadId ? await getSession(topicThreadId) : undefined;
         const turnModel = rec?.model ?? opts.model;
         const turnEffort = rec?.effort ?? opts.effort;
-        const run = opts.thread.runStreamed({ text: turnText }, { model: turnModel, effort: turnEffort });
+        const run = opts.thread.runStreamed(turnInput, { model: turnModel, effort: turnEffort });
         state.run = run;
         const render = new RunRender();
         render.showTools = getShowToolCalls(cfg);
@@ -1215,7 +1263,7 @@ export function createOrchestrator(
         // (they'd run on the recycled, now-closed thread).
         if (killed) break;
         if (state.queue.length === 0) break;
-        turnText = state.queue.shift()!;
+        turnInput = state.queue.shift()!;
       }
     } catch (err) {
       log.fail('intake', err);
