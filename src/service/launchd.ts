@@ -121,11 +121,19 @@ export async function restartLaunchd(): Promise<LaunchdStatus> {
   }
 
   if (isLoaded()) {
-    const bootout = runLaunchctl(['bootout', serviceTarget()]);
-    if (!bootout.ok) throw launchctlError('launchctl bootout', bootout);
-    await waitUntilUnloaded();
+    // kickstart -k 让 launchd 自己「杀掉旧实例 → 起新实例」。指令一旦投递给
+    // launchd 就与本进程脱钩，所以即便本进程**就是**被重启的 daemon（一键更新的
+    // 卡片回调正是跑在 daemon 里），被 SIGTERM 杀掉后 launchd 仍会拉起新实例。
+    // 绝不能用 bootout+bootstrap：bootout 先把本进程杀了，后面的 bootstrap 永远
+    // 执行不到 → 服务被移出 domain（KeepAlive 也随之失效）→ 永久卸载、无进程、
+    // 更新卡片永远停在「正在重启」。
+    const kick = runLaunchctl(['kickstart', '-k', serviceTarget()]);
+    if (!kick.ok) throw launchctlError('launchctl kickstart', kick);
+    return statusLaunchd();
   }
 
+  // 服务已安装但未加载（plist 在、domain 里却没有，例如上一版自杀式重启留下的
+  // 烂摊子）：bootstrap 直接拉起。
   const bootstrap = runLaunchctl(['bootstrap', userTarget(), launchAgentPlistPath()]);
   if (!bootstrap.ok) throw launchctlError('launchctl bootstrap', bootstrap);
   return statusLaunchd();
