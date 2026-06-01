@@ -16,6 +16,9 @@ function openChatUrl(chatId: string): string {
   return `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(chatId)}`;
 }
 
+/** Project home (matches package.json homepage/repository). */
+const REPO = 'https://github.com/modelzen/feishu-codex-bridge';
+
 /** Action ids for the DM (private chat) management console. */
 export const DM = {
   menu: 'dm.menu',
@@ -175,6 +178,115 @@ export function buildUpdateCard(state: UpdateCardState): CardObject {
         { header: { title: '⬆️ 版本更新', template: 'red' } },
       );
   }
+}
+
+/** Snapshot the doctor card renders + folds into a copy-paste prompt for codex.
+ * Gathered by the handler (file checks, versions, live connection state) so the
+ * builder stays pure and testable. */
+export interface DoctorInfo {
+  /** codex CLI resolvable and runnable (backend.isAvailable) */
+  codexOk: boolean;
+  /** codex --version string, or null if unresolved */
+  codexVer: string | null;
+  /** Feishu long-connection state (channel.getConnectionStatus().state) */
+  conn: string;
+  /** the bridge's own version */
+  bridgeVer: string;
+  /** process.version */
+  node: string;
+  /** `${platform}-${arch}` */
+  platform: string;
+  /** background daemon stdout log path (launchd) */
+  logStdout: string;
+  /** background daemon stderr log path (launchd) */
+  logStderr: string;
+  /** current bot's config.json path */
+  configFile: string;
+}
+
+/** Friendly label for a long-connection state; unknown states show raw. */
+function connLabel(state: string): string {
+  switch (state) {
+    case 'connected':
+      return '✅ 已连接';
+    case 'connecting':
+      return '⏳ 连接中';
+    case 'reconnecting':
+      return '↻ 重连中';
+    case 'disconnected':
+      return '❌ 已断开';
+    default:
+      return state;
+  }
+}
+
+/**
+ * The self-contained prompt the user copies into a project group and @s the bot
+ * with. Since codex runs locally on the same machine, handing it the absolute
+ * log paths lets it actually read the logs and diagnose. Keep this plain text
+ * (no markdown / backticks) — it's pasted verbatim as a chat message.
+ */
+function codexDiagnosePrompt(i: DoctorInfo): string {
+  return [
+    '我在用 feishu-codex-bridge（飞书 ↔ 本地 Codex 桥接）遇到问题，请帮我定位原因并给出修复步骤。',
+    '',
+    '【环境】',
+    `- bridge 版本：v${i.bridgeVer}`,
+    `- codex 版本：${i.codexVer ?? '未找到（PATH / CODEX_BIN 里都没有 codex）'}`,
+    `- Node：${i.node}`,
+    `- 平台：${i.platform}`,
+    `- 项目仓库：${REPO}`,
+    '',
+    '【运行快照】',
+    `- codex 可用：${i.codexOk ? '是' : '否'}`,
+    `- 飞书长连接：${i.conn}`,
+    '',
+    '【请你做的事】',
+    '1. 读取并分析日志，找出最近的报错或异常堆栈：',
+    `   - 后台守护输出日志：${i.logStdout}`,
+    `   - 后台守护错误日志：${i.logStderr}`,
+    '   （若是前台 feishu-codex-bridge run 模式，日志在启动它的终端窗口，请把终端里的报错一起发我）',
+    `2. 判断问题属于哪类：codex 启动 / 登录、飞书鉴权或权限不足、长连接断开、还是配置缺失（配置文件：${i.configFile}）。`,
+    `3. 必要时对照仓库 README 与 issues 给方案：${REPO}/issues`,
+    '4. 给出可直接执行的修复步骤。',
+    '',
+    '【我遇到的现象】',
+    '（在这里补充：比如 @机器人不回复 / 卡片按钮点了没反应 / 启动就报错……）',
+  ].join('\n');
+}
+
+/**
+ * Diagnostics card for the DM console (🩺 诊断). Top half is a quick local
+ * self-check (codex + long connection + version/platform); bottom half is a
+ * copy-paste code block the user hands to codex for a deep, log-backed
+ * diagnosis, plus repo / issue links. Sent as a reply (terminal card) — re-open
+ * the console by messaging the bot.
+ */
+export function buildDoctorCard(i: DoctorInfo): CardObject {
+  const prompt = codexDiagnosePrompt(i);
+  return card(
+    [
+      md('**初步诊断**'),
+      md(
+        `- Codex：${i.codexOk ? `✅ 可用${i.codexVer ? `（${i.codexVer}）` : ''}` : '❌ 不可用（检查 CODEX_BIN / PATH）'}`,
+      ),
+      md(`- 飞书长连接：${connLabel(i.conn)}`),
+      note(`bridge v${i.bridgeVer}　·　Node ${i.node}　·　${i.platform}`),
+      hr(),
+      md('**日志路径**'),
+      note(`后台守护输出：\`${i.logStdout}\``),
+      note(`后台守护错误：\`${i.logStderr}\``),
+      note('前台 `run` 模式：日志在启动它的终端窗口里'),
+      hr(),
+      md('**让 Codex 帮你深度诊断** — 复制下面整段，到任意项目群里 **@我** 粘贴发送：'),
+      md('```\n' + prompt + '\n```'),
+      actions([
+        linkButton('📦 项目仓库', REPO),
+        linkButton('🐞 提 Issue', `${REPO}/issues`),
+      ]),
+    ],
+    { header: { title: '🩺 诊断', template: i.codexOk ? 'blue' : 'orange' } },
+  );
 }
 
 /** Interactive new-project form: project name + optional CWD, submit/cancel. */

@@ -37,6 +37,7 @@ import { RunCardStream } from '../card/run-card-stream';
 import { log, withTrace } from '../core/logger';
 import {
   buildDmMenuCard,
+  buildDoctorCard,
   buildGroupSettingsCard,
   buildNewProjectDoneCard,
   buildNewProjectFormCard,
@@ -46,6 +47,7 @@ import {
   buildUpdateCard,
   DM,
   GS,
+  type DoctorInfo,
 } from '../card/dm-cards';
 import {
   currentVersion,
@@ -56,6 +58,10 @@ import {
   latestVersion,
   restartDaemon,
 } from '../service/update';
+import { resolveCodexBin, codexVersion } from '../agent/codex-appserver/locate';
+import { serviceStdoutPath, serviceStderrPath } from '../service/launchd';
+import { bridgeVersion } from '../core/version';
+import { paths } from '../config/paths';
 import { getProjectByChatId, listProjects, removeProject, updateProject, type Project } from '../project/registry';
 import { createProject } from '../project/lifecycle';
 import { refreshBranch } from '../project/announcement';
@@ -778,11 +784,23 @@ export function createOrchestrator(
     })
     .on(DM.doctor, async ({ evt }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
-      const ok = await backend.isAvailable().catch(() => false);
-      const conn = channel.getConnectionStatus?.()?.state ?? 'unknown';
-      await channel
-        .send(evt.chatId, { markdown: `🩺 **诊断**\n- codex: ${ok ? '✅ 可用' : '❌ 不可用（检查 CODEX_BIN/PATH）'}\n- 长连接: ${conn}` }, { replyTo: evt.messageId })
-        .catch(() => undefined);
+      const codexBin = resolveCodexBin();
+      const info: DoctorInfo = {
+        codexOk: await backend.isAvailable().catch(() => false),
+        codexVer: codexBin ? codexVersion(codexBin) : null,
+        conn: channel.getConnectionStatus?.()?.state ?? 'unknown',
+        bridgeVer: bridgeVersion(),
+        node: process.version,
+        platform: `${process.platform}-${process.arch}`,
+        logStdout: serviceStdoutPath(),
+        logStderr: serviceStderrPath(),
+        configFile: paths.configFile,
+      };
+      // A reply card (not a patch of the menu) so the diagnosis persists below
+      // the console; re-open the menu by messaging the bot.
+      await sendManagedCard(channel, evt.chatId, buildDoctorCard(info), evt.messageId).catch((err) =>
+        log.fail('console', err, { cmd: 'doctor' }),
+      );
     })
     .on(DM.reconnect, async ({ evt }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
