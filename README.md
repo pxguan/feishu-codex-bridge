@@ -267,9 +267,7 @@ src/
 - 🐛 **反馈 / 贡献**：<https://github.com/modelzen/feishu-codex-bridge/issues>
 - 👥 **交流群**：扫码加入「Vonvon 灵感研究所」👇
 
-<p align="center"><img src="docs/assets/vonvon-group-qr.png" alt="Vonvon 灵感研究所 群二维码" width="260"></p>
-
-> 该群二维码永久有效，扫码即可加入。
+<p align="center"><img src="docs/assets/vonvon-group-qr.png" alt="Vonvon 灵感研究所 群二维码" width="300"></p>
 
 ---
 
