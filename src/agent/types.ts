@@ -6,6 +6,17 @@
 
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
+/**
+ * Permission tier for a project's codex sandbox:
+ *   'qa'    — read-only, confined to the project folder (cwd). External-group Q&A.
+ *   'write' — read/write, confined to the project folder.
+ *   'full'  — danger-full-access (whole machine + network); the historical default.
+ * 'qa'/'write' are enforced via a custom codex permissions profile (see backend),
+ * whose read-confinement codex can enforce on macOS (Seatbelt) and native Windows
+ * (restricted token); on Linux/WSL it can't, so those tiers fail-closed there.
+ */
+export type PermissionMode = 'qa' | 'write' | 'full';
+
 export interface AgentInput {
   text?: string;
   /** absolute local image paths (codex reads them directly) */
@@ -122,6 +133,11 @@ export interface StartThreadOptions {
   cwd: string;
   model?: string;
   effort?: ReasoningEffort;
+  /** permission tier; undefined → 'full' (preserves legacy danger-full-access) */
+  mode?: PermissionMode;
+  /** let the sandboxed agent's shell reach the network (qa/write only; full is
+   * always networked). Default false. */
+  network?: boolean;
 }
 
 export interface ResumeThreadOptions extends StartThreadOptions {

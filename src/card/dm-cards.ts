@@ -5,7 +5,8 @@ import {
   resolveOwner,
   type AppConfig,
 } from '../config/schema';
-import { defaultNoMention, type Project } from '../project/registry';
+import { defaultNoMention, effectiveMode, type Project } from '../project/registry';
+import type { PermissionMode } from '../agent/types';
 import type { SessionRecord } from '../bot/session-store';
 import { labelScope } from '../config/scopes';
 import { actions, button, card, form, hr, input, linkButton, md, note, selectMenu, submitButton, type CardElement, type CardObject } from './cards';
@@ -52,6 +53,9 @@ export const DM = {
   // 项目设置容器（项目列表 / 建项目完成卡 进入），以后的项目级设置项往这里加
   projectSettings: 'dm.projectSettings',
   setNoMentionDm: 'dm.proj.noMention',
+  // 🔐 权限：codex 沙箱档位 + 联网开关（项目设置容器内）
+  setMode: 'dm.proj.mode',
+  setNetwork: 'dm.proj.network',
 } as const;
 
 /** Action ids for the in-group settings card (@bot /settings). */
@@ -681,13 +685,57 @@ export function buildAddAdminCard(members: { openId: string; name: string }[]): 
   );
 }
 
+/** Permission tiers, escalating, each with a one-line plain-language description
+ * (no "cwd" jargon — "项目文件夹"). Network is a SEPARATE toggle (see
+ * {@link permissionBlock}); these lines deliberately say nothing about it. */
+const MODE_OPTS: { value: PermissionMode; label: string; desc: string }[] = [
+  { value: 'qa', label: '🔒 项目内只读', desc: '只能查看项目文件夹里的内容，不会改任何文件' },
+  { value: 'write', label: '✏️ 项目内读写', desc: '能查看并修改项目文件夹里的文件，但碰不到文件夹外' },
+  { value: 'full', label: '⚠️ 完全访问', desc: '能读写整台电脑上的任何文件' },
+];
+
+/**
+ * The 「🔐 权限」 block inside the project settings card: one button per tier
+ * (selected = highlighted) each followed by a one-line description, then the
+ * network toggle (which IS part of permissions). Buttons carry the project
+ * `name` (the DM card can't resolve by evt.chatId). 'full' is always networked,
+ * so the toggle is replaced by a note in that tier.
+ *
+ * Option buttons, not select_static — Feishu locks a card once a select is
+ * touched (see {@link buildSettingsCard}); buttons keep the card interactive.
+ */
+function permissionBlock(p: Pick<Project, 'name' | 'mode' | 'network'>): CardElement[] {
+  const mode = effectiveMode(p);
+  const network = p.network ?? false;
+  const els: CardElement[] = [md('**🔐 权限**')];
+  for (const o of MODE_OPTS) {
+    els.push(
+      actions([button(o.label, { a: DM.setMode, v: o.value, n: p.name }, o.value === mode ? 'primary' : 'default')]),
+    );
+    els.push(note(o.desc));
+  }
+  if (mode === 'full') {
+    els.push(note('🌐 联网：完全访问档恒为联网。'));
+  } else {
+    els.push(md('🌐 联网'));
+    els.push(
+      actions([
+        button('关', { a: DM.setNetwork, v: 'off', n: p.name }, network ? 'default' : 'primary'),
+        button('开', { a: DM.setNetwork, v: 'on', n: p.name }, network ? 'primary' : 'default'),
+      ]),
+    );
+    els.push(note('只影响它执行的命令能否上网，不影响回答本身。'));
+  }
+  return els;
+}
+
 /**
  * 项目设置卡（DM「📁 项目列表 / 建项目完成卡 → ⚙️ 设置」）。可扩展容器：当前放
- * 免@ 开关 + 响应白名单入口，以后的项目级设置项往这里加。纯按钮（不锁卡）。
- * 免@ 按钮携带项目名 n（DM 里点，不能靠 evt.chatId 取项目）。
+ * 🔐 权限 + 免@ 开关 + 响应白名单入口，以后的项目级设置项往这里加。纯按钮（不锁卡）。
+ * 各按钮携带项目名 n（DM 里点，不能靠 evt.chatId 取项目）。
  */
 export function buildProjectSettingsCard(
-  project: Pick<Project, 'name' | 'kind' | 'noMention' | 'origin' | 'cwd'>,
+  project: Pick<Project, 'name' | 'kind' | 'noMention' | 'origin' | 'cwd' | 'mode' | 'network'>,
 ): CardObject {
   const kind = project.kind ?? 'multi';
   const noMention = project.noMention ?? defaultNoMention(project);
@@ -695,6 +743,8 @@ export function buildProjectSettingsCard(
     [
       md(`**项目设置** · ${project.name}`),
       note(`${kindLabel(kind)}${project.cwd ? `   ·   📂 \`${project.cwd}\`` : ''}`),
+      hr(),
+      ...permissionBlock(project),
       hr(),
       md('✋ 免@（不用 @ 也回复）'),
       actions([

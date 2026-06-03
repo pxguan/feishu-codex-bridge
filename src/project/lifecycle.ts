@@ -5,6 +5,7 @@ import type { LarkChannel } from '@larksuiteoapi/node-sdk';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
 import { addProject, getProjectByChatId, getProjectByName, type Project } from './registry';
+import type { PermissionMode } from '../agent/types';
 import { setAnnouncement } from './announcement';
 import { onboardGroup } from './onboarding';
 
@@ -16,6 +17,10 @@ export interface CreateProjectInput {
   existingPath?: string;
   /** session model for the group (default 'multi'). */
   kind?: 'multi' | 'single';
+  /** permission tier (default 'full' for self-created projects). */
+  mode?: PermissionMode;
+  /** allow the sandboxed shell to reach the network (default false). */
+  network?: boolean;
 }
 
 export interface JoinGroupInput {
@@ -29,6 +34,10 @@ export interface JoinGroupInput {
   existingPath?: string;
   /** session model for the group (default 'multi'). */
   kind?: 'multi' | 'single';
+  /** permission tier (default 'qa' — read-only — for joined external groups). */
+  mode?: PermissionMode;
+  /** allow the sandboxed shell to reach the network (default false). */
+  network?: boolean;
 }
 
 /**
@@ -86,9 +95,19 @@ export async function createProject(channel: LarkChannel, input: CreateProjectIn
     .catch((err) => log.fail('project', err, { phase: 'add-manager' }));
 
   // 3. register
-  const project: Project = { name, chatId, cwd, blank, createdAt: Date.now(), kind: input.kind ?? 'multi', origin: 'created' };
+  const project: Project = {
+    name,
+    chatId,
+    cwd,
+    blank,
+    createdAt: Date.now(),
+    kind: input.kind ?? 'multi',
+    origin: 'created',
+    mode: input.mode ?? 'full',
+    network: input.network ?? false,
+  };
   await addProject(project);
-  log.info('project', 'create', { name, chatId, cwd, blank });
+  log.info('project', 'create', { name, chatId, cwd, blank, mode: project.mode });
 
   // 4. group announcement (top banner) + onboarding (welcome card / Pin / tab),
   //    both best-effort — a group is usable even if these fail.
@@ -124,9 +143,11 @@ export async function joinExistingGroup(channel: LarkChannel, input: JoinGroupIn
     kind: input.kind ?? 'multi',
     origin: 'joined',
     addedBy: input.addedBy,
+    mode: input.mode ?? 'qa',
+    network: input.network ?? false,
   };
   await addProject(project);
-  log.info('project', 'join', { name, chatId: input.chatId, cwd, blank, kind: project.kind });
+  log.info('project', 'join', { name, chatId: input.chatId, cwd, blank, kind: project.kind, mode: project.mode });
 
   // Onboarding only (no announcement / Pin / tab — see onboardGroup's joined
   // branch); best-effort, the binding holds even if the welcome card fails.

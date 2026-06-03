@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import { paths } from '../config/paths';
+import type { PermissionMode } from '../agent/types';
 
 /** A project = a Feishu group bound to a fixed working directory. */
 export interface Project {
@@ -32,6 +33,13 @@ export interface Project {
   /** 项目级响应白名单：谁能让 bot 在本群响应/跑 codex。空/缺省 = 所有人；
    * admin/owner 恒豁免（见 isUserAllowedInProject）。 */
   allowedUsers?: string[];
+  /** permission tier for codex's sandbox. Omitted on old data → treated as
+   * 'full' (danger-full-access), preserving prior behavior. Read via
+   * {@link effectiveMode}. 'qa'/'write' confine reads+writes to `cwd`. */
+  mode?: PermissionMode;
+  /** allow the sandboxed agent's shell to reach the network (only meaningful for
+   * 'qa'/'write'; 'full' is always networked). Default false. */
+  network?: boolean;
 }
 
 /**
@@ -45,6 +53,16 @@ export interface Project {
  */
 export function defaultNoMention(p: Pick<Project, 'kind' | 'origin'>): boolean {
   return !((p.origin ?? 'created') === 'joined' && (p.kind ?? 'multi') === 'single');
+}
+
+/**
+ * A project's effective permission tier. Old data (no `mode`) → 'full', so
+ * existing projects keep danger-full-access and are unaffected; only an
+ * explicitly-set tier confines the sandbox. Single source of truth — every
+ * `mode ?? …` read goes through here.
+ */
+export function effectiveMode(p: Pick<Project, 'mode'>): PermissionMode {
+  return p.mode ?? 'full';
 }
 
 interface StoreFile {

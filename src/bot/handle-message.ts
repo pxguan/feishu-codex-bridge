@@ -1,6 +1,6 @@
 import type { BotAddedEvent, CardActionEvent, CommentEvent, LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { createBackend } from '../agent';
-import type { AgentInput, AgentRun, AgentThread, ModelInfo, ReasoningEffort } from '../agent/types';
+import type { AgentInput, AgentRun, AgentThread, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
 import {
   getMaxConcurrentRuns,
   getPendingPolicy,
@@ -558,12 +558,12 @@ export function createOrchestrator(
         // (inside the detached run, after the synchronous reservation).
         const images =
           preloadedImages ?? (messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined);
-        let thread = await resolveThread(sessionKey, msg.chatId);
+        let thread = await resolveThread(sessionKey, msg.chatId, { mode: project?.mode, network: project?.network });
         if (!thread) {
           // Unknown session (created before this bridge, or store lost): treat as
           // a fresh session bound to the resolved cwd.
           const cwd = project?.cwd ?? fallbackCwd;
-          thread = await backend.startThread({ cwd });
+          thread = await backend.startThread({ cwd, mode: project?.mode, network: project?.network });
           sessions.set(sessionKey, thread);
           await upsertSession({
             threadId: sessionKey,
@@ -601,8 +601,19 @@ export function createOrchestrator(
     });
   }
 
-  /** Reuse an in-memory codex thread, else resume from the persisted store. */
-  async function resolveThread(threadId: string, chatId: string): Promise<AgentThread | undefined> {
+  /** Reuse an in-memory codex thread, else resume from the persisted store.
+   * `perm` carries the bound project's CURRENT permission tier (mode/network),
+   * applied when we (re)start a thread here. A LIVE thread keeps the sandbox it
+   * was started with (codex binds it at thread/start and never re-reads it), so
+   * a tier change can only take effect by EVICTING the live thread first — see
+   * evictLiveSessionsForChat, called from the 🔐 权限 handlers. Without that
+   * eviction the fast-path below would silently keep a 'full' thread running
+   * after the admin switched to read-only. */
+  async function resolveThread(
+    threadId: string,
+    chatId: string,
+    perm?: { mode?: PermissionMode; network?: boolean },
+  ): Promise<AgentThread | undefined> {
     const live = sessions.get(threadId);
     if (live) return live;
     const rec = await getSession(threadId);
@@ -613,6 +624,8 @@ export function createOrchestrator(
         codexThreadId: rec.codexThreadId,
         model: rec.model,
         effort: rec.effort,
+        mode: perm?.mode,
+        network: perm?.network,
       });
       sessions.set(threadId, resumed);
       return resumed;
@@ -620,10 +633,38 @@ export function createOrchestrator(
       log.fail('agent', err, { phase: 'resume-on-turn', threadId });
       const project = await getProjectByChatId(chatId);
       const cwd = project?.cwd ?? rec.cwd ?? fallbackCwd;
-      const fresh = await backend.startThread({ cwd, model: rec.model, effort: rec.effort });
+      const fresh = await backend.startThread({
+        cwd,
+        model: rec.model,
+        effort: rec.effort,
+        mode: perm?.mode ?? project?.mode,
+        network: perm?.network ?? project?.network,
+      });
       sessions.set(threadId, fresh);
       return fresh;
     }
+  }
+
+  /**
+   * Close every LIVE codex thread under `chatId` so a permission-tier change
+   * actually rebinds. The codex sandbox is fixed at thread/start|resume and is
+   * immutable for the thread's life — so an already-running 'full' thread would
+   * keep full-disk read access even after the admin switches the project to
+   * read-only (the card would claim read-only while the runtime stays full
+   * access, reading ~/.ssh etc.). Evicting forces the next turn's resolveThread
+   * to re-resume under the new tier (or fail-closed where it can't be enforced).
+   */
+  async function evictLiveSessionsForChat(chatId: string): Promise<void> {
+    let closed = 0;
+    for (const rec of await listSessions()) {
+      if (rec.chatId !== chatId) continue;
+      const live = sessions.get(rec.threadId);
+      if (!live) continue;
+      sessions.delete(rec.threadId); // synchronous: next turn can't reuse it
+      void live.close().catch(() => undefined); // SIGKILLs the app-server child
+      closed++;
+    }
+    if (closed) log.info('console', 'tier-evict', { chatId, closed });
   }
 
   /** Group @bot (no topic): create the topic + run with the default model.
@@ -642,7 +683,7 @@ export function createOrchestrator(
       const { model, effort } = pickDefault(await listModels());
       let thread: AgentThread;
       try {
-        thread = await backend.startThread({ cwd, model, effort });
+        thread = await backend.startThread({ cwd, model, effort, mode: project?.mode, network: project?.network });
       } catch (err) {
         reaction.done();
         log.fail('card', err, { phase: 'start-topic' });
@@ -1312,6 +1353,34 @@ export function createOrchestrator(
         if (!p) return buildDmMenuCard();
         await updateProject(name, { noMention: on });
         return buildProjectSettingsCard({ ...p, noMention: on });
+      });
+    })
+    // 🔐 权限：切 codex 沙箱档位。改档必须驱逐该项目活跃会话——沙箱在 thread/start
+    // 绑定后不可变，否则切到只读后正在跑的 full 线程仍读全盘（卡片显示只读、运行时却没限制）。
+    .on(DM.setMode, ({ evt, value }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const name = typeof value.n === 'string' ? value.n : '';
+      const mode = value.v as PermissionMode;
+      if (mode !== 'qa' && mode !== 'write' && mode !== 'full') return;
+      patch(evt, async () => {
+        const p = await getProjectByName(name);
+        if (!p) return buildDmMenuCard();
+        await updateProject(name, { mode });
+        await evictLiveSessionsForChat(p.chatId);
+        return buildProjectSettingsCard({ ...p, mode });
+      });
+    })
+    // 🌐 联网开关（仅 qa/write 有意义；full 恒联网）。同样驱逐活跃会话以重建沙箱。
+    .on(DM.setNetwork, ({ evt, value }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const name = typeof value.n === 'string' ? value.n : '';
+      const network = value.v === 'on';
+      patch(evt, async () => {
+        const p = await getProjectByName(name);
+        if (!p) return buildDmMenuCard();
+        await updateProject(name, { network });
+        await evictLiveSessionsForChat(p.chatId);
+        return buildProjectSettingsCard({ ...p, network });
       });
     });
 
