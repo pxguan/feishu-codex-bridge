@@ -47,7 +47,10 @@ export async function runLogs(follow: boolean): Promise<void> {
 function installedNote(): string {
   switch (process.platform) {
     case 'win32':
-      return '✓ 后台服务已安装并启动（登录自启；注意：Windows 计划任务无崩溃自动拉起）。';
+      return (
+        '✓ 后台服务已安装并启动（登录自启，免管理员）。' +
+        '\n  提示：登录自启在下次登录生效；当前已在后台隐藏启动。注意 Windows 登录自启无崩溃自动拉起。'
+      );
     case 'linux':
       return (
         '✓ 后台服务已安装并启动（登录自启、崩溃自动拉起）。' +

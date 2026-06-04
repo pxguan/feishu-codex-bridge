@@ -1,6 +1,7 @@
 import { ensureOnboarded } from '../../bot/onboarding';
 import { startBridge } from '../../bot/bridge';
 import { acquireSingleInstanceLock, BridgeAlreadyRunningError } from '../../core/single-instance';
+import { recordServicePid } from '../../service/win-startup';
 import { log } from '../../core/logger';
 
 /**
@@ -34,6 +35,10 @@ export async function runRun(): Promise<void> {
     }
     throw err;
   }
+
+  // If launched as the Windows background service, publish our PID so
+  // `status`/`stop` can find us (no-op for a foreground run / other platforms).
+  recordServicePid();
 
   const fallbackCwd = process.env.FEISHU_CODEX_CWD || process.cwd();
   console.log('\n正在启动长连接 bot…');

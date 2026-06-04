@@ -8,13 +8,12 @@ import {
   uninstallLaunchd,
 } from './launchd';
 import {
-  installSchtask,
-  restartSchtask,
-  schtaskRunning,
-  statusSchtask,
-  tailSchtaskLogs,
-  uninstallSchtask,
-} from './schtasks';
+  installWinStartup,
+  restartWinStartup,
+  statusWinStartup,
+  uninstallWinStartup,
+  winStartupRunning,
+} from './win-startup';
 import {
   installSystemd,
   restartSystemd,
@@ -53,11 +52,11 @@ export function getServiceAdapter(): ServiceAdapter {
 
   if (process.platform === 'win32') {
     return {
-      install: installSchtask,
-      uninstall: uninstallSchtask,
-      status: async () => statusSchtask(),
-      restart: restartSchtask,
-      logs: tailSchtaskLogs,
+      install: installWinStartup,
+      uninstall: uninstallWinStartup,
+      status: async () => statusWinStartup(),
+      restart: restartWinStartup,
+      logs: tailServiceLogs,
     };
   }
 
@@ -85,7 +84,7 @@ export function getServiceAdapter(): ServiceAdapter {
 export function isServiceRunning(): boolean {
   try {
     if (process.platform === 'darwin') return launchdLoaded();
-    if (process.platform === 'win32') return schtaskRunning();
+    if (process.platform === 'win32') return winStartupRunning();
     if (process.platform === 'linux') return systemdActive();
   } catch {
     /* service manager unavailable → treat as not running */
