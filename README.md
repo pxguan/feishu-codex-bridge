@@ -33,7 +33,7 @@
 - **私聊控制台**：私聊机器人弹交互菜单 —— 新建项目、项目列表、设置、诊断、重连。
 - **稳定隔离**：每会话独立 app-server 进程；卡死有 watchdog（默认 120s）→ 终止 → 回收，异常不波及其他群。
 - **本地加密密钥库**：飞书应用密钥用 AES-256-GCM 存在 `~/.feishu-codex-bridge/`，不入仓库、不进环境变量。
-- **可常驻**：macOS 下可注册成 launchd 后台服务，开机自启。
+- **跨平台常驻**：macOS / Windows / Linux·WSL 均可注册成后台服务、开机或登录自启（分别走 launchd / 登录自启免管理员 / systemd）。
 
 ---
 
@@ -41,6 +41,7 @@
 
 | 依赖 | 说明 | 获取方式 |
 |------|------|----------|
+| **操作系统** | **macOS / Windows** 均支持；Linux·WSL 为 best-effort（已实现 systemd，未广泛实测） | — |
 | **Node.js ≥ 20** | 运行时 | <https://nodejs.org> 或 `nvm install 20` |
 | **Codex CLI** | 后端，bridge 会 spawn `codex app-server` | `npm i -g @openai/codex`，或装 Codex.app，或用 `CODEX_BIN` 指向已有二进制 |
 | **Codex 已登录** | app-server 需要 `~/.codex/auth.json` | `codex login` |
@@ -78,7 +79,7 @@ feishu-codex-bridge run
 ### 3. 后台 daemon（`start` —— 日常这么跑）
 
 ```bash
-feishu-codex-bridge start      # 装 launchd 并启动：开机自启、崩溃自动拉起、关终端照跑
+feishu-codex-bridge start      # 装系统后台服务并启动：开机/登录自启、崩溃自动拉起、关终端照跑
 feishu-codex-bridge status     # 状态 / pid / 日志路径 / 上次退出码
 feishu-codex-bridge logs -f    # 跟踪日志
 feishu-codex-bridge restart    # 重启
@@ -90,7 +91,9 @@ feishu-codex-bridge update     # 更新到最新版（npm i -g）并自动重启
 
 `start` 会**先在当前终端完成 init**（没配置则扫码），并**阻塞到授权完成**——权限全部开通、且你确认已订阅事件/发布版本——才真正装服务，绝不会装一个收不到消息的空壳。daemon 体跑的就是 `run`。
 
-> ⚠️ **后台 daemon 必须全局安装（`npm i -g`），不要用 npx**：launchd plist 里硬编码了 CLI 路径，而 npx 的临时缓存（`~/.npm/_npx/...`）会被清理，缓存一没服务就起不来。前台 `run` 用 npx 没问题（单次进程）。
+> 🖥 **各平台后台机制**：macOS = launchd 用户服务；**Windows = 登录自启（写 `HKCU\…\Run`，隐藏启动，全程免管理员）**；Linux·WSL = systemd 用户单元（`systemctl --user`，需要 `loginctl enable-linger` 才能登出后续跑；WSL 还需在 `/etc/wsl.conf` 开 `[boot] systemd=true`，否则用前台 `run`）。三者命令一致（`start`/`status`/`stop`/`restart`/`logs`），状态/日志路径统一。
+
+> ⚠️ **后台服务必须全局安装（`npm i -g`），不要用 npx**：服务里硬编码了 CLI 路径，而 npx 的临时缓存（`~/.npm/_npx/...`）会被清理，缓存一没服务就起不来。前台 `run` 用 npx 没问题（单次进程）。
 
 ### 4. 多飞书机器人（可选）
 
@@ -198,7 +201,7 @@ feishu-codex-bridge bot rm <名>     # 移除一个机器人配置
 
 ```
 feishu-codex-bridge run                前台启动（没配置先扫码 init；Ctrl+C 优雅退出）
-feishu-codex-bridge start              后台 daemon 启动（装 launchd 开机自启；阻塞到授权完成）
+feishu-codex-bridge start              后台 daemon 启动（装系统后台服务、开机/登录自启；阻塞到授权完成）
 feishu-codex-bridge stop|restart|status|logs   后台 daemon 生命周期
 feishu-codex-bridge update             更新到最新版并自动重启 daemon（--check 只查不装）
 feishu-codex-bridge bot init|list|use|rm       多飞书机器人：注册 / 列表 / 切当前 / 移除
@@ -229,7 +232,7 @@ src/
   config/     加密密钥库、密钥解析、配置存储、多机器人注册表、scope 清单、路径
   core/       watchdog、单实例锁、日志
   cli/        commander 命令（run / start / stop / restart / status / logs / update / bot / doctor / secrets）
-  service/    launchd 后台服务
+  service/    后台服务适配器（launchd / Windows 登录自启 / systemd）+ 跨平台 spawn
 ```
 
 架构与实现细节见 [`docs/design/feishu-codex-bridge-design.md`](docs/design/feishu-codex-bridge-design.md) 与 [`docs/design/implementation-plan.md`](docs/design/implementation-plan.md)。
