@@ -33,7 +33,7 @@ import {
   type ResumeCardState,
 } from '../card/command-cards';
 import { buildHistoryCard, type HistoryCardState } from '../card/history-card';
-import { buildRunCard, buildRunCardPlain, RC, type RunCardState } from '../card/run-card';
+import { ANSWER_EID, buildRunCard, buildRunCardPlain, RC, type RunCardState } from '../card/run-card';
 import { RunCardStream } from '../card/run-card-stream';
 import { buildCleanCard, extractCardFences } from '../card/markdown-render';
 import { imageSources, uploadOutboundImages } from '../card/outbound-images';
@@ -1316,7 +1316,8 @@ export function createOrchestrator(
           },
           stopSignal,
         );
-        // [DIAG] per-turn stream timeline — pinpoint where the reply lags.
+        // Per-turn stream-latency observability (file log `stream.timing`): locates
+        // where a reply lags — first byte, backlog (lastEv vs done), push split, RTT.
         const tStart = Date.now();
         let firstEvAt = 0;
         let firstTextAt = 0;
@@ -1336,11 +1337,12 @@ export function createOrchestrator(
           evCount++;
           render.apply(ev);
           rc.rs = render.snapshot();
-          // Non-blocking: never stall event consumption on a card.update RTT.
-          // The pump coalesces and pushes the latest snapshot per round-trip.
-          stream.streamCoalesced(channel, buildRunCard(rc));
+          // Non-blocking: never stall event consumption on a round-trip. The pump
+          // coalesces and routes the latest snapshot — answer text → element
+          // typewriter (cardElement.content), structure → whole-card update.
+          stream.streamCoalesced(channel, buildRunCard(rc), ANSWER_EID);
         }
-        const doneAt = Date.now(); // [DIAG] codex stopped emitting / loop ended
+        const doneAt = Date.now(); // codex stopped emitting / loop ended
         await stream.drain(); // flush the last coalesced frame before terminal
         state.interrupt = undefined; // turn done; nothing left to interrupt
         const killed = interrupted || timedOut;
@@ -1379,7 +1381,7 @@ export function createOrchestrator(
         // terminal whole-card update: final render with streaming off (clears the
         // typewriter cursor) and no ⏹ button.
         await stream.updateCard(channel, buildRunCard(rc));
-        // [DIAG] one-line timeline; all ms are relative to the turn's stream start.
+        // One-line per-turn timeline; all ms are relative to the turn's stream start.
         {
           const terminalAt = Date.now();
           const st = stream.stats();
@@ -1393,6 +1395,8 @@ export function createOrchestrator(
             events: evCount,
             textChars,
             pushes: st.pushCount,
+            cardPushes: st.cardPushes,
+            elPushes: st.elPushes,
             rttAvg: st.pushCount ? Math.round(st.totalRttMs / st.pushCount) : 0,
             rttMax: st.maxRttMs,
           });

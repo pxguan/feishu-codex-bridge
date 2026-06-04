@@ -31,27 +31,38 @@ export class RunCardStream {
   private seq = 0;
   private lastPush = 0;
   private lastContent = '';
-  // [DIAG] per-turn push counters — surfaced via stats() for the stream.timing log.
+  // Per-turn push counters — surfaced via stats() for the stream.timing log.
   private pushCount = 0;
+  private cardPushes = 0; // whole-card card.update (structure)
+  private elPushes = 0; // element cardElement.content (answer typewriter)
   private totalRttMs = 0;
   private maxRttMs = 0;
-  // Coalesced streaming. The consume loop records the latest card in `pending`
-  // and a single pump() drains it — NON-BLOCKING, so consuming codex events never
-  // stalls on a card.update round-trip. Awaiting each push serially (the old
-  // shape) drained the event backlog at one event per ~RTT, so codex finished
-  // long before the card caught up ("已回完、飞书还在慢慢打字"). Coalescing pushes
-  // only the most recent snapshot per round-trip, so the card tracks the model.
-  private pending: CardObject | null = null;
+  // Coalesced streaming. The consume loop records the latest {card, answerEid} in
+  // `pending`; a single pump() drains it — NON-BLOCKING, so consuming codex events
+  // never stalls on a round-trip (awaiting each push serially drained the backlog
+  // at one event per ~RTT → "已回完、飞书还在慢慢打字"). The pump pushes only the most
+  // recent snapshot per round-trip: when only the answer text grew it streams that
+  // via cardElement.content (typewriter), otherwise it whole-card updates.
+  private pending: { card: CardObject; answerEid: string | null } | null = null;
   private pumpChannel: LarkChannel | null = null;
   private pumpPromise: Promise<void> | null = null;
+  // Baselines for the pump's route decision (structure unchanged + answer grew?).
+  private lastStructureSig = '';
+  private lastAnswerText = '';
 
   get messageId(): string {
     return this._messageId;
   }
 
-  /** [DIAG] actual card.update push count + round-trip stats for this card. */
-  stats(): { pushCount: number; totalRttMs: number; maxRttMs: number } {
-    return { pushCount: this.pushCount, totalRttMs: this.totalRttMs, maxRttMs: this.maxRttMs };
+  /** Push counts (whole-card vs element) + round-trip stats for this card. */
+  stats(): { pushCount: number; cardPushes: number; elPushes: number; totalRttMs: number; maxRttMs: number } {
+    return {
+      pushCount: this.pushCount,
+      cardPushes: this.cardPushes,
+      elPushes: this.elPushes,
+      totalRttMs: this.totalRttMs,
+      maxRttMs: this.maxRttMs,
+    };
   }
 
   /**
@@ -60,8 +71,8 @@ export class RunCardStream {
    * the most recent card once that round-trip completes. Use this from the
    * event-consume loop instead of awaiting {@link streamCard} per event.
    */
-  streamCoalesced(channel: LarkChannel, fullCard: CardObject): void {
-    this.pending = fullCard;
+  streamCoalesced(channel: LarkChannel, fullCard: CardObject, answerEid: string | null): void {
+    this.pending = { card: fullCard, answerEid };
     this.pumpChannel = channel;
     if (!this.pumpPromise) this.pumpPromise = this.pump();
   }
@@ -75,10 +86,29 @@ export class RunCardStream {
   private async pump(): Promise<void> {
     try {
       while (this.pending && this.pumpChannel) {
-        const card = this.pending;
+        const { card, answerEid } = this.pending;
         this.pending = null;
         const t0 = Date.now();
-        await this.streamCard(this.pumpChannel, card, true);
+        const answer = answerEid ? answerContent(card, answerEid) : null;
+        const sig = structureSig(card, answerEid);
+        if (
+          answerEid &&
+          answer !== null &&
+          sig === this.lastStructureSig &&
+          answer !== this.lastAnswerText &&
+          answer.startsWith(this.lastAnswerText)
+        ) {
+          // Structure unchanged, answer grew by append → native typewriter.
+          await this.streamElement(this.pumpChannel, answerEid, answer);
+          this.lastAnswerText = answer;
+        } else {
+          // First frame or structure changed → whole-card update re-establishes the
+          // (answer-blanked) baseline; the answer element streams via
+          // cardElement.content from here, carrying current text so nothing is lost.
+          await this.streamCard(this.pumpChannel, card, true);
+          this.lastStructureSig = sig;
+          this.lastAnswerText = answer ?? '';
+        }
         // RTT (~hundreds of ms) usually spaces pushes on its own; this floor only
         // bites if a round-trip is unusually fast, keeping us under Feishu's
         // single-card ~10 ops/sec cap.
@@ -87,6 +117,27 @@ export class RunCardStream {
       }
     } finally {
       this.pumpPromise = null;
+    }
+  }
+
+  /** Element-level streaming push (cardkit.v1.cardElement.content): the answer
+   * element's accumulated full text. Feishu diffs the prefix and types the delta
+   * per the card's streaming_config. Needs streaming_mode on the card. */
+  private async streamElement(channel: LarkChannel, elementId: string, content: string): Promise<void> {
+    if (!this.cardId) return;
+    const t0 = Date.now();
+    try {
+      await channel.rawClient.cardkit.v1.cardElement.content({
+        path: { card_id: this.cardId, element_id: elementId },
+        data: { content, sequence: ++this.seq, uuid: `e_${this.cardId}_${this.seq}` },
+      });
+      const rtt = Date.now() - t0;
+      this.pushCount++;
+      this.elPushes++;
+      this.totalRttMs += rtt;
+      if (rtt > this.maxRttMs) this.maxRttMs = rtt;
+    } catch (err) {
+      log.fail('card', err, { phase: 'run-stream-el', cardId: this.cardId, seq: this.seq });
     }
   }
 
@@ -144,8 +195,9 @@ export class RunCardStream {
         path: { card_id: this.cardId },
         data: { card: { type: 'card_json', data }, sequence: ++this.seq, uuid: `s_${this.cardId}_${this.seq}` },
       });
-      const rtt = Date.now() - t0; // [DIAG]
+      const rtt = Date.now() - t0;
       this.pushCount++;
+      this.cardPushes++;
       this.totalRttMs += rtt;
       if (rtt > this.maxRttMs) this.maxRttMs = rtt;
     } catch (err) {
@@ -180,4 +232,29 @@ export class RunCardStream {
       }
     }
   }
+}
+
+type CardBody = { body?: { elements?: Array<Record<string, unknown>> } };
+
+/** Content of the streamed answer element (element_id === eid), or null if the
+ * card has no such element yet (top-level in body.elements). */
+function answerContent(card: CardObject, eid: string): string | null {
+  const els = (card as CardBody).body?.elements;
+  if (!Array.isArray(els)) return null;
+  for (const el of els) {
+    if (el && el.element_id === eid) return typeof el.content === 'string' ? el.content : '';
+  }
+  return null;
+}
+
+/** Serialized card with the answer element's content blanked. A change here is a
+ * structural change (reasoning / tools / footer) needing a whole-card update;
+ * when it's unchanged and only the answer grew, the pump routes to the element
+ * typewriter instead. */
+function structureSig(card: CardObject, eid: string | null): string {
+  const body = (card as CardBody).body;
+  const els = body?.elements;
+  if (!eid || !Array.isArray(els)) return JSON.stringify(card);
+  const blanked = els.map((el) => (el && el.element_id === eid ? { ...el, content: '' } : el));
+  return JSON.stringify({ ...(card as object), body: { ...body, elements: blanked } });
 }

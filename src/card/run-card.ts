@@ -5,6 +5,7 @@ import {
   collapsiblePanel,
   collapsiblePanelEl,
   md,
+  mdStream,
   noteMd,
   type CardElement,
   type CardObject,
@@ -23,6 +24,15 @@ import { toolBodyMd, toolHeaderText } from './tool-render';
 export const RC = {
   stop: 'run.stop',
 } as const;
+
+/**
+ * Stable element_id of the streamed answer markdown while RUNNING. The answer
+ * text is pushed to this element via cardkit.v1.cardElement.content for the
+ * native typewriter (see {@link ../card/run-card-stream}); everything else
+ * (reasoning / tools / footer) rides whole-card updates. Must be stable across
+ * re-renders so the typewriter sees an append-only prefix.
+ */
+export const ANSWER_EID = 'answer';
 
 const REASONING_MAX = 1500;
 /** Collapse N tool calls into one summary panel at/above this count. */
@@ -73,21 +83,38 @@ export function buildRunCard(rc: RunCardState): CardObject {
   return card(elements, { streaming: running, summary: summaryText(state) });
 }
 
-/** Live layout: reasoning + tools + text all inline, plus footer status and ⏹. */
+/**
+ * Live layout: reasoning panel, then tool panels, then ONE streamed answer
+ * element, then footer + ⏹. Text blocks are concatenated into a single
+ * {@link mdStream} element ({@link ANSWER_EID}) so the answer can be driven by
+ * the element-level typewriter (cardElement.content) — that needs one stable,
+ * append-only text element, which is incompatible with interleaving text and
+ * tool panels. Tools therefore render above the answer (matching the terminal
+ * fold), not inline between text runs.
+ */
 function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
   const elements: CardElement[] = [];
 
   const reasoning = reasoningContent(state);
   if (reasoning) elements.push(reasoningPanel(reasoning, state.reasoningActive));
 
-  const blocks = rc.showTools === false ? state.blocks.filter((b) => b.kind !== 'tool') : state.blocks;
-  for (const group of groupBlocks(blocks)) {
-    if (group.kind === 'text') {
-      if (group.content.trim()) elements.push(md(group.content));
-    } else {
-      elements.push(...renderToolGroup(group.tools, false));
+  const showTools = rc.showTools !== false;
+  const tools: ToolEntry[] = [];
+  const textParts: string[] = [];
+  for (const b of state.blocks) {
+    if (b.kind === 'tool') {
+      if (showTools) tools.push(b.tool);
+    } else if (b.content.trim()) {
+      textParts.push(b.content);
     }
   }
+  if (tools.length > 0) elements.push(...renderToolGroup(tools, false));
+
+  // Single streamed answer element. Only emitted once there's text, so its first
+  // appearance is one whole-card update that establishes the element; subsequent
+  // growth streams via cardElement.content. Stable element_id ⇒ append-only prefix.
+  const answer = textParts.join('\n\n');
+  if (answer) elements.push(mdStream(answer, ANSWER_EID));
 
   if (state.footer) elements.push(footerStatus(state.footer));
   if (rc.cardKey) elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')]));

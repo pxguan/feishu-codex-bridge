@@ -30,26 +30,31 @@ export function card(
   elements: CardElement[],
   opts: {
     header?: { title: string; template?: HeaderTemplate; subtitle?: string };
-    /** Marks this as a live (running) card. Currently informational — the smooth
-     * per-char typewriter is NOT driven from card config (see the streaming_mode
-     * note in the body). Reserved for the element-level cardElement.content path. */
+    /** Live (running) card. Enables streaming_mode so the answer element can be
+     * driven by the element-level typewriter (cardkit.v1.cardElement.content). */
     streaming?: boolean;
     /** Mobile push-notification preview text (config.summary.content). */
     summary?: string;
   } = {},
 ): CardObject {
   const config: Record<string, unknown> = { update_multi: true };
-  // streaming_mode is deliberately OFF. RunCardStream pushes whole-card updates
-  // (cardkit.v1.card.update). Per Feishu's official streaming docs, the typewriter
-  // animation and streaming_config (print_frequency_ms/print_step/print_strategy)
-  // ONLY apply to the element-level text API (cardkit.v1.cardElement.content) —
-  // never to whole-card updates. With streaming_mode ON, whole-card updates still
-  // triggered an UNCONTROLLABLE client typewriter pinned to a fixed default rate
-  // (~14 chars/sec) far below token arrival, so it backlogged and kept typing long
-  // after the turn ended ("codex 已回完、飞书还在慢慢打字"). With it OFF, each update
-  // instantly renders the current full text — chunked growth that tracks the model
-  // within one STREAM_THROTTLE_MS window, zero trailing. The smooth per-char
-  // typewriter is reintroduced separately via element-level content streaming.
+  if (opts.streaming) {
+    // streaming_mode is REQUIRED for element-level streaming (cardElement.content),
+    // which the answer text uses for the native typewriter. Per Feishu's docs,
+    // streaming_config only governs that element API — NOT whole-card card.update
+    // (used here for structure: reasoning/tools). So these values tune just the
+    // answer element's typewriter. 'fast' = on each push, instantly flush any
+    // un-typed remainder, then continue — so it never trails the model; worst case
+    // (a Feishu speed clamp) it degrades to the chunked whole-card cadence, never
+    // slower. ~240 chars/sec (step/freq×1000) outpaces token arrival. Both fields
+    // MUST be { default: N } objects — bare ints break Feishu's deserialization.
+    config.streaming_mode = true;
+    config.streaming_config = {
+      print_frequency_ms: { default: 25 },
+      print_step: { default: 6 },
+      print_strategy: 'fast',
+    };
+  }
   if (opts.summary) config.summary = { content: opts.summary };
   const obj: CardObject = {
     schema: '2.0',
