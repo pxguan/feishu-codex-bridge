@@ -1,20 +1,23 @@
-import { appendFile, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { createReadStream, statSync } from 'node:fs';
+import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { paths } from '../config/paths';
 
 /**
  * Platform-agnostic snapshot of the background service, produced by whichever
  * OS service manager backs this platform (launchd on macOS, Task Scheduler on
- * Windows). Callers render these fields without knowing the platform.
+ * Windows, systemd on Linux). Callers render these fields without knowing the
+ * platform.
  */
 export interface ServiceStatus {
   /** Human label of the service manager, e.g. `"launchd (macOS)"`. */
   platformName: string;
-  /** The service definition (plist / scheduled task) is registered with the OS. */
+  /** The service definition (plist / task / unit) is registered with the OS. */
   installed: boolean;
   /** The service process is currently alive. */
   running: boolean;
-  /** Path or name of the service definition (plist path / task name). */
+  /** Path or name of the service definition (plist path / task name / unit path). */
   servicePath: string;
   stdoutPath: string;
   stderrPath: string;
@@ -38,4 +41,77 @@ export async function ensureLogFiles(): Promise<void> {
   await mkdir(paths.appDir, { recursive: true });
   await appendFile(serviceStdoutPath(), '');
   await appendFile(serviceStderrPath(), '');
+}
+
+/**
+ * Absolute path to the installed bin entry. After bundling, this module lives at
+ * `<pkg>/dist/...`, so the bin is `<pkg>/bin/feishu-codex-bridge.mjs` — the same
+ * layout in a global npm install and a local checkout. Used by the Windows/Linux
+ * service definitions, which need an absolute ExecStart.
+ */
+export function resolveCliBinPath(): string {
+  const distDir = dirname(fileURLToPath(import.meta.url));
+  return resolve(distDir, '..', 'bin', 'feishu-codex-bridge.mjs');
+}
+
+/**
+ * Tail the service logs in pure Node (no `tail` binary — Windows lacks it, and
+ * systemd's append files are plain files). Prints the last ~100 lines of each
+ * file, then (when `follow`) polls for appended bytes until interrupted (Ctrl+C).
+ * launchd keeps its own `tail`-based path; this serves Windows + Linux.
+ */
+export async function tailServiceLogs(follow: boolean): Promise<void> {
+  await ensureLogFiles();
+  const files = [serviceStdoutPath(), serviceStderrPath()];
+
+  for (const f of files) {
+    const tail = await lastLines(f, 100);
+    if (tail) process.stdout.write(`\n===== ${f} =====\n${tail}\n`);
+  }
+  if (!follow) return;
+
+  const offsets = new Map<string, number>(files.map((f) => [f, fileSize(f)]));
+  await new Promise<void>((resolvePromise) => {
+    const onSigint = (): void => {
+      clearInterval(timer);
+      process.off('SIGINT', onSigint);
+      resolvePromise();
+    };
+    process.on('SIGINT', onSigint);
+    const timer = setInterval(() => {
+      for (const f of files) {
+        const size = fileSize(f);
+        const from = offsets.get(f) ?? 0;
+        if (size > from) {
+          offsets.set(f, size);
+          createReadStream(f, { start: from, end: size - 1, encoding: 'utf8' }).pipe(process.stdout, {
+            end: false,
+          });
+        } else if (size < from) {
+          offsets.set(f, size); // truncated/rotated — reset
+        }
+      }
+    }, 700);
+  });
+}
+
+function fileSize(file: string): number {
+  try {
+    return statSync(file).size;
+  } catch {
+    return 0;
+  }
+}
+
+async function lastLines(file: string, n: number): Promise<string> {
+  try {
+    const text = await readFile(file, 'utf8');
+    return text
+      .split('\n')
+      .slice(-n - 1)
+      .join('\n')
+      .trimEnd();
+  } catch {
+    return '';
+  }
 }

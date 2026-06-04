@@ -21,11 +21,7 @@ export async function runStart(): Promise<void> {
     return;
   }
   const status = await getServiceAdapter().install();
-  console.log(
-    process.platform === 'win32'
-      ? '✓ 后台服务已安装并启动（登录自启；注意：Windows 计划任务无崩溃自动拉起）。'
-      : '✓ 后台服务已安装并启动（开机自启、崩溃自动拉起）。',
-  );
+  console.log(installedNote());
   printStatus(status);
 }
 
@@ -46,6 +42,20 @@ export async function runStatus(): Promise<void> {
 
 export async function runLogs(follow: boolean): Promise<void> {
   await getServiceAdapter().logs(follow);
+}
+
+function installedNote(): string {
+  switch (process.platform) {
+    case 'win32':
+      return '✓ 后台服务已安装并启动（登录自启；注意：Windows 计划任务无崩溃自动拉起）。';
+    case 'linux':
+      return (
+        '✓ 后台服务已安装并启动（登录自启、崩溃自动拉起）。' +
+        '\n  提示：注销后仍保持运行需执行一次 `loginctl enable-linger $USER`。'
+      );
+    default:
+      return '✓ 后台服务已安装并启动（开机自启、崩溃自动拉起）。';
+  }
 }
 
 function printStatus(status: ServiceStatus): void {

@@ -1,15 +1,18 @@
 import { spawnSync } from 'node:child_process';
-import { createReadStream, existsSync, statSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { paths } from '../config/paths';
 import {
   ensureLogFiles,
+  resolveCliBinPath,
   serviceStderrPath,
   serviceStdoutPath,
+  tailServiceLogs,
   type ServiceStatus,
 } from './common';
+
+export { tailServiceLogs as tailSchtaskLogs } from './common';
 
 /**
  * Windows background service via Task Scheduler (`schtasks`). Mirrors the
@@ -26,12 +29,6 @@ export const WINDOWS_TASK_NAME = 'feishu-codex-bridge';
 /** The `.cmd` wrapper the scheduled task invokes (carries PATH + log redirect). */
 function launcherCmdPath(): string {
   return join(paths.appDir, 'service-launcher.cmd');
-}
-
-/** Absolute path to the installed bin entry (same resolution as launchd). */
-function resolveCliBinPath(): string {
-  const distDir = dirname(fileURLToPath(import.meta.url));
-  return resolve(distDir, '..', 'bin', 'feishu-codex-bridge.mjs');
 }
 
 /**
@@ -179,62 +176,4 @@ async function waitUntilStopped(timeoutMs = 5000): Promise<boolean> {
     await new Promise((r) => setTimeout(r, 200));
   }
   return false;
-}
-
-/**
- * Tail the service logs. Windows has no `tail`, so this is pure Node: print the
- * last ~100 lines of each file, then (when `follow`) poll for appended bytes
- * until interrupted (Ctrl+C).
- */
-export async function tailSchtaskLogs(follow: boolean): Promise<void> {
-  await ensureLogFiles();
-  const files = [serviceStdoutPath(), serviceStderrPath()];
-
-  for (const f of files) {
-    const tail = await lastLines(f, 100);
-    if (tail) process.stdout.write(`\n===== ${f} =====\n${tail}\n`);
-  }
-  if (!follow) return;
-
-  const offsets = new Map<string, number>(files.map((f) => [f, fileSize(f)]));
-  await new Promise<void>((resolvePromise) => {
-    const onSigint = (): void => {
-      clearInterval(timer);
-      process.off('SIGINT', onSigint);
-      resolvePromise();
-    };
-    process.on('SIGINT', onSigint);
-    const timer = setInterval(() => {
-      for (const f of files) {
-        const size = fileSize(f);
-        const from = offsets.get(f) ?? 0;
-        if (size > from) {
-          offsets.set(f, size);
-          createReadStream(f, { start: from, end: size - 1, encoding: 'utf8' }).pipe(process.stdout, {
-            end: false,
-          });
-        } else if (size < from) {
-          offsets.set(f, size); // truncated/rotated — reset
-        }
-      }
-    }, 700);
-  });
-}
-
-function fileSize(file: string): number {
-  try {
-    return statSync(file).size;
-  } catch {
-    return 0;
-  }
-}
-
-async function lastLines(file: string, n: number): Promise<string> {
-  try {
-    const text = await readFile(file, 'utf8');
-    const lines = text.split('\n');
-    return lines.slice(-n - 1).join('\n').trimEnd();
-  } catch {
-    return '';
-  }
 }
