@@ -55,8 +55,10 @@ export interface RunCardState {
 /**
  * Render the run card from its structured state (no header; reasoning + tool
  * calls as collapsible panels; text streams in order). Modeled on
- * zara/feishu-claude-code-bridge `src/card/run-renderer.ts`. While running the
- * card carries streaming_mode so whole-card updates animate the text delta.
+ * zara/feishu-claude-code-bridge `src/card/run-renderer.ts`. While running, each
+ * whole-card update instantly shows the current full text (no typewriter — see
+ * the streaming_mode note in {@link ../card/cards}); growth tracks the model in
+ * throttled chunks.
  *
  * Two layouts: while RUNNING everything streams expanded (reasoning, tools and
  * preamble text inline) so the user watches progress live; once TERMINAL the

@@ -30,22 +30,26 @@ export function card(
   elements: CardElement[],
   opts: {
     header?: { title: string; template?: HeaderTemplate; subtitle?: string };
-    /** Enable native typewriter streaming. With a streaming card, whole-card
-     * updates (cardkit.v1.card.update) animate markdown deltas between pushes. */
+    /** Marks this as a live (running) card. Currently informational — the smooth
+     * per-char typewriter is NOT driven from card config (see the streaming_mode
+     * note in the body). Reserved for the element-level cardElement.content path. */
     streaming?: boolean;
     /** Mobile push-notification preview text (config.summary.content). */
     summary?: string;
   } = {},
 ): CardObject {
   const config: Record<string, unknown> = { update_multi: true };
-  if (opts.streaming) {
-    config.streaming_mode = true;
-    config.streaming_config = {
-      print_frequency_ms: { default: 70 },
-      print_step: { default: 1 },
-      print_strategy: 'fast',
-    };
-  }
+  // streaming_mode is deliberately OFF. RunCardStream pushes whole-card updates
+  // (cardkit.v1.card.update). Per Feishu's official streaming docs, the typewriter
+  // animation and streaming_config (print_frequency_ms/print_step/print_strategy)
+  // ONLY apply to the element-level text API (cardkit.v1.cardElement.content) —
+  // never to whole-card updates. With streaming_mode ON, whole-card updates still
+  // triggered an UNCONTROLLABLE client typewriter pinned to a fixed default rate
+  // (~14 chars/sec) far below token arrival, so it backlogged and kept typing long
+  // after the turn ended ("codex 已回完、飞书还在慢慢打字"). With it OFF, each update
+  // instantly renders the current full text — chunked growth that tracks the model
+  // within one STREAM_THROTTLE_MS window, zero trailing. The smooth per-char
+  // typewriter is reintroduced separately via element-level content streaming.
   if (opts.summary) config.summary = { content: opts.summary };
   const obj: CardObject = {
     schema: '2.0',

@@ -1316,11 +1316,32 @@ export function createOrchestrator(
           },
           stopSignal,
         );
+        // [DIAG] per-turn stream timeline — pinpoint where the reply lags.
+        const tStart = Date.now();
+        let firstEvAt = 0;
+        let firstTextAt = 0;
+        let lastEvAt = tStart;
+        let evCount = 0;
+        let textChars = 0;
         for await (const ev of guarded) {
+          const tEv = Date.now();
+          if (!firstEvAt) firstEvAt = tEv;
+          const et = (ev as { type?: string }).type;
+          if (et === 'text_delta') {
+            if (!firstTextAt) firstTextAt = tEv;
+            const d = (ev as { delta?: string }).delta;
+            if (typeof d === 'string') textChars += d.length;
+          }
+          lastEvAt = tEv;
+          evCount++;
           render.apply(ev);
           rc.rs = render.snapshot();
-          await stream.streamCard(channel, buildRunCard(rc));
+          // Non-blocking: never stall event consumption on a card.update RTT.
+          // The pump coalesces and pushes the latest snapshot per round-trip.
+          stream.streamCoalesced(channel, buildRunCard(rc));
         }
+        const doneAt = Date.now(); // [DIAG] codex stopped emitting / loop ended
+        await stream.drain(); // flush the last coalesced frame before terminal
         state.interrupt = undefined; // turn done; nothing left to interrupt
         const killed = interrupted || timedOut;
         if (timedOut) render.timeout(Math.max(1, Math.round(idleMs / 60_000)));
@@ -1358,6 +1379,24 @@ export function createOrchestrator(
         // terminal whole-card update: final render with streaming off (clears the
         // typewriter cursor) and no ⏹ button.
         await stream.updateCard(channel, buildRunCard(rc));
+        // [DIAG] one-line timeline; all ms are relative to the turn's stream start.
+        {
+          const terminalAt = Date.now();
+          const st = stream.stats();
+          log.info('stream', 'timing', {
+            firstEv: firstEvAt ? firstEvAt - tStart : -1,
+            firstText: firstTextAt ? firstTextAt - tStart : -1,
+            lastEv: lastEvAt - tStart,
+            done: doneAt - tStart,
+            terminal: terminalAt - tStart,
+            doneToTerminal: terminalAt - doneAt,
+            events: evCount,
+            textChars,
+            pushes: st.pushCount,
+            rttAvg: st.pushCount ? Math.round(st.totalRttMs / st.pushCount) : 0,
+            rttMax: st.maxRttMs,
+          });
+        }
         runsByCard.delete(cardMsgId);
         promoteCard(finalMsgId, rc);
 

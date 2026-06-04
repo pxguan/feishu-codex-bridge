@@ -23,6 +23,8 @@ const STDOUT_INFO_ALLOWLIST = new Set<string>([
   'intake.reject',
   'card.final',
   'card.config',
+  'stream.timing', // [DIAG] per-turn stream timeline
+
   'card.action',
   'card.launch',
   'agent.spawn',

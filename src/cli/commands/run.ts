@@ -37,6 +37,14 @@ export async function runRun(): Promise<void> {
 
   const fallbackCwd = process.env.FEISHU_CODEX_CWD || process.cwd();
   console.log('\n正在启动长连接 bot…');
+  // [DIAG] unmistakable build marker — if you DON'T see this banner, you are
+  // running stale code (a global daemon), not this worktree's build.
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('▶ feishu-codex-bridge  [C-fix 合并推送 + 计时诊断]');
+  console.log('  · 推送解耦：消费不再阻塞在 card.update 往返');
+  console.log('  · streaming_mode(打字机) = 关 / 节流 150ms');
+  console.log('  · 每条消息回完会打印一行 [stream.timing]');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('私聊我 `/new <名>` 建项目；在项目群里 @我 干活。Ctrl+C 退出。\n');
   const handle = await startBridge({ cfg, appSecret: secret, fallbackCwd });
 
