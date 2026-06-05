@@ -17,9 +17,10 @@ program
 // ── 进程 / 守护 ──────────────────────────────────────────────
 program
   .command('run')
-  .description('前台启动 bot（没配置则先扫码 init；Ctrl+C 优雅退出）')
-  .action(async () => {
-    await runRun();
+  .description('前台启动活跃机器人（多个则各自独立进程；没配置则先扫码 init；Ctrl+C 优雅退出）')
+  .option('--bot <name>', '只启动指定的一个机器人（名字或 appId）')
+  .action(async (options: { bot?: string }) => {
+    await runRun(options.bot);
   });
 
 program
@@ -81,10 +82,10 @@ bot
     await runBotList();
   });
 bot
-  .command('use <name>')
-  .description('选择 run / start 启动时使用的机器人')
-  .action(async (name: string) => {
-    await runBotUse(name);
+  .command('use [names...]')
+  .description('勾选/指定要同时连接的机器人（多选）；无参数弹交互式勾选框')
+  .action(async (names: string[]) => {
+    await runBotUse(names ?? []);
   });
 bot
   .command('rm <name>')

@@ -1,25 +1,57 @@
 import { ensureOnboarded, confirmReadyForDaemon } from '../../bot/onboarding';
+import { activeBots, loadBots } from '../../config/bots';
 import { getServiceAdapter, type ServiceStatus } from '../../service/adapter';
 
 /**
- * Daemon lifecycle. `start` installs a launchd agent whose body runs `run`
- * (so the background process is the same bridge the user runs in the
- * foreground). Onboarding happens here in the foreground first — this terminal
- * has a TTY for the scan — so the detached service never enters the wizard.
+ * Daemon lifecycle. `start` installs ONE launchd/systemd/login service whose
+ * body runs `run` (so the background process is the same bridge the user runs
+ * in the foreground). When multiple bots are active, that single `run` becomes
+ * the multi-process supervisor, so the service layer stays bot-agnostic — no
+ * per-bot service definitions to install.
+ *
+ * Onboarding happens here in the foreground first — this terminal has a TTY for
+ * the scan — so the detached service never enters the wizard. With a multi-bot
+ * active set we walk every active bot through onboarding + the readiness gate
+ * (sequentially, so each bot's scope prompts stay legible).
  */
 export async function runStart(): Promise<void> {
-  const ready = await ensureOnboarded({ allowCreate: true });
-  if (!ready) {
-    process.exitCode = 1;
-    return;
+  const active = activeBots(await loadBots());
+
+  if (active.length === 0) {
+    // Fresh / legacy single-bot install: onboard (maybe scan-create) the
+    // implicit current/default bot.
+    const ready = await ensureOnboarded({ allowCreate: true });
+    if (!ready) {
+      process.exitCode = 1;
+      return;
+    }
+    if (!(await confirmReadyForDaemon(ready))) {
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    if (active.length > 1) {
+      console.log(`\n后台服务将托管 ${active.length} 个机器人（supervisor 多进程，各自独立进程）：`);
+      for (const b of active) console.log(`  • ${b.name}  (${b.appId})  [${b.tenant}]`);
+      console.log('');
+    }
+    // Don't daemonize a bot that can't receive messages — block until the
+    // operator has finished authorizing each one (scopes granted, events
+    // subscribed, version published).
+    for (const bot of active) {
+      if (active.length > 1) console.log(`\n──── 机器人「${bot.name}」(${bot.appId}) ────`);
+      const ready = await ensureOnboarded({ bot: bot.appId });
+      if (!ready) {
+        process.exitCode = 1;
+        return;
+      }
+      if (!(await confirmReadyForDaemon(ready))) {
+        process.exitCode = 1;
+        return;
+      }
+    }
   }
-  // Don't daemonize a bot that can't receive messages — block until the
-  // operator has finished authorizing (scopes granted, events subscribed,
-  // version published).
-  if (!(await confirmReadyForDaemon(ready))) {
-    process.exitCode = 1;
-    return;
-  }
+
   const status = await getServiceAdapter().install();
   console.log(installedNote());
   printStatus(status);

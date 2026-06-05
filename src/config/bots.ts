@@ -14,11 +14,24 @@ export interface BotEntry {
   /** bot display name from credential validation (best-effort, for `bots` list) */
   botName?: string;
   createdAt: number;
+  /**
+   * Whether `run` / `start` brings this bot up. The active set is multi-select
+   * (`bot use`): N bots can be active at once and run simultaneously (each in
+   * its own process). `undefined` on every bot means "never configured" — a
+   * legacy single-bot install — and {@link activeBots} falls back to `current`
+   * so behavior is unchanged until the user explicitly picks a set.
+   */
+  active?: boolean;
 }
 
 export interface BotsRegistry {
   version: 1;
-  /** appId of the bot `start` / the service will run. */
+  /**
+   * Primary bot's appId — kept in sync with the active set (first active bot)
+   * for the single-bot code paths (doctor, the implicit no-selector `run`,
+   * legacy migration). The active set ({@link activeBots}) is the source of
+   * truth for what `run`/`start` launches.
+   */
   current?: string;
   bots: BotEntry[];
 }
@@ -81,6 +94,39 @@ export function findBot(reg: BotsRegistry, nameOrAppId: string): BotEntry | unde
 
 export function currentBot(reg: BotsRegistry): BotEntry | undefined {
   return reg.current ? reg.bots.find((b) => b.appId === reg.current) : undefined;
+}
+
+/**
+ * The bots `run` / `start` should bring up — the multi-select active set.
+ *
+ * Once the user has configured the set via `bot use`, every bot carries an
+ * explicit `active` flag (true/false), so this returns exactly the selected
+ * bots (possibly empty if they deselected all). A legacy install where no bot
+ * has the flag yet falls back to just `current`, so single-bot behavior is
+ * unchanged until the user opts into multi-select.
+ */
+export function activeBots(reg: BotsRegistry): BotEntry[] {
+  const configured = reg.bots.some((b) => b.active !== undefined);
+  if (configured) return reg.bots.filter((b) => b.active === true);
+  const cur = currentBot(reg);
+  return cur ? [cur] : [];
+}
+
+/**
+ * Set the whole active set to exactly `appIds` (overwrite). Stamps an explicit
+ * `active` boolean on every bot so the set is "configured" from now on (an empty
+ * selection stays empty rather than silently falling back to `current`). Keeps
+ * `current` pointing at a still-active primary (first active bot) for the
+ * single-bot code paths; leaves it untouched when the set is emptied.
+ */
+export async function setActiveBots(appIds: string[]): Promise<BotsRegistry> {
+  const reg = await loadBots();
+  const want = new Set(appIds);
+  for (const b of reg.bots) b.active = want.has(b.appId);
+  const firstActive = reg.bots.find((b) => b.active);
+  if (firstActive) reg.current = firstActive.appId;
+  await saveBots(reg);
+  return reg;
 }
 
 /** Add (or replace by appId) a bot; first bot added becomes current. */

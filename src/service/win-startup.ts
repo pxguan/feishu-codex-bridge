@@ -34,8 +34,10 @@ import {
  */
 const RUN_KEY_PATH = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const RUN_KEY_NAME = 'feishu-codex-bridge';
-/** Set in the launcher env so a service-launched bridge records its own PID. */
-const SERVICE_ENV_FLAG = 'FEISHU_CODEX_BRIDGE_SERVICE';
+/** Set in the launcher env so a service-launched bridge records its own PID.
+ * Exported so the multi-bot supervisor can STRIP it from its children's env —
+ * only the supervisor (the actual service process) should own service.pid. */
+export const SERVICE_ENV_FLAG = 'FEISHU_CODEX_BRIDGE_SERVICE';
 
 function launcherCmdPath(): string {
   return join(paths.appDir, 'service-launcher.cmd');

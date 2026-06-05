@@ -10,7 +10,7 @@ import { resolveCodexBin } from '../agent/codex-appserver/locate';
 import { openUrl } from '../utils/open-url';
 import { log } from '../core/logger';
 import { useBotDir } from '../config/paths';
-import { ensureRegistry, addBot, currentBot, loadBots, uniqueName, type BotEntry } from '../config/bots';
+import { ensureRegistry, addBot, currentBot, findBot, loadBots, uniqueName, type BotEntry } from '../config/bots';
 
 export interface OnboardResult {
   cfg: AppConfig;
@@ -32,22 +32,34 @@ export function ensureCodex(): boolean {
 }
 
 /**
- * Bring the active bot to a runnable state and return its config + secret.
+ * Bring a bot to a runnable state and return its config + secret.
  *
- * - Resolves the current bot from the registry (migrating a legacy flat install
- *   on first run). With `allowCreate`, a missing current bot triggers the
- *   scan-QR wizard (named `default`) — this is what makes `run`/`start` "init
- *   if not initialized". Without it (or off a TTY) a missing bot is an error.
+ * - With `opts.bot` (a name or appId), resolves THAT specific bot — used by
+ *   `run --bot <name>` and the multi-bot supervisor's children. A missing
+ *   selector is an error (never the create-wizard, even with `allowCreate`).
+ * - Without a selector, resolves the registry's `current` bot (migrating a
+ *   legacy flat install on first run). With `allowCreate`, a missing current
+ *   bot triggers the scan-QR wizard (named `default`) — this is what makes the
+ *   implicit `run`/`start` "init if not initialized". Without it (or off a TTY)
+ *   a missing bot is an error.
  * - Validates credentials and surfaces the scope-grant link (auto-opened).
  *
  * Returns null (after printing why) on any failure.
  */
-export async function ensureOnboarded(opts: { allowCreate?: boolean } = {}): Promise<OnboardResult | null> {
+export async function ensureOnboarded(
+  opts: { allowCreate?: boolean; bot?: string } = {},
+): Promise<OnboardResult | null> {
   if (!ensureCodex()) return null;
 
   const reg = await ensureRegistry();
-  const entry = currentBot(reg);
+  const entry = opts.bot ? findBot(reg, opts.bot) : currentBot(reg);
   if (!entry) {
+    if (opts.bot) {
+      console.error(
+        `✗ 找不到机器人「${opts.bot}」。用 \`feishu-codex-bridge bot list\` 查看已注册的机器人。`,
+      );
+      return null;
+    }
     if (!opts.allowCreate) {
       console.error('✗ 尚未配置任何飞书机器人。请先运行 `feishu-codex-bridge bot init`（或前台 `run`）扫码创建。');
       return null;
