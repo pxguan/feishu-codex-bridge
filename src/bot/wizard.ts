@@ -41,7 +41,7 @@ export async function runRegistrationWizard(): Promise<AppConfig> {
   };
 
   if (operatorOpenId) {
-    cfg.preferences = { access: { admins: [operatorOpenId] } };
+    cfg.preferences = { access: { ownerOpenId: operatorOpenId, admins: [operatorOpenId] } };
     console.log(`  Admin:   ${operatorOpenId} (你自己，已自动加入管理员名单)`);
   } else {
     console.log(

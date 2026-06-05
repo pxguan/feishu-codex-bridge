@@ -8,8 +8,10 @@ import {
   getShowToolCalls,
   isAdmin,
   isChatAllowed,
-  isUserAllowed,
+  isUserAllowedInProject,
+  resolveOwner,
   secretKeyForApp,
+  type AppAccess,
   type AppConfig,
   type AppPreferences,
   type PendingPolicy,
@@ -39,6 +41,10 @@ import { buildCleanCard, extractCardFences } from '../card/markdown-render';
 import { imageSources, uploadOutboundImages } from '../card/outbound-images';
 import { log, withTrace } from '../core/logger';
 import {
+  buildAddAdminCard,
+  buildAddAllowedCard,
+  buildAdminsCard,
+  buildAllowlistCard,
   buildDmMenuCard,
   buildDoctorCard,
   buildGroupSettingsCard,
@@ -46,6 +52,7 @@ import {
   buildNewProjectDoneCard,
   buildNewProjectFormCard,
   buildProjectListCard,
+  buildProjectSettingsCard,
   buildRmConfirmCard,
   buildSettingsCard,
   buildUpdateCard,
@@ -72,6 +79,7 @@ import { validateAppCredentials } from '../utils/feishu-auth';
 import {
   defaultNoMention,
   getProjectByChatId,
+  getProjectByName,
   listProjects,
   removeProject,
   updateProject,
@@ -94,6 +102,45 @@ import {
   SUPPORTED_FILE_TYPES,
 } from './comments';
 import { Semaphore, withIdleTimeout } from './watchdog';
+
+/**
+ * open_id → 姓名 的批量解析（管理员 / 白名单卡展示用）。需 contact:user.base:readonly
+ * scope；无 scope / 调用失败则返回空 Map，卡片降级显示 open_id 尾段（见 memberName）。
+ */
+async function resolveNames(channel: LarkChannel, ids: (string | undefined)[]): Promise<Map<string, string>> {
+  const uniq = [...new Set(ids.filter((x): x is string => Boolean(x)))];
+  const out = new Map<string, string>();
+  if (uniq.length === 0) return out;
+  try {
+    const r = await channel.rawClient.contact.v3.user.batch({
+      params: { user_ids: uniq, user_id_type: 'open_id' },
+    });
+    for (const it of r.data?.items ?? []) {
+      if (it.open_id && it.name) out.set(it.open_id, it.name);
+    }
+  } catch (err) {
+    log.info('console', 'resolve-names-fail', { n: uniq.length, err: String(err) });
+  }
+  return out;
+}
+
+/**
+ * 从 select_person 的提交值（form_value['pick']）里取出 open_id。单选格式飞书未在
+ * 类型中声明（可能是字符串 / 数组 / {open_id|id|value}），故 best-effort 兼容多形态，
+ * 取第一个 ou_ 开头的 id；取不到时返回 undefined（回调据此跳过写入）。
+ */
+function pickOpenId(formValue: Record<string, unknown> | undefined): string | undefined {
+  const raw = formValue?.pick;
+  const cands: unknown[] = Array.isArray(raw) ? raw : [raw];
+  for (const c of cands) {
+    if (typeof c === 'string' && c.startsWith('ou_')) return c;
+    if (c && typeof c === 'object') {
+      const o = c as Record<string, unknown>;
+      for (const v of [o.open_id, o.id, o.value]) if (typeof v === 'string' && v.startsWith('ou_')) return v;
+    }
+  }
+  return undefined;
+}
 
 interface ActiveState {
   /** unset only during the brief "reserved, still resolving the thread" window */
@@ -264,7 +311,7 @@ export function createOrchestrator(
     // @门：没 @ 时只在「项目群 + 免@ 适用」才响应。免@默认开,但 multi 仅话题内、
     // single 整群;非项目群一律不响应非 @ 消息。
     if (!msg.mentionedBot && !(project && shouldRespondWithoutMention(project, msg))) return;
-    if (!isChatAllowed(cfg, msg.chatId) || !isUserAllowed(cfg, msg.senderId)) {
+    if (!isChatAllowed(cfg, msg.chatId) || !isUserAllowedInProject(cfg, project, msg.senderId)) {
       log.info('intake', 'reject', { reason: 'not_allowed', chatId: msg.chatId.slice(-6) });
       return;
     }
@@ -369,12 +416,19 @@ export function createOrchestrator(
     return Boolean(msg.threadId) || parseCommand(msg.content.trim()) !== null;
   }
 
-  /** @bot /settings in a group: post the in-group settings card (admin-gated). */
+  /** 非管理员触发 owner-only 命令(/resume、/settings)时的统一无权限提示。
+   * design §5: 管理类命令仅 bot owner(=admins[]) 可用；对话类(/model、/help)对所有人开放。 */
+  async function denyAdminCommand(msg: NormalizedMessage, cmd: 'resume' | 'settings'): Promise<void> {
+    await channel
+      .send(msg.chatId, { markdown: `⚠️ \`/${cmd}\` 仅 bot 管理员可用。` }, { replyTo: msg.messageId })
+      .catch(() => undefined);
+    log.info('intake', 'cmd-denied', { cmd });
+  }
+
+  /** @bot /settings in a group: post the in-group settings card (owner/admin-gated). */
   async function postGroupSettings(msg: NormalizedMessage, project?: Project): Promise<void> {
     if (!isAdmin(cfg, msg.senderId)) {
-      await channel
-        .send(msg.chatId, { markdown: '仅管理员可改群设置。' }, { replyTo: msg.messageId })
-        .catch(() => undefined);
+      await denyAdminCommand(msg, 'settings');
       return;
     }
     if (!project) {
@@ -588,8 +642,13 @@ export function createOrchestrator(
     }).catch((err) => log.fail('intake', err));
   }
 
-  /** Group @bot /resume: post the history picker for this project's cwd. */
+  /** Group @bot /resume: post the history picker for this project's cwd. Owner-only
+   * (admins[]) — 恢复会话会改变上下文，属管理类命令；非管理员收到无权限提示。 */
   async function postResumeCard(msg: NormalizedMessage): Promise<void> {
+    if (!isAdmin(cfg, msg.senderId)) {
+      await denyAdminCommand(msg, 'resume');
+      return;
+    }
     await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
       const project = await getProjectByChatId(msg.chatId);
       const cwd = project?.cwd ?? fallbackCwd;
@@ -641,7 +700,7 @@ export function createOrchestrator(
   ): Promise<void> {
     const noMention = project ? (project.noMention ?? defaultNoMention(project)) : true;
     await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
-      await sendManagedCard(channel, msg.chatId, buildHelpCard(scope, noMention), msg.messageId, inThread).catch((err) =>
+      await sendManagedCard(channel, msg.chatId, buildHelpCard(scope, noMention, isAdmin(cfg, msg.senderId)), msg.messageId, inThread).catch((err) =>
         log.fail('card', err, { cmd: 'help', scope }),
       );
       log.info('card', 'help', { scope });
@@ -719,7 +778,7 @@ export function createOrchestrator(
       return undefined;
     }
     const op = evt.operator?.openId ?? '';
-    if (op !== state.requesterOpenId || !isChatAllowed(cfg, state.chatId) || !isUserAllowed(cfg, op)) {
+    if (op !== state.requesterOpenId || !isChatAllowed(cfg, state.chatId)) {
       log.info('card', 'action-denied', { reason: 'not-allowed' });
       return undefined;
     }
@@ -763,8 +822,7 @@ export function createOrchestrator(
     });
 
   /** Run-card actions: gated by chat/user allow lists (design §5). */
-  const runAllowed = (evt: CardActionEvent): boolean =>
-    isChatAllowed(cfg, evt.chatId) && isUserAllowed(cfg, evt.operator?.openId ?? '');
+  const runAllowed = (evt: CardActionEvent): boolean => isChatAllowed(cfg, evt.chatId);
   /**
    * Owner-or-admin gate for run-card controls. Killing/altering someone else's
    * run is destructive (design §5: 杀别人的 run 限 admins), and `allowedUsers`
@@ -1089,6 +1147,110 @@ export function createOrchestrator(
           return buildGroupSettingsCard({ ...project, noMention: on });
         }
         return buildGroupSettingsCard({ name: '本群', kind: 'multi', noMention: on });
+      });
+    })
+    // ── 权限管理回调（admins 全局 / 项目响应白名单）。均 dmAdmin 门控（私聊管理台）。
+    // 列表卡用 patch 原地重渲染（纯按钮不锁）；加人是 form 提交，结果发**新卡**（旧表单
+    // 留痕），规避 select 锁卡。owner 恒在 admins 名单顶、不可删。
+    .on(DM.admins, ({ evt }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      patch(evt, async () =>
+        buildAdminsCard(cfg, await resolveNames(channel, [resolveOwner(cfg), ...(cfg.preferences?.access?.admins ?? [])])),
+      );
+    })
+    .on(DM.addAdminForm, ({ evt }) => {
+      if (dmAdmin(evt.operator?.openId)) patch(evt, buildAddAdminCard());
+    })
+    .on(DM.addAdminSubmit, ({ evt, formValue }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const id = pickOpenId(formValue);
+      log.info('console', 'admin-add', { picked: id?.slice(-6) ?? null });
+      void (async () => {
+        if (id) {
+          const access: AppAccess = { ...(cfg.preferences?.access ?? {}) };
+          access.ownerOpenId ??= resolveOwner(cfg);
+          access.admins = Array.from(new Set([...(access.admins ?? []), id]));
+          cfg.preferences = { ...(cfg.preferences ?? {}), access };
+          await saveConfig(cfg).catch((e) => log.fail('console', e, { phase: 'save-config' }));
+        }
+        const ids = [resolveOwner(cfg), ...(cfg.preferences?.access?.admins ?? [])];
+        const next = buildAdminsCard(cfg, await resolveNames(channel, ids));
+        await sendManagedCard(channel, evt.chatId, next).catch((e) => log.fail('console', e, { phase: 'admin-add-result' }));
+      })();
+    })
+    .on(DM.rmAdmin, ({ evt, value }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const id = typeof value.u === 'string' ? value.u : '';
+      patch(evt, async () => {
+        if (id && id !== resolveOwner(cfg)) {
+          const access: AppAccess = { ...(cfg.preferences?.access ?? {}) };
+          access.ownerOpenId ??= resolveOwner(cfg);
+          access.admins = (access.admins ?? []).filter((x) => x !== id);
+          cfg.preferences = { ...(cfg.preferences ?? {}), access };
+          await saveConfig(cfg).catch((e) => log.fail('console', e, { phase: 'save-config' }));
+        }
+        const ids = [resolveOwner(cfg), ...(cfg.preferences?.access?.admins ?? [])];
+        return buildAdminsCard(cfg, await resolveNames(channel, ids));
+      });
+    })
+    .on(DM.allowlist, ({ evt, value }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const name = typeof value.n === 'string' ? value.n : '';
+      patch(evt, async () => {
+        const p = await getProjectByName(name);
+        if (!p) return buildDmMenuCard();
+        return buildAllowlistCard(p, await resolveNames(channel, p.allowedUsers ?? []));
+      });
+    })
+    .on(DM.addAllowedForm, ({ evt, value }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const name = typeof value.n === 'string' ? value.n : '';
+      if (name) patch(evt, buildAddAllowedCard(name));
+    })
+    .on(DM.addAllowedSubmit, ({ evt, value, formValue }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const name = typeof value.n === 'string' ? value.n : '';
+      const id = pickOpenId(formValue);
+      log.info('console', 'allow-add', { project: name, picked: id?.slice(-6) ?? null });
+      void (async () => {
+        const p = await getProjectByName(name);
+        if (!p) return;
+        const next = id ? Array.from(new Set([...(p.allowedUsers ?? []), id])) : (p.allowedUsers ?? []);
+        if (id) await updateProject(name, { allowedUsers: next });
+        const card = buildAllowlistCard({ ...p, allowedUsers: next }, await resolveNames(channel, next));
+        await sendManagedCard(channel, evt.chatId, card).catch((e) => log.fail('console', e, { phase: 'allow-add-result' }));
+      })();
+    })
+    .on(DM.rmAllowed, ({ evt, value }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const id = typeof value.u === 'string' ? value.u : '';
+      const name = typeof value.n === 'string' ? value.n : '';
+      patch(evt, async () => {
+        const p = await getProjectByName(name);
+        if (!p) return buildDmMenuCard();
+        const next = (p.allowedUsers ?? []).filter((x) => x !== id);
+        await updateProject(name, { allowedUsers: next });
+        return buildAllowlistCard({ ...p, allowedUsers: next }, await resolveNames(channel, next));
+      });
+    })
+    // 项目设置卡（可扩展容器）：打开 + DM 版免@开关（携带项目名 n，不能靠 evt.chatId）。
+    .on(DM.projectSettings, ({ evt, value }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const name = typeof value.n === 'string' ? value.n : '';
+      patch(evt, async () => {
+        const p = await getProjectByName(name);
+        return p ? buildProjectSettingsCard(p) : buildDmMenuCard();
+      });
+    })
+    .on(DM.setNoMentionDm, ({ evt, value }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const name = typeof value.n === 'string' ? value.n : '';
+      const on = value.v === 'on';
+      patch(evt, async () => {
+        const p = await getProjectByName(name);
+        if (!p) return buildDmMenuCard();
+        await updateProject(name, { noMention: on });
+        return buildProjectSettingsCard({ ...p, noMention: on });
       });
     });
 
@@ -1459,8 +1621,7 @@ export function createOrchestrator(
       if (!evt.mentionedBot) return log.info('comment', 'skip', { reason: 'not-mentioned' });
       if (!SUPPORTED_FILE_TYPES.has(evt.fileType))
         return log.info('comment', 'skip', { reason: 'unsupported-fileType', fileType: evt.fileType });
-      if (!isUserAllowed(cfg, evt.operator.openId))
-        return log.info('comment', 'skip', { reason: 'not-allowed' });
+      // 响应白名单已下沉到项目级；云文档评论无项目维度，保持现状（所有人可 @bot 评论）。
 
       const resolved = await resolveComment(channel, evt);
       if (!resolved) return log.info('comment', 'skip', { reason: 'no-target-or-empty' });

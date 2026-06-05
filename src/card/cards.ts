@@ -281,3 +281,16 @@ export function selectStatic(opts: {
     behaviors: [{ type: 'callback', value: { a: opts.actionId } satisfies ActionValue }],
   };
 }
+
+/** A person picker (schema 2.0 `select_person`). Used **inside a form**: its
+ * selected open_id surfaces in `form_value[name]` when the form's submit button
+ * fires (与 input 同款收值方式) — so it never independently triggers a callback
+ * and won't lock the card. 单选；值格式（字符串 vs 数组）于回调内运行时确认。 */
+export function selectPerson(opts: { name: string; placeholder?: string; required?: boolean }): CardElement {
+  return {
+    tag: 'select_person',
+    name: opts.name,
+    ...(opts.placeholder ? { placeholder: { tag: 'plain_text', content: opts.placeholder } } : {}),
+    required: Boolean(opts.required),
+  };
+}

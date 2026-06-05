@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildResumeCard, type ResumeCardState } from '../src/card/command-cards';
+import { buildHelpCard, buildResumeCard, type ResumeCardState } from '../src/card/command-cards';
 import type { ThreadSummary } from '../src/agent/types';
 
 function buttons(node: unknown, acc: any[] = []): any[] {
@@ -49,5 +49,28 @@ describe('buildResumeCard', () => {
     const card = buildResumeCard(state([]));
     expect(buttons(card).length).toBe(0);
     expect(JSON.stringify(card)).toContain('还没有历史会话');
+  });
+});
+
+describe('buildHelpCard 权限过滤', () => {
+  it('主群区：非管理员看不到 owner-only 命令(/resume、/settings)，但对话类命令仍在', () => {
+    const json = JSON.stringify(buildHelpCard('main', true, false));
+    expect(json).not.toContain('/resume');
+    expect(json).not.toContain('/settings');
+    expect(json).toContain('/model'); // 对话类命令对所有人开放
+    expect(json).toContain('/help');
+  });
+
+  it('主群区：管理员能看到全部命令', () => {
+    const json = JSON.stringify(buildHelpCard('main', true, true));
+    expect(json).toContain('/resume');
+    expect(json).toContain('/settings');
+    expect(json).toContain('/model');
+  });
+
+  it('单会话群：/settings 仅管理员可见，/model 始终可见', () => {
+    expect(JSON.stringify(buildHelpCard('single', true, false))).not.toContain('/settings');
+    expect(JSON.stringify(buildHelpCard('single', true, true))).toContain('/settings');
+    expect(JSON.stringify(buildHelpCard('single', true, false))).toContain('/model');
   });
 });

@@ -79,8 +79,23 @@ export const JOIN_GROUP_SCOPES = [
   'im:chat.members:write_only',
 ] as const;
 
+/**
+ * Optional scope for resolving open_id → 姓名 in the admins / 项目白名单 management
+ * cards. Like {@link COMMENT_SCOPES} / {@link JOIN_GROUP_SCOPES}, deliberately NOT
+ * in {@link REQUIRED_SCOPES}: it gates only a display nicety (without it the cards
+ * fall back to showing the open_id tail), so it must never block the daemon-install
+ * scope gate. `contact:user.base:readonly` = read a user's basic info (name) via
+ * contact.v3.user.batch.
+ */
+export const CONTACT_SCOPES = ['contact:user.base:readonly'] as const;
+
 /** Everything the one-click grant URL pre-selects: required + opt-in extras. */
-export const GRANT_SCOPES = [...REQUIRED_SCOPES, ...COMMENT_SCOPES, ...JOIN_GROUP_SCOPES] as const;
+export const GRANT_SCOPES = [
+  ...REQUIRED_SCOPES,
+  ...COMMENT_SCOPES,
+  ...JOIN_GROUP_SCOPES,
+  ...CONTACT_SCOPES,
+] as const;
 
 /**
  * Human-readable Chinese labels per scope token, so the doctor card can show
@@ -109,6 +124,7 @@ export const SCOPE_LABELS: Record<string, string> = {
   'docs:document.comment:read': '读取文档评论',
   'docs:document.comment:create': '发表文档评论回复',
   'wiki:wiki:readonly': '读取知识库节点',
+  'contact:user.base:readonly': '读取成员姓名（管理员 / 白名单展示）',
 };
 
 /** `<中文说明>（<token>）` for a known scope, else the raw token. */

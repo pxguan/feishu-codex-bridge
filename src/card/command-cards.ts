@@ -183,20 +183,16 @@ function talkLine(noMention: boolean, tail: string): string {
 }
 
 /** The `/help` card: commands available **right here** (this exact scope).
- * `noMention` is the group's effective 免@ state (`noMention ?? defaultNoMention`). */
-export function buildHelpCard(scope: HelpScope, noMention = true): CardObject {
+ * `noMention` is the group's effective 免@ state (`noMention ?? defaultNoMention`).
+ * `isAdmin` gates the owner-only commands (`/settings`、`/resume`): non-admins
+ * don't see them listed (they'd be denied anyway — see handle-message 的门控). */
+export function buildHelpCard(scope: HelpScope, noMention = true, isAdmin = false): CardObject {
   const elements: CardElement[] = [];
   if (scope === 'single') {
-    elements.push(
-      md('💬 **单会话群** — 整群就是一个会话，上下文连续。'),
-      hr(),
-      md(
-        `${talkLine(noMention, '交给我处理')}\n` +
-          '· `/model` → 切换模型 / 推理强度\n' +
-          '· `/settings` → 群设置（免@ 开关）\n' +
-          '· `/help` → 这张速查卡',
-      ),
-    );
+    const lines = [talkLine(noMention, '交给我处理'), '· `/model` → 切换模型 / 推理强度'];
+    if (isAdmin) lines.push('· `/settings` → 群设置（免@ 开关）');
+    lines.push('· `/help` → 这张速查卡');
+    elements.push(md('💬 **单会话群** — 整群就是一个会话，上下文连续。'), hr(), md(lines.join('\n')));
   } else if (scope === 'topic') {
     elements.push(
       md('🧵 **话题内** — 每个话题是一个独立会话。'),
@@ -209,17 +205,10 @@ export function buildHelpCard(scope: HelpScope, noMention = true): CardObject {
       note('开新话题：回到主群区 @我 + 内容。'),
     );
   } else {
-    elements.push(
-      md('👥 **主群区** — @我开话题，每个话题是独立会话。'),
-      hr(),
-      md(
-        '· **@我 + 内容** → 开一个新话题并开始\n' +
-          '· `/resume` → 恢复历史会话\n' +
-          '· `/settings` → 群设置（免@ 开关）\n' +
-          '· `/model` → 需要在话题里用\n' +
-          '· `/help` → 这张速查卡',
-      ),
-    );
+    const lines = ['· **@我 + 内容** → 开一个新话题并开始'];
+    if (isAdmin) lines.push('· `/resume` → 恢复历史会话', '· `/settings` → 群设置（免@ 开关）');
+    lines.push('· `/model` → 需要在话题里用', '· `/help` → 这张速查卡');
+    elements.push(md('👥 **主群区** — @我开话题，每个话题是独立会话。'), hr(), md(lines.join('\n')));
   }
   return card(elements, { header: { title: '🤖 可用命令', template: 'blue' }, summary: '可用命令' });
 }

@@ -28,6 +28,9 @@ export interface Project {
   /** for 'joined' projects: open_id of the person who added the bot + did the
    * bind (the bot DMs them the bind card / a removal notice). */
   addedBy?: string;
+  /** 项目级响应白名单：谁能让 bot 在本群响应/跑 codex。空/缺省 = 所有人；
+   * admin/owner 恒豁免（见 isUserAllowedInProject）。 */
+  allowedUsers?: string[];
 }
 
 /**

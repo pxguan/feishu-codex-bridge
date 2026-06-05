@@ -43,13 +43,17 @@ export type PendingPolicy = 'steer' | 'queue';
 
 /**
  * Access control (see design §5):
+ *   ownerOpenId   — 扫码注册者(owner)。恒为 admin、不可删；即使 admins 为空也仍是 admin。
  *   admins        — open_ids that may DM the bot (create project / global config /
- *                   destructive ops). Default = [owner] (seeded at onboarding).
- *   allowedUsers  — open_ids that may @bot in groups/threads. Empty = all.
+ *                   destructive ops). 空 = 仅 owner。
+ *   allowedUsers  — @deprecated 全局响应白名单，已由项目级 Project.allowedUsers 取代。
  *   allowedChats  — chat_ids the bot responds in. Empty = all.
  */
 export interface AppAccess {
+  /** 扫码注册者的 open_id；恒为 admin，不可删；admins 增删不影响它。 */
+  ownerOpenId?: string;
   admins?: string[];
+  /** @deprecated 已由项目级 Project.allowedUsers 取代；保留仅为兼容旧 config 解析，不再读取。 */
   allowedUsers?: string[];
   allowedChats?: string[];
 }
@@ -143,7 +147,10 @@ export function getRunIdleTimeoutMs(cfg: AppConfig): number | undefined {
   return clamped * 1000;
 }
 
-/** True when `senderId` may @bot in groups/threads. Empty list = all. */
+/**
+ * @deprecated 全局响应白名单已由项目级 {@link isUserAllowedInProject} 取代，不再使用。
+ * 保留以防外部引用；新代码请用 isUserAllowedInProject。
+ */
 export function isUserAllowed(cfg: AppConfig, senderId: string): boolean {
   const list = cfg.preferences?.access?.allowedUsers;
   if (!list || list.length === 0) return true;
@@ -157,9 +164,31 @@ export function isChatAllowed(cfg: AppConfig, chatId: string): boolean {
   return list.includes(chatId);
 }
 
-/** True when `senderId` is an admin (may DM / create project / destructive). */
+/** The bot owner's open_id: explicit `ownerOpenId`, else the first admin (惰性
+ * 兼容老 config——无 ownerOpenId 时回退首个 admin，不写盘). undefined 仅当从未注册。 */
+export function resolveOwner(cfg: AppConfig): string | undefined {
+  const access = cfg.preferences?.access;
+  return access?.ownerOpenId ?? access?.admins?.[0];
+}
+
+/** True when `senderId` is the owner or an admin (may DM / create project /
+ * destructive). Owner 恒为 admin、不受 admins 增删影响；admins 为空时仅 owner 是 admin。 */
 export function isAdmin(cfg: AppConfig, senderId: string): boolean {
-  const list = cfg.preferences?.access?.admins;
+  if (!senderId) return false;
+  if (senderId === resolveOwner(cfg)) return true;
+  return Boolean(cfg.preferences?.access?.admins?.includes(senderId));
+}
+
+/** True when `senderId` may make the bot respond in a project group. admin/owner
+ * 恒豁免；项目白名单空/缺省 = 所有人。project 用结构化 Pick 类型避免 schema→registry
+ * 循环依赖。 */
+export function isUserAllowedInProject(
+  cfg: AppConfig,
+  project: { allowedUsers?: string[] } | undefined,
+  senderId: string,
+): boolean {
+  if (isAdmin(cfg, senderId)) return true;
+  const list = project?.allowedUsers;
   if (!list || list.length === 0) return true;
   return list.includes(senderId);
 }

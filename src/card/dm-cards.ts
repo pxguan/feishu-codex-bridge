@@ -2,12 +2,13 @@ import {
   getMaxConcurrentRuns,
   getPendingPolicy,
   getShowToolCalls,
+  resolveOwner,
   type AppConfig,
 } from '../config/schema';
 import { defaultNoMention, type Project } from '../project/registry';
 import type { SessionRecord } from '../bot/session-store';
 import { labelScope } from '../config/scopes';
-import { actions, button, card, form, hr, input, linkButton, md, note, submitButton, type CardElement, type CardObject } from './cards';
+import { actions, button, card, form, hr, input, linkButton, md, note, selectPerson, submitButton, type CardElement, type CardObject } from './cards';
 import { relativeTime } from './command-cards';
 
 /** applink to open a Feishu group chat by chat_id (oc_xxx). Feishu has no
@@ -39,6 +40,18 @@ export const DM = {
   setWatchdog: 'dm.set.watchdog',
   setPending: 'dm.set.pending',
   setConcurrency: 'dm.set.concurrency',
+  // 权限管理：全局 admins（settings 卡进入）+ 项目响应白名单（项目列表 / 建项目完成卡进入）
+  admins: 'dm.admins',
+  addAdminForm: 'dm.admin.addForm',
+  addAdminSubmit: 'dm.admin.addSubmit',
+  rmAdmin: 'dm.admin.rm',
+  allowlist: 'dm.allowlist',
+  addAllowedForm: 'dm.allow.addForm',
+  addAllowedSubmit: 'dm.allow.addSubmit',
+  rmAllowed: 'dm.allow.rm',
+  // 项目设置容器（项目列表 / 建项目完成卡 进入），以后的项目级设置项往这里加
+  projectSettings: 'dm.projectSettings',
+  setNoMentionDm: 'dm.proj.noMention',
 } as const;
 
 /** Action ids for the in-group settings card (@bot /settings). */
@@ -433,7 +446,13 @@ export function buildNewProjectDoneCard(p: Project): CardObject {
     note(`📂 \`${p.cwd}\`   ·   ${kindLabel(p.kind)}`),
     md(p.chatId ? '👉 去群里 **@我** 干活。' : '发我任意消息可再次打开管理台。'),
   ];
-  if (p.chatId) elements.push(actions([linkButton('💬 打开群聊', openChatUrl(p.chatId), 'primary')]));
+  if (p.chatId)
+    elements.push(
+      actions([
+        linkButton('💬 打开群聊', openChatUrl(p.chatId), 'primary'),
+        button('⚙️ 项目设置', { a: DM.projectSettings, n: p.name }),
+      ]),
+    );
   return card(elements, { header: { title, template: 'green' } });
 }
 
@@ -473,6 +492,7 @@ export function buildProjectListCard(
     }
     const row: CardObject[] = [];
     if (p.chatId) row.push(linkButton('💬 打开群聊', openChatUrl(p.chatId)));
+    row.push(button('⚙️ 设置', { a: DM.projectSettings, n: p.name }));
     row.push(button('🗑 删除', { a: DM.rmConfirm, n: p.name }, 'danger'));
     elements.push(actions(row));
     elements.push(hr());
@@ -550,7 +570,8 @@ export function buildSettingsCard(cfg: AppConfig): CardObject {
         { label: '20', value: '20' },
       ]),
       note('⚠️ 假死超时 / 并发上限 改后需**重启**生效；工具显示 / 运行中新消息 即时生效。'),
-      actions([button('⬅️ 菜单', { a: DM.menu })]),
+      hr(),
+      actions([button('👮 管理员', { a: DM.admins }), button('⬅️ 菜单', { a: DM.menu })]),
     ],
     { header: { title: '⚙️ 设置', template: 'blue' } },
   );
@@ -580,5 +601,140 @@ export function buildGroupSettingsCard(project: Pick<Project, 'name' | 'kind' | 
       note('⚠️ 免@ 需应用已开通「接收群内所有消息」(im:message.group_msg)权限，否则收不到非 @ 消息。'),
     ],
     { header: { title: '⚙️ 群设置', template: 'blue' } },
+  );
+}
+
+// ── 权限管理卡（admins / 项目响应白名单）──────────────────────────────────────
+
+/** 行内显示一个成员：姓名优先，拿不到名（无 contact scope / 查询失败）则显示 open_id 尾段。 */
+function memberName(names: Map<string, string>, id: string): string {
+  return names.get(id) ?? `…${id.slice(-6)}`;
+}
+
+/**
+ * 全局管理员名单卡（DM「⚙️ 设置 → 👮 管理员」）。**纯按钮卡**——绝不放 select：select
+ * 一旦交互会锁 card_id（见 {@link buildSettingsCard} 注释）。加人走独立的表单卡
+ * {@link buildAddAdminCard}。owner 行无移除按钮（owner 恒为 admin、不可删）。
+ * `names` 由调用方用 contact.batch 预解析 open_id→姓名。
+ */
+export function buildAdminsCard(cfg: AppConfig, names: Map<string, string>): CardObject {
+  const owner = resolveOwner(cfg);
+  const admins = cfg.preferences?.access?.admins ?? [];
+  const elements: CardElement[] = [md('**管理员名单** · 本 bot 全局（可私聊管理 / 建项目 / 销毁操作）'), hr()];
+  const seen = new Set<string>();
+  if (owner) {
+    seen.add(owner);
+    elements.push(actions([md(`👑 **${memberName(names, owner)}** · Bot 拥有者（注册者）`)]));
+  }
+  let extra = 0;
+  for (const id of admins) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    extra++;
+    elements.push(actions([md(memberName(names, id)), button('🗑 移除', { a: DM.rmAdmin, u: id }, 'danger')]));
+  }
+  if (extra === 0) elements.push(note('暂无额外管理员。'));
+  elements.push(
+    hr(),
+    actions([button('➕ 添加管理员', { a: DM.addAdminForm }, 'primary'), button('⬅️ 设置', { a: DM.settings })]),
+    note('👑 Bot 拥有者（注册此 bot 的人）恒为管理员，不可移除；名单为空时仅拥有者可管理。'),
+  );
+  return card(elements, { header: { title: '👮 管理员', template: 'blue' } });
+}
+
+/** 添加管理员的表单卡：select_person 选人 + 提交。提交后旧卡留痕、结果发新名单卡
+ * （form+submit 模式规避 select 锁卡，仿 {@link buildNewProjectFormCard}）。 */
+export function buildAddAdminCard(): CardObject {
+  return card(
+    [
+      md('**添加管理员** · 选一个人加入管理员名单'),
+      form('add_admin', [
+        selectPerson({ name: 'pick', placeholder: '选择要添加为管理员的人', required: true }),
+        actions([submitButton('✅ 确认添加', { a: DM.addAdminSubmit }, 'primary', 'submit_admin')]),
+      ]),
+      actions([button('⬅️ 取消', { a: DM.admins })]),
+    ],
+    { header: { title: '➕ 添加管理员', template: 'blue' } },
+  );
+}
+
+/**
+ * 项目设置卡（DM「📁 项目列表 / 建项目完成卡 → ⚙️ 设置」）。可扩展容器：当前放
+ * 免@ 开关 + 响应白名单入口，以后的项目级设置项往这里加。纯按钮（不锁卡）。
+ * 免@ 按钮携带项目名 n（DM 里点，不能靠 evt.chatId 取项目）。
+ */
+export function buildProjectSettingsCard(
+  project: Pick<Project, 'name' | 'kind' | 'noMention' | 'origin' | 'cwd'>,
+): CardObject {
+  const kind = project.kind ?? 'multi';
+  const noMention = project.noMention ?? defaultNoMention(project);
+  return card(
+    [
+      md(`**项目设置** · ${project.name}`),
+      note(`${kindLabel(kind)}${project.cwd ? `   ·   📂 \`${project.cwd}\`` : ''}`),
+      hr(),
+      md('✋ 免@（不用 @ 也回复）'),
+      actions([
+        button('开', { a: DM.setNoMentionDm, v: 'on', n: project.name }, noMention ? 'primary' : 'default'),
+        button('关', { a: DM.setNoMentionDm, v: 'off', n: project.name }, noMention ? 'default' : 'primary'),
+      ]),
+      note(
+        kind === 'single'
+          ? '开启后：本群所有消息(不用 @)都交给我处理。'
+          : '开启后：话题内消息(不用 @)都处理；**开新话题仍需 @我**。',
+      ),
+      hr(),
+      actions([button('🛡 响应白名单', { a: DM.allowlist, n: project.name }, 'primary')]),
+      note('设置谁能让我在本群响应 / 跑 codex（空 = 所有人）。'),
+      hr(),
+      actions([button('⬅️ 项目列表', { a: DM.projects })]),
+    ],
+    { header: { title: '⚙️ 项目设置', template: 'blue' } },
+  );
+}
+
+/**
+ * 项目响应白名单卡（DM「⚙️ 项目设置 → 🛡 响应白名单」）。结构同 {@link buildAdminsCard}：
+ * 纯按钮 + 加人走表单卡 {@link buildAddAllowedCard}。空名单 = 所有人可用；admin/owner
+ * 恒豁免，不受此名单限制。
+ */
+export function buildAllowlistCard(
+  project: Pick<Project, 'name' | 'allowedUsers'>,
+  names: Map<string, string>,
+): CardObject {
+  const list = project.allowedUsers ?? [];
+  const elements: CardElement[] = [md(`**响应白名单** · ${project.name}`), note('谁能让我在本群响应 / 跑 codex'), hr()];
+  if (list.length === 0) {
+    elements.push(note('当前**所有人**可用（管理员始终可用）。'));
+  } else {
+    for (const id of list) {
+      elements.push(
+        actions([md(memberName(names, id)), button('🗑 移除', { a: DM.rmAllowed, u: id, n: project.name }, 'danger')]),
+      );
+    }
+  }
+  elements.push(
+    hr(),
+    actions([
+      button('➕ 添加', { a: DM.addAllowedForm, n: project.name }, 'primary'),
+      button('⬅️ 设置', { a: DM.projectSettings, n: project.name }),
+    ]),
+    note('管理员始终可用，不受此名单限制；名单为空 = 所有人可用。'),
+  );
+  return card(elements, { header: { title: '🛡 响应白名单', template: 'blue' } });
+}
+
+/** 添加白名单成员的表单卡。提交按钮携带项目名（n），回调据此 updateProject。 */
+export function buildAddAllowedCard(projectName: string): CardObject {
+  return card(
+    [
+      md(`**添加可使用「${projectName}」的人**`),
+      form('add_allowed', [
+        selectPerson({ name: 'pick', placeholder: '选择可使用本群的人', required: true }),
+        actions([submitButton('✅ 确认添加', { a: DM.addAllowedSubmit, n: projectName }, 'primary', 'submit_allowed')]),
+      ]),
+      actions([button('⬅️ 取消', { a: DM.allowlist, n: projectName })]),
+    ],
+    { header: { title: '➕ 添加白名单成员', template: 'blue' } },
   );
 }
