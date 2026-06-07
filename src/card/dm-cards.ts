@@ -34,6 +34,12 @@ export const DM = {
   reconnect: 'dm.reconnect',
   update: 'dm.update',
   updateDo: 'dm.update.do',
+  // 📊 Codex 用量（限额 + 个人资料统计 + 热力图）；share 打开内容选择卡，
+  // shareDo 按所选区块生成可转发的分享卡
+  usage: 'dm.usage',
+  usageRefresh: 'dm.usage.refresh',
+  usageShare: 'dm.usage.share',
+  usageShareDo: 'dm.usage.share.do',
   rmConfirm: 'dm.rmConfirm',
   rmDo: 'dm.rmDo',
   rmCancel: 'dm.rmCancel',
@@ -80,6 +86,7 @@ export function buildDmMenuCard(): CardObject {
         button('⚙️ 设置', { a: DM.settings }),
       ]),
       actions([
+        button('📊 用量', { a: DM.usage }),
         button('🩺 诊断', { a: DM.doctor }),
         button('🔄 重连', { a: DM.reconnect }),
         button('⬆️ 版本更新', { a: DM.update }),

@@ -71,6 +71,14 @@ import {
   restartDaemon,
 } from '../service/update';
 import { resolveCodexBin, codexVersion } from '../agent/codex-appserver/locate';
+import { fetchUsageBundle, UsageError } from '../agent/codex-appserver/usage';
+import {
+  buildShareConfigCard,
+  buildUsageCard,
+  buildUsageShareCard,
+  parseShareSections,
+  type UsageCardState,
+} from '../card/usage-cards';
 import { serviceStdoutPath, serviceStderrPath } from '../service/common';
 import { bridgeVersion } from '../core/version';
 import { paths } from '../config/paths';
@@ -1019,6 +1027,53 @@ export function createOrchestrator(
     patch(evt, buildDmMenuCard());
   };
 
+  // 📊 Codex 用量：loading 卡先落地（取数走网络 1~3s），结果再原地覆盖。错误按
+  // UsageError.kind 渲染对应的提示卡（未登录 / API-key 模式 / 需重登 / 波动重试）。
+  // 孤儿卡自愈（与 settleUpdate 的 fallbackChatId 同语义）：重启后 byMessageId 映射
+  // 已丢，updateManagedCard 返回 false（不抛错、.catch 兜不住）——loading 阶段就改发
+  // 一张新卡并把结果更新指向它，否则旧菜单卡上这颗按钮就是「点了毫无反应」的死按钮。
+  const runUsage = (evt: CardActionEvent, force: boolean): void => {
+    if (!dmAdmin(evt.operator?.openId)) return;
+    void (async () => {
+      await new Promise((r) => setTimeout(r, CARD_SETTLE_MS));
+      let msgId = evt.messageId;
+      const okLoading = await updateManagedCard(channel, msgId, buildUsageCard({ phase: 'loading' })).catch(
+        () => false,
+      );
+      if (!okLoading) {
+        const sent = await sendManagedCard(channel, evt.chatId, buildUsageCard({ phase: 'loading' })).catch(
+          (e) => {
+            log.fail('console', e, { phase: 'usage-loading' });
+            return undefined;
+          },
+        );
+        if (!sent) return;
+        msgId = sent.messageId;
+      }
+      let state: UsageCardState;
+      try {
+        state = { phase: 'ready', data: await fetchUsageBundle(force) };
+      } catch (err) {
+        log.fail('console', err, { phase: 'usage' });
+        state = {
+          phase: 'error',
+          kind: err instanceof UsageError ? err.kind : 'transient',
+          message: err instanceof Error ? err.message : String(err),
+        };
+      }
+      const ok = await updateManagedCard(channel, msgId, buildUsageCard(state)).catch((e) => {
+        log.fail('console', e, { phase: 'usage-render' });
+        return false;
+      });
+      if (!ok) {
+        // 结果卡必须落地：原地更新失败（极小概率 loading 后实体又失效）就发新卡兜底
+        await sendManagedCard(channel, evt.chatId, buildUsageCard(state)).catch((e) =>
+          log.fail('console', e, { phase: 'usage-fallback' }),
+        );
+      }
+    })();
+  };
+
   // Build the project list card with each project's topics (sessions) grouped
   // by chatId, most-recent first — shared by the list/cancel/delete handlers.
   const renderProjectList = async (): Promise<object> => {
@@ -1206,6 +1261,37 @@ export function createOrchestrator(
           // 给完成卡一点渲染时间，再让 launchd 重启（kill 自己）。
           await new Promise((r) => setTimeout(r, 800));
           await restartDaemon().catch((e) => log.fail('console', e, { phase: 'update-restart' }));
+        }
+      })();
+    })
+    // 📊 Codex 用量：loading → 并行拉 wham/usage + wham/profiles/me → 原地更新结果卡。
+    // 同 DM.update 的双阶段模式：handler 立即返回让 SDK ack，慢活全在 settle 之后。
+    .on(DM.usage, ({ evt }) => runUsage(evt, false))
+    .on(DM.usageRefresh, ({ evt }) => runUsage(evt, true))
+    // 分享：先弹「选择分享内容」表单卡（多选区块，不选=全部），提交后按所选区块
+    // 动态拼装一张**新的**纯展示卡（不动控制台卡）——它零按钮、不再更新，数据定格
+    // 在生成时刻，用户长按/右键即可原生转发（流式卡/带回调的卡转发会出问题）。
+    .on(DM.usageShare, ({ evt }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      patch(evt, buildShareConfigCard());
+    })
+    .on(DM.usageShareDo, ({ evt, formValue }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const sections = parseShareSections(formValue?.secs);
+      void (async () => {
+        await new Promise((r) => setTimeout(r, CARD_SETTLE_MS));
+        try {
+          const data = await fetchUsageBundle();
+          await sendManagedCard(channel, evt.chatId, buildUsageShareCard(data, { sections }), evt.messageId);
+          log.info('console', 'usage-share', { sections: [...sections].join(',') });
+          // 配置卡原地换成「已生成」态（带新表单，可换组合再来一张）
+          await updateManagedCard(channel, evt.messageId, buildShareConfigCard(true)).catch(() => undefined);
+        } catch (err) {
+          log.fail('console', err, { phase: 'usage-share' });
+          const reason = err instanceof UsageError ? err.message : '拉取用量数据失败';
+          await channel
+            .send(evt.chatId, { markdown: `⚠️ 生成分享卡失败：${reason}` }, { replyTo: evt.messageId })
+            .catch(() => undefined);
         }
       })();
     })

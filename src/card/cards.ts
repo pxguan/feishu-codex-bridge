@@ -35,9 +35,14 @@ export function card(
     streaming?: boolean;
     /** Mobile push-notification preview text (config.summary.content). */
     summary?: string;
+    /** Set false to forbid users forwarding this card (config.enable_forward).
+     * Feishu's default is true (forwardable); only opt out for cards whose
+     * buttons would be dead/confusing in the forwarded copy. */
+    forward?: boolean;
   } = {},
 ): CardObject {
   const config: Record<string, unknown> = { update_multi: true };
+  if (opts.forward === false) config.enable_forward = false;
   if (opts.streaming) {
     // streaming_mode is REQUIRED for element-level streaming (cardElement.content),
     // which the answer text uses for the native typewriter. Per Feishu's docs,
