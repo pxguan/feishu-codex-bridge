@@ -100,7 +100,14 @@ import { refreshBranch } from '../project/announcement';
 import { leaveChat, transferOwnership } from '../project/group-ops';
 import { getSession, listSessions, patchSession, upsertSession, type SessionRecord } from './session-store';
 import { handleDmConsole } from './dm-console';
-import { collectInboundImages, messageHasImages } from './media';
+import {
+  collectInboundFiles,
+  collectInboundImages,
+  messageHasFiles,
+  messageHasImages,
+  stripFileTokens,
+  weaveFileManifest,
+} from './media';
 import {
   addCommentReaction,
   buildCommentPrompt,
@@ -532,6 +539,27 @@ export function createOrchestrator(
   }
 
   /**
+   * Download any file attachments on `msg` and fold their local paths into the
+   * prompt text — codex has no native file input, so an uploaded file is only
+   * visible to it as an on-disk path woven into the text (see
+   * media.weaveFileManifest). Best-effort: gated on messageHasFiles so the
+   * common path stays await-free; a failed download just strips the <file/>
+   * placeholder. Returns `text` unchanged when there are no attachments.
+   */
+  async function ingestFiles(msg: NormalizedMessage, text: string): Promise<string> {
+    if (!messageHasFiles(msg)) return text;
+    const files = await collectInboundFiles(channel, msg);
+    const woven = weaveFileManifest(text, files);
+    // A file-ONLY message whose download failed (oversize / Feishu reject /
+    // transient) strips to '' — don't hand codex a blank turn (wasted run +
+    // empty card). Tell it the attachment couldn't be read so it can say so.
+    if (!woven.trim()) {
+      return '用户发来一个附件，但桥没能下载它（可能超过 50MB 上限或被飞书拒绝）。请告诉用户附件没读到，可以重发，或改为粘贴文本 / 发图片。';
+    }
+    return woven;
+  }
+
+  /**
    * A turn in a session keyed by `sessionKey` — the topic's threadId (multi) or
    * the chatId (single, `flat`). steer/queue mid-turn; otherwise reserve + run.
    * `flat` = reply by quoting (no reply_in_thread / topic), for single groups.
@@ -552,18 +580,21 @@ export function createOrchestrator(
       // turn, so there's no reservation race to protect; gated on
       // messageHasImages so the common text path stays await-free and fast.
       const images = messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined;
-      // The turn may have finished while images downloaded — re-read the session.
-      // If it's gone, start a fresh run (carrying the images we already fetched).
+      // Download file attachments too and weave their paths into the text (codex
+      // reads them by path). Both awaits happen before re-reading the session.
+      const woven = await ingestFiles(msg, text);
+      // The turn may have finished while media downloaded — re-read the session.
+      // If it's gone, start a fresh run (carrying what we already fetched).
       const cur = active.get(sessionKey);
       if (!cur) {
-        startReservedRun(msg, text, sessionKey, flat, project, perm, images);
+        startReservedRun(msg, woven, sessionKey, flat, project, perm, images, true, text);
         return;
       }
       if (getPendingPolicy(cfg) === 'steer' && cur.run && cur.thread) {
         const tid = cur.run.turnId();
         if (tid) {
           try {
-            await cur.thread.steer({ text, images }, tid);
+            await cur.thread.steer({ text: woven, images }, tid);
             log.info('intake', 'steer', { tid, images: images?.length ?? 0 });
             return;
           } catch (err) {
@@ -571,7 +602,7 @@ export function createOrchestrator(
           }
         }
       }
-      cur.queue.push({ text, images });
+      cur.queue.push({ text: woven, images });
       log.info('intake', 'queued', { depth: cur.queue.length });
       return;
     }
@@ -597,11 +628,14 @@ export function createOrchestrator(
     project: Project | undefined,
     perm: TurnPerm,
     preloadedImages?: string[],
+    preIngested?: boolean,
+    summaryText?: string,
   ): void {
     const existing = active.get(sessionKey);
     if (existing) {
       // A run appeared between handleTurn's check and here (we awaited an image
-      // download) — queue onto it rather than launch a second turn.
+      // download) — queue onto it rather than launch a second turn. `text` is
+      // already file-woven when preIngested (handleTurn's fall-through).
       existing.queue.push({ text, images: preloadedImages });
       log.info('intake', 'queued', { depth: existing.queue.length });
       return;
@@ -615,6 +649,9 @@ export function createOrchestrator(
         // (inside the detached run, after the synchronous reservation).
         const images =
           preloadedImages ?? (messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined);
+        // Same for file attachments — weave their paths into the prompt. Skipped
+        // when preIngested (handleTurn already wove them into `text`).
+        const firstText = preIngested ? text : await ingestFiles(msg, text);
         let thread = await resolveThread(sessionKey, msg.chatId, { mode: perm.mode, network: perm.network });
         if (!thread) {
           // Unknown session (created before this bridge, or store lost): treat as
@@ -627,7 +664,10 @@ export function createOrchestrator(
             chatId: msg.chatId,
             cwd,
             codexThreadId: thread.codexThreadId,
-            summary: text.slice(0, 80),
+            // `text` is already file-woven when preIngested; use the raw
+            // `summaryText` (handleTurn's original) so the session label isn't
+            // manifest boilerplate + a temp path.
+            summary: stripFileTokens(summaryText ?? text).slice(0, 80),
             createdAt: Date.now(),
             updatedAt: Date.now(),
           });
@@ -640,7 +680,7 @@ export function createOrchestrator(
             replyInThread: !flat,
             flat,
             thread,
-            firstText: text,
+            firstText,
             images,
             knownThreadId: sessionKey,
             requesterOpenId: msg.senderId,
@@ -753,9 +793,10 @@ export function createOrchestrator(
           .catch(() => undefined);
         return;
       }
-      const firstText = text || '你好，我们开始吧。';
-      // Download any attached/forwarded images so the opening turn can see them.
+      // Download any attached/forwarded images so the opening turn can see them,
+      // and any file attachments (their paths get woven into the prompt text).
       const images = messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined;
+      const firstText = (await ingestFiles(msg, text)) || '你好，我们开始吧。';
       log.info('card', 'start', { project: project?.name ?? '(unregistered)', model, effort, images: images?.length ?? 0 });
       await launchRun(
         {
@@ -768,7 +809,7 @@ export function createOrchestrator(
           model,
           effort,
           cwd,
-          summary: text.slice(0, 80) || '(空)',
+          summary: stripFileTokens(text).slice(0, 80) || '(空)',
           requesterOpenId: msg.senderId,
           roleSuffix: perm.roleSuffix,
         },

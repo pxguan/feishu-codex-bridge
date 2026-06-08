@@ -62,4 +62,7 @@ export const paths = {
    */
   secretsGetterScript: join(appDir, 'secrets-getter'),
   mediaDir: join(appDir, 'media'),
+  /** Inbound file attachments downloaded from chat, handed to codex by absolute
+   * path (codex has no native file input). TTL-pruned like {@link mediaDir}. */
+  inboundDir: join(appDir, 'inbound'),
 };
