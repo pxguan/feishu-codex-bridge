@@ -20,6 +20,10 @@ export interface SessionRecord {
   effort?: ReasoningEffort;
   /** first user message excerpt, for context */
   summary: string;
+  /** createTime (epoch ms) of the most recent message woven into this session —
+   * the high-water mark for topic-history catch-up: the next turn only pulls
+   * thread messages newer than this (see context-weave.fetchThreadContext). */
+  lastSeenAt?: number;
   createdAt: number;
   updatedAt: number;
 }

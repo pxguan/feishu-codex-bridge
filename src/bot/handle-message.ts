@@ -109,6 +109,12 @@ import {
   weaveFileManifest,
 } from './media';
 import {
+  fetchQuotedMessage,
+  fetchThreadContext,
+  weaveQuote,
+  weaveThreadHistory,
+} from './context-weave';
+import {
   addCommentReaction,
   buildCommentPrompt,
   postCommentReply,
@@ -539,24 +545,37 @@ export function createOrchestrator(
   }
 
   /**
-   * Download any file attachments on `msg` and fold their local paths into the
-   * prompt text — codex has no native file input, so an uploaded file is only
-   * visible to it as an on-disk path woven into the text (see
-   * media.weaveFileManifest). Best-effort: gated on messageHasFiles so the
-   * common path stays await-free; a failed download just strips the <file/>
-   * placeholder. Returns `text` unchanged when there are no attachments.
+   * Per-message context ingest: fold this message's attachments AND any quoted
+   * message into the prompt text codex receives.
+   *   - File attachments → a local-path manifest (codex has no native file input,
+   *     so an upload is only visible as an on-disk path — see weaveFileManifest).
+   *   - 引用消息 (quote reply) → the quoted message's content, pulled by id and
+   *     PREPENDED as a fenced block (see context-weave.weaveQuote) so codex sees
+   *     上文 the bare @ doesn't carry. Best-effort: a deleted/unreadable quote is
+   *     skipped, never thrown.
+   * Both are gated (messageHasFiles / replyToMessageId) so the common text path
+   * stays await-free. 话题上文 is woven separately in startReservedRun (it is
+   * session-scoped, not per-message). Returns `text` unchanged when there's
+   * nothing to add.
    */
-  async function ingestFiles(msg: NormalizedMessage, text: string): Promise<string> {
-    if (!messageHasFiles(msg)) return text;
-    const files = await collectInboundFiles(channel, msg);
-    const woven = weaveFileManifest(text, files);
-    // A file-ONLY message whose download failed (oversize / Feishu reject /
-    // transient) strips to '' — don't hand codex a blank turn (wasted run +
-    // empty card). Tell it the attachment couldn't be read so it can say so.
-    if (!woven.trim()) {
-      return '用户发来一个附件，但桥没能下载它（可能超过 50MB 上限或被飞书拒绝）。请告诉用户附件没读到，可以重发，或改为粘贴文本 / 发图片。';
+  async function ingestContext(msg: NormalizedMessage, text: string): Promise<string> {
+    let body = text;
+    if (messageHasFiles(msg)) {
+      const files = await collectInboundFiles(channel, msg);
+      body = weaveFileManifest(text, files);
+      // A file-ONLY message whose download failed (oversize / Feishu reject /
+      // transient) strips to '' — don't hand codex a blank turn (wasted run +
+      // empty card). Tell it the attachment couldn't be read so it can say so.
+      if (!body.trim()) {
+        body =
+          '用户发来一个附件，但桥没能下载它（可能超过 50MB 上限或被飞书拒绝）。请告诉用户附件没读到，可以重发，或改为粘贴文本 / 发图片。';
+      }
     }
-    return woven;
+    if (msg.replyToMessageId) {
+      const quoted = await fetchQuotedMessage(channel, msg.replyToMessageId);
+      body = weaveQuote(body, quoted);
+    }
+    return body;
   }
 
   /**
@@ -582,7 +601,7 @@ export function createOrchestrator(
       const images = messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined;
       // Download file attachments too and weave their paths into the text (codex
       // reads them by path). Both awaits happen before re-reading the session.
-      const woven = await ingestFiles(msg, text);
+      const woven = await ingestContext(msg, text);
       // The turn may have finished while media downloaded — re-read the session.
       // If it's gone, start a fresh run (carrying what we already fetched).
       const cur = active.get(sessionKey);
@@ -651,8 +670,20 @@ export function createOrchestrator(
           preloadedImages ?? (messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined);
         // Same for file attachments — weave their paths into the prompt. Skipped
         // when preIngested (handleTurn already wove them into `text`).
-        const firstText = preIngested ? text : await ingestFiles(msg, text);
-        let thread = await resolveThread(sessionKey, msg.chatId, { mode: perm.mode, network: perm.network });
+        let firstText = preIngested ? text : await ingestContext(msg, text);
+        const { thread: resolved, recreated } = await resolveThread(sessionKey, msg.chatId, {
+          mode: perm.mode,
+          network: perm.network,
+        });
+        let thread = resolved;
+        const neverSeen = !thread;
+        // codex's history is EMPTY when the session is brand-new (neverSeen) OR a
+        // resume failed and we fell back to a new thread (recreated) — both want
+        // the FULL topic woven as opening context, not just the delta.
+        const codexEmpty = neverSeen || recreated;
+        // For an already-resumed session the high-water mark (lastSeenAt) tells us
+        // which thread messages codex hasn't seen — read it BEFORE we touch the store.
+        const prior = neverSeen ? undefined : await getSession(sessionKey);
         if (!thread) {
           // Unknown session (created before this bridge, or store lost): treat as
           // a fresh session bound to the resolved cwd.
@@ -668,10 +699,24 @@ export function createOrchestrator(
             // `summaryText` (handleTurn's original) so the session label isn't
             // manifest boilerplate + a temp path.
             summary: stripFileTokens(summaryText ?? text).slice(0, 80),
+            lastSeenAt: msg.createTime,
             createdAt: Date.now(),
             updatedAt: Date.now(),
           });
         }
+        // 话题上文：在话题里 @bot 时，把 bot 还没喂给 codex 的人对人消息补进开场。
+        // codexEmpty（新会话 / resume 失败重建）→ 拉最近 N 条全量；已有会话 → 只拉水位
+        // 标记之后的增量（没有标记说明是 resume 上来的旧会话，codex 已带历史，跳过以免重复喂）。
+        if (msg.threadId && (codexEmpty || prior?.lastSeenAt !== undefined)) {
+          const history = await fetchThreadContext(channel, msg.threadId, {
+            sinceTime: codexEmpty ? 0 : (prior?.lastSeenAt ?? 0),
+            excludeMessageId: msg.messageId,
+          });
+          firstText = weaveThreadHistory(firstText, history);
+        }
+        // Advance the high-water mark so the NEXT turn only catches up新消息.
+        // (a brand-new session already wrote it in the upsert above.)
+        if (!neverSeen) void patchSession(sessionKey, { lastSeenAt: msg.createTime }).catch(() => undefined);
         reserved.thread = thread;
         await launchRun(
           {
@@ -705,16 +750,21 @@ export function createOrchestrator(
    * a tier change can only take effect by EVICTING the live thread first — see
    * evictLiveSessionsForChat, called from the 🔐 权限 handlers. Without that
    * eviction the fast-path below would silently keep a 'full' thread running
-   * after the admin switched to read-only. */
+   * after the admin switched to read-only.
+   *
+   * Returns `recreated: true` ONLY when a resume FAILED and we fell back to a
+   * brand-new codex thread — its history is empty, so the caller re-feeds full
+   * topic context (not just the delta). A `undefined` thread means "never seen"
+   * (caller starts + persists it fresh). */
   async function resolveThread(
     threadId: string,
     chatId: string,
     perm?: { mode?: PermissionMode; network?: boolean },
-  ): Promise<AgentThread | undefined> {
+  ): Promise<{ thread: AgentThread | undefined; recreated: boolean }> {
     const live = sessions.get(threadId);
-    if (live) return live;
+    if (live) return { thread: live, recreated: false };
     const rec = await getSession(threadId);
-    if (!rec) return undefined;
+    if (!rec) return { thread: undefined, recreated: false };
     try {
       const resumed = await backend.resumeThread({
         cwd: rec.cwd,
@@ -725,7 +775,7 @@ export function createOrchestrator(
         network: perm?.network,
       });
       sessions.set(threadId, resumed);
-      return resumed;
+      return { thread: resumed, recreated: false };
     } catch (err) {
       log.fail('agent', err, { phase: 'resume-on-turn', threadId });
       const project = await getProjectByChatId(chatId);
@@ -738,7 +788,10 @@ export function createOrchestrator(
         network: perm?.network ?? project?.network,
       });
       sessions.set(threadId, fresh);
-      return fresh;
+      // The resumed codex thread is gone — repoint the persisted record at the
+      // new thread id so a later restart doesn't keep resuming the dead one.
+      await patchSession(threadId, { codexThreadId: fresh.codexThreadId }).catch(() => undefined);
+      return { thread: fresh, recreated: true };
     }
   }
 
@@ -796,7 +849,7 @@ export function createOrchestrator(
       // Download any attached/forwarded images so the opening turn can see them,
       // and any file attachments (their paths get woven into the prompt text).
       const images = messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined;
-      const firstText = (await ingestFiles(msg, text)) || '你好，我们开始吧。';
+      const firstText = (await ingestContext(msg, text)) || '你好，我们开始吧。';
       log.info('card', 'start', { project: project?.name ?? '(unregistered)', model, effort, images: images?.length ?? 0 });
       await launchRun(
         {
