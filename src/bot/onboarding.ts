@@ -5,7 +5,7 @@ import { isComplete, secretKeyForApp, type AppConfig } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
 import { runRegistrationWizard } from './wizard';
 import { validateAppCredentials } from '../utils/feishu-auth';
-import { buildScopeGrantUrl, buildEventConfigUrl } from '../config/scopes';
+import { buildScopeGrantUrl, buildEventConfigUrl, labelScope } from '../config/scopes';
 import { resolveCodexBin } from '../agent/codex-appserver/locate';
 import { openUrl } from '../utils/open-url';
 import { log } from '../core/logger';
@@ -42,7 +42,10 @@ export function ensureCodex(): boolean {
  *   bot triggers the scan-QR wizard (named `default`) — this is what makes the
  *   implicit `run`/`start` "init if not initialized". Without it (or off a TTY)
  *   a missing bot is an error.
- * - Validates credentials and surfaces the scope-grant link (auto-opened).
+ * - Validates credentials; on missing scopes it prints a non-blocking notice
+ *   (which features are gated, where to grant, that 诊断 can grant later) and
+ *   auto-opens the grant page on a TTY — but NEVER blocks startup or reads
+ *   stdin, so a human at a terminal and codex/automation behave identically.
  *
  * Returns null (after printing why) on any failure.
  */
@@ -82,7 +85,7 @@ export async function ensureOnboarded(
  * Run the scan-QR wizard to create a brand-new feishu app, persist it (keystore
  * + per-bot config dir + registry), validate, and surface the scope link.
  * `desiredName` defaults to the bot's display name (slugified); pass `'default'`
- * for the implicit first-run from `run`/`start`. Returns null on any failure.
+ * for the implicit first-run from `run`/`start`. Returns null on failure.
  */
 export async function registerNewBot(desiredName?: string): Promise<OnboardResult | null> {
   // The scan needs a human at a terminal. A headless context (the launchd
@@ -122,14 +125,17 @@ export async function registerNewBot(desiredName?: string): Promise<OnboardResul
 
   console.log(`✓ 已创建机器人「${name}」  bot: ${v.botName ?? '-'}  appId: ${app.id}`);
   log.info('onboard', 'bot-created', { name, appId: app.id, bot: v.botName ?? null });
-  showScopeGrant(cfg, v.missingScopes);
+  noticeMissingScopes(cfg, v.missingScopes);
 
   const secret = await resolveAppSecret(cfg);
   return { cfg, secret, missingScopes: v.missingScopes };
 }
 
-/** Resolve secret, validate credentials, print result + scope-grant link. */
-async function validateAndReport(cfg: AppConfig): Promise<{ secret: string; missingScopes?: string[] } | null> {
+/** Resolve secret, validate credentials, report result; on missing scopes,
+ *  print the non-blocking notice (see {@link noticeMissingScopes}). */
+async function validateAndReport(
+  cfg: AppConfig,
+): Promise<{ secret: string; missingScopes?: string[] } | null> {
   const secret = await resolveAppSecret(cfg);
   const v = await validateAppCredentials(cfg.accounts.app.id, secret, cfg.accounts.app.tenant);
   if (!v.ok) {
@@ -139,38 +145,23 @@ async function validateAndReport(cfg: AppConfig): Promise<{ secret: string; miss
   }
   console.log(`✓ 凭据校验通过  bot: ${v.botName ?? '-'}  appId: ${cfg.accounts.app.id}`);
   log.info('onboard', 'credentials-ok', { appId: cfg.accounts.app.id, bot: v.botName ?? null });
-  showScopeGrant(cfg, v.missingScopes);
+  noticeMissingScopes(cfg, v.missingScopes);
   return { secret, missingScopes: v.missingScopes };
 }
 
 /**
- * Interactive gate used by `start` before daemonizing: don't install a launchd
- * service for a bot that can't actually receive messages. Blocks until the
- * operator has (1) granted the missing scopes — re-checked live against the
- * Feishu API, scopes take effect immediately — and (2) confirmed they've
- * subscribed events + published a version (neither has an API to verify).
- * No-op off a TTY (scripted re-install of an already-ready bot). Returns false
- * only on a credential error.
+ * Gate used by `start` before daemonizing — the one truly-manual step. Missing
+ * scopes are deliberately NOT handled here: {@link validateAndReport} already
+ * printed the non-blocking notice during onboarding, and we never block daemon
+ * install on scopes (some tenants can't grant on demand; 诊断 grants later). What
+ * remains is events & callbacks, which have NO API to verify (not even a read)
+ * and no deep-preselect — so we print exact click-paths and trust the operator's
+ * Enter. No-op off a TTY (scripted re-install / codex). Always returns true on a
+ * TTY now; the boolean is kept for the signature `start` relies on.
  */
 export async function confirmReadyForDaemon(result: OnboardResult): Promise<boolean> {
   if (!process.stdin.isTTY) return true;
   const { app } = result.cfg.accounts;
-  let missing = result.missingScopes;
-
-  while (missing && missing.length > 0) {
-    const url = buildScopeGrantUrl(app.id, app.tenant);
-    console.log(`\n⏳ 还差 ${missing.length} 项权限未开通，后台服务暂不安装。`);
-    console.log(`   开通页：${url}`);
-    await promptEnter('   在浏览器勾选全部权限并确认后，按 Enter 重新检测（Ctrl+C 取消）… ');
-    const v = await validateAppCredentials(app.id, result.secret, app.tenant);
-    if (!v.ok) {
-      console.error(`✗ 凭据校验失败：${v.reason}`);
-      return false;
-    }
-    missing = v.missingScopes;
-    if (missing && missing.length > 0) console.log(`   仍缺：${missing.join('  ')}`);
-  }
-  console.log('✓ 权限已开通。');
 
   // Events AND callbacks have no API at all (not even a read to verify), and no
   // deep-preselect — only scopes have those. So this is the one truly-manual,
@@ -211,31 +202,32 @@ async function promptEnter(message: string): Promise<string> {
 }
 
 /**
- * Feishu has no "grant on scan" API, so the only way to enable scopes is this
- * console page. The URL is long and gets buried under the bot's startup logs,
- * so we frame it in a banner AND auto-open the browser — otherwise users miss
- * it and then wonder why @-ing the bot does nothing. Best-effort:
- * `missingScopes` is undefined when the check couldn't run.
+ * 缺权限时只「告知」，绝不阻塞启动、绝不读 stdin —— 人和 codex/自动化行为一致。
+ * 打印：缺哪些功能、去哪申请、之后可从私聊「🩺 诊断」补。TTY 下顺手自动开一次浏览器
+ * 授权页（{@link openUrl} 自身在非 TTY 直接 no-op，所以 codex / supervisor 子进程 /
+ * daemon 不会弹浏览器、只打印链接）。missingScopes 三态：undefined=没查成、空=已齐全。
  */
-function showScopeGrant(cfg: AppConfig, missingScopes: string[] | undefined): void {
-  if (missingScopes && missingScopes.length > 0) {
-    const url = buildScopeGrantUrl(cfg.accounts.app.id, cfg.accounts.app.tenant);
-    const rule = '─'.repeat(64);
-    const opened = openUrl(url);
-    console.log(`\n${rule}`);
-    console.log(`⚠️  还差 ${missingScopes.length} 项权限未开通 —— 不开通则收不到消息、发不出卡片`);
-    console.log('   飞书没有「扫码即授权」的接口，只能在浏览器开通（即时生效，无需重启）：');
-    console.log(
-      opened
-        ? '\n   🌐 已自动打开浏览器授权页。若没弹出，手动复制下面链接打开：'
-        : '\n   🌐 在浏览器打开下面链接，勾选全部权限 → 确认：',
-    );
-    console.log(`\n   👉 ${url}\n`);
-    console.log(`   （本次缺失：${missingScopes.join('  ')}）`);
-    console.log(`${rule}\n`);
-  } else if (missingScopes === undefined) {
+function noticeMissingScopes(cfg: AppConfig, missingScopes: string[] | undefined): void {
+  if (missingScopes === undefined) {
     log.info('onboard', 'scope-check-skipped', { reason: 'scope list unavailable' });
+    return;
   }
+  if (missingScopes.length === 0) return;
+  const url = buildScopeGrantUrl(cfg.accounts.app.id, cfg.accounts.app.tenant);
+  const opened = openUrl(url); // TTY → 开浏览器并返回 true；非 TTY → 不开、返回 false
+  // 纯 ASCII 边框：`-` 在 UTF-8 与 GBK 下编码相同，老式 cmd.exe（CP936）也不会乱码。
+  const rule = '-'.repeat(64);
+  console.log(`\n${rule}`);
+  console.log(`⚠️  缺 ${missingScopes.length} 项权限（不影响启动，但这些功能开通前用不了）：`);
+  for (const s of missingScopes) console.log(`   · ${labelScope(s)}`);
+  console.log(
+    opened
+      ? '🌐 已自动打开浏览器授权页（即时生效、无需重启）：'
+      : '   去这里申请（勾选 → 确认，即时生效、无需重启）：',
+  );
+  console.log(`   👉 ${url}`);
+  console.log('   不想现在弄也行：之后私聊机器人 →「🩺 诊断」可随时再申请。');
+  console.log(`${rule}\n`);
 }
 
 export type { BotEntry };
