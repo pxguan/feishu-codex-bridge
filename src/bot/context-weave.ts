@@ -342,3 +342,26 @@ export function weaveThreadHistory(text: string, msgs: ContextMessage[]): string
   const base = text.trim();
   return base ? `${block}\n\n${base}` : block;
 }
+
+/** Max chars for the woven sender display name (matches the per-line history clamp). */
+const SENDER_NAME_MAX = 40;
+
+/**
+ * Prepend a fenced "发信人" block so codex knows WHO sent THIS turn. Feishu's
+ * message event carries the sender's open_id + display name, but the bridge
+ * otherwise hands codex only the message text — leaving it identity-blind.
+ * Folding identity in lets codex (a) match the sender against a roster (e.g. an
+ * approve-gate: is this 开发/老板?), and (b) @ them back via `<at id=ou_xxx></at>`.
+ * Returns `text` unchanged when there's no usable open_id (nothing to assert).
+ * sanitizeContext is the single boundary for the display name — it is
+ * uploader-influenced, so oneLine=true collapses it so a crafted name can't
+ * forge a fenced block (mirrors weaveQuote / weaveThreadHistory).
+ */
+export function weaveSender(text: string, sender: { senderId?: string; senderName?: string }): string {
+  const id = (sender.senderId ?? '').trim();
+  if (!id) return text;
+  const who = sanitizeContext(sender.senderName ?? '', SENDER_NAME_MAX, true) || '某用户';
+  const block = `[本条消息的发信人：${who}（open_id：${id}）]`;
+  const base = text.trim();
+  return base ? `${block}\n\n${base}` : block;
+}
