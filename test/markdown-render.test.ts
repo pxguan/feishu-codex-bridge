@@ -68,6 +68,25 @@ describe('renderRichText', () => {
     expect(tags(els, 'markdown').every((m: any) => !m.content.includes('feishu-card'))).toBe(true);
     expect((els[0] as any).content).toContain('答复');
   });
+
+  it('preserves a Feishu mention tag verbatim (so codex can @ a user)', () => {
+    const els = renderRichText('已处理完，请验收 <at id=ou_abcd1234></at>');
+    expect(els).toHaveLength(1);
+    expect((els[0] as any).content).toBe('已处理完，请验收 <at id=ou_abcd1234></at>');
+  });
+
+  it('preserves a mention even when interleaved with an uploaded image', () => {
+    const map = new Map([['shot.png', 'img_key_1']]);
+    const els = renderRichText('看图 <at id=ou_x></at>\n\n![s](shot.png)', map);
+    expect((els[0] as any).content).toContain('<at id=ou_x></at>');
+    expect(tags(els, 'img')).toHaveLength(1);
+  });
+
+  it('preserves a bare mention with no surrounding text', () => {
+    const els = renderRichText('<at id=ou_x></at>');
+    expect(els).toHaveLength(1);
+    expect((els[0] as any).content).toBe('<at id=ou_x></at>');
+  });
 });
 
 describe('buildCleanCard', () => {
