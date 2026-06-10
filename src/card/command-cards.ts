@@ -189,7 +189,12 @@ function talkLine(noMention: boolean, tail: string): string {
 export function buildHelpCard(scope: HelpScope, noMention = true, isAdmin = false): CardObject {
   const elements: CardElement[] = [];
   if (scope === 'single') {
-    const lines = [talkLine(noMention, '交给我处理'), '· `/model` → 切换模型 / 推理强度'];
+    const lines = [
+      talkLine(noMention, '交给我处理'),
+      '· `/model` → 切换模型 / 推理强度',
+      '· `/context` → 看上下文占比',
+      '· `/compact` → 压缩上下文（释放空间）',
+    ];
     if (isAdmin) lines.push('· `/settings` → 群设置（免@ 开关）');
     lines.push('· `/help` → 这张速查卡');
     elements.push(md('💬 **单会话群** — 整群就是一个会话，上下文连续。'), hr(), md(lines.join('\n')));
@@ -200,6 +205,8 @@ export function buildHelpCard(scope: HelpScope, noMention = true, isAdmin = fals
       md(
         `${talkLine(noMention, '继续当前会话')}\n` +
           '· `/model` → 切换模型 / 推理强度\n' +
+          '· `/context` → 看上下文占比\n' +
+          '· `/compact` → 压缩上下文（释放空间）\n' +
           '· `/help` → 这张速查卡',
       ),
       note('开新话题：回到主群区 @我 + 内容。'),
@@ -244,7 +251,11 @@ export function buildWelcomeCard(kind: 'multi' | 'single', docUrl?: string, noMe
           '· `/settings` → 群设置（免@ 开关）',
       ),
       md('🧵 **话题内**'),
-      md('· 直接发消息（免@）→ 继续当前会话\n· `/model` → 切换模型 / 推理强度'),
+      md(
+        '· 直接发消息（免@）→ 继续当前会话\n' +
+          '· `/model` → 切换模型 / 推理强度\n' +
+          '· `/context` · `/compact` → 看 / 压缩上下文',
+      ),
       note('任意场景发 `/help` 看当前可用命令。'),
     );
   }

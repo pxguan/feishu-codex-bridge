@@ -121,6 +121,28 @@ describe('mapNotification', () => {
     });
   });
 
+  it('maps token usage + compaction notifications', () => {
+    expect(
+      mapNotification(notification('thread/tokenUsage/updated', {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        tokenUsage: { total: { totalTokens: 4096 }, last: {}, modelContextWindow: 8192 },
+      })),
+    ).toEqual({ type: 'context_usage', usedTokens: 4096, contextWindow: 8192 });
+
+    expect(
+      mapNotification(notification('thread/tokenUsage/updated', {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        tokenUsage: { total: { totalTokens: 100 }, last: {}, modelContextWindow: null },
+      })),
+    ).toEqual({ type: 'context_usage', usedTokens: 100, contextWindow: null });
+
+    expect(mapNotification(notification('thread/compacted', { threadId: 'thread-1' }))).toEqual({
+      type: 'context_compacted',
+    });
+  });
+
   it('returns null for noisy or unsupported notifications', () => {
     for (const method of [
       'hook/started',

@@ -47,6 +47,9 @@ export interface RunState {
   errorMsg?: string;
   /** set when terminal === 'idle_timeout' — seconds idle before watchdog gave up */
   idleTimeoutSeconds?: number;
+  /** latest context-window usage (from context_usage events); drives the run
+   * card's threshold gauge. `window` null when codex reports no window. */
+  usage?: { used: number; window: number | null };
 }
 
 export const initialState: RunState = {
@@ -172,6 +175,12 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
       });
       return { ...state, blocks };
     }
+
+    case 'context_usage':
+      return { ...state, usage: { used: evt.usedTokens, window: evt.contextWindow } };
+
+    // context_compacted is surfaced as a standalone notice by the run loop, not
+    // folded into the card — fall through to the no-op default.
 
     case 'error':
       return { ...state, terminal: 'error', errorMsg: evt.message, footer: null };

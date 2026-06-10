@@ -102,6 +102,13 @@ export type AgentEvent =
   | { type: 'tool_use'; itemId: string; title: string; detail?: string }
   | { type: 'tool_result'; itemId: string; output?: string; exitCode?: number | null }
   | { type: 'usage'; inputTokens?: number; outputTokens?: number }
+  // Context-window usage for this thread (from thread/tokenUsage/updated). Drives
+  // the run card's threshold gauge + the /context command. `contextWindow` is the
+  // model's total window (null when codex doesn't report one → percent unknown).
+  | { type: 'context_usage'; usedTokens: number; contextWindow: number | null }
+  // codex compacted the thread's history (thread/compacted). Auto-compaction
+  // surfaces a notice; a manual /compact is suppressed (see handle-message).
+  | { type: 'context_compacted' }
   | { type: 'done'; turnId: string }
   | { type: 'error'; message: string; willRetry: boolean };
 
@@ -125,6 +132,8 @@ export interface AgentThread {
   steer(input: AgentInput, expectedTurnId: string): Promise<void>;
   /** interrupt the in-flight turn (watchdog 中止) */
   abort(turnId: string): Promise<void>;
+  /** summarize the thread's history to free context (thread/compact/start). */
+  compact(): Promise<void>;
   /** terminate the underlying app-server process */
   close(): Promise<void>;
 }
@@ -138,6 +147,10 @@ export interface StartThreadOptions {
   /** let the sandboxed agent's shell reach the network (qa/write only; full is
    * always networked). Default false. */
   network?: boolean;
+  /** codex's built-in auto-compaction (on by default). `false` disables it by
+   * pushing the auto-compact token limit past any real usage. Undefined → leave
+   * codex's default (on). */
+  autoCompact?: boolean;
 }
 
 export interface ResumeThreadOptions extends StartThreadOptions {

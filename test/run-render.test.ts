@@ -203,3 +203,30 @@ describe('buildRunCard — terminal collapse', () => {
     expect(JSON.stringify(els)).toContain('未返回内容');
   });
 });
+
+describe('context usage gauge', () => {
+  it('stores the latest usage from context_usage events', () => {
+    const rs = run([
+      { type: 'context_usage', usedTokens: 100, contextWindow: 8192 },
+      { type: 'context_usage', usedTokens: 4096, contextWindow: 8192 },
+    ]);
+    expect(rs.usage).toEqual({ used: 4096, window: 8192 });
+  });
+
+  it('keeps the run card clean below the threshold', () => {
+    const rs = run([{ type: 'context_usage', usedTokens: 100, contextWindow: 8192 }]);
+    expect(JSON.stringify(buildRunCard({ rs }))).not.toContain('上下文');
+  });
+
+  it('surfaces the gauge + /compact nudge above the threshold', () => {
+    const rs = run([{ type: 'context_usage', usedTokens: 8000, contextWindow: 8192 }]);
+    const json = JSON.stringify(buildRunCard({ rs }));
+    expect(json).toContain('上下文');
+    expect(json).toContain('/compact');
+  });
+
+  it('does not surface the gauge when the window is unknown', () => {
+    const rs = run([{ type: 'context_usage', usedTokens: 999999, contextWindow: null }]);
+    expect(JSON.stringify(buildRunCard({ rs }))).not.toContain('上下文');
+  });
+});

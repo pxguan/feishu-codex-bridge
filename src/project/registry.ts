@@ -45,6 +45,11 @@ export interface Project {
   /** allow the sandboxed agent's shell to reach the network (only meaningful for
    * 'qa'/'write'; 'full' is always networked). Default false. */
   network?: boolean;
+  /** let codex auto-compact this project's threads when context fills (codex's
+   * own built-in, on by default). Read as `autoCompact ?? true`; when false the
+   * bridge pushes codex's auto-compact token limit past any real usage to disable
+   * it (see backend sandboxParams / AUTO_COMPACT_OFF_LIMIT). */
+  autoCompact?: boolean;
 }
 
 /**

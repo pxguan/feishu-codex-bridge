@@ -113,6 +113,16 @@ export function note(content: string): CardElement {
   return { tag: 'div', text: { tag: 'lark_md', content, text_size: 'notation', text_color: 'grey' } };
 }
 
+/** Named text colors the bridge uses on notation lines (feishu 2.0 palette). */
+export type NoteColor = 'grey' | 'green' | 'yellow' | 'orange' | 'red' | 'blue';
+
+/** A {@link note} in a tier color — for the context-usage gauge (green→red) and
+ * the auto-compact notice. The colored emoji dot in the content is the reliable
+ * signal; `text_color` tints the line on clients that honor it. */
+export function colorNote(content: string, color: NoteColor): CardElement {
+  return { tag: 'div', text: { tag: 'lark_md', content, text_size: 'notation', text_color: color } };
+}
+
 export function hr(): CardElement {
   return { tag: 'hr' };
 }

@@ -19,6 +19,12 @@ import {
 } from './run-state';
 import { renderRichText } from './markdown-render';
 import { toolBodyMd, toolHeaderText } from './tool-render';
+import { runCardGauge } from './context-gauge';
+
+/** The context-usage gauge line, only at/above the warn tier (else null). */
+function gaugeEl(state: RunState): CardElement | null {
+  return state.usage ? runCardGauge(state.usage.used, state.usage.window) : null;
+}
 
 /** Action ids for the in-topic run card. */
 export const RC = {
@@ -95,6 +101,9 @@ export function buildRunCard(rc: RunCardState): CardObject {
 function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
   const elements: CardElement[] = [];
 
+  const gauge = gaugeEl(state);
+  if (gauge) elements.push(gauge);
+
   const reasoning = reasoningContent(state);
   if (reasoning) elements.push(reasoningPanel(reasoning, state.reasoningActive));
 
@@ -131,6 +140,9 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
  */
 function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
   const elements: CardElement[] = [];
+
+  const gauge = gaugeEl(state);
+  if (gauge) elements.push(gauge);
 
   const answerIdx = lastTextIndex(state.blocks);
   const answer = answerIdx >= 0 ? (state.blocks[answerIdx] as Extract<Block, { kind: 'text' }>).content.trim() : '';

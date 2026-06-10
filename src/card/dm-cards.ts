@@ -63,6 +63,8 @@ export const DM = {
   rmAllowed: 'dm.allow.rm',
   // 项目设置容器（项目列表 / 建项目完成卡 进入），以后的项目级设置项往这里加
   projectSettings: 'dm.projectSettings',
+  // 🧵 话题钻取：项目总览的「🧵 N 话题」按钮 → 该项目话题列表卡
+  projectTopics: 'dm.projectTopics',
   setNoMentionDm: 'dm.proj.noMention',
   // 🔐 权限：codex 沙箱档位（管理员档 + 普通用户档）+ 联网，做成下拉表单（选+提交）
   permission: 'dm.proj.perm',
@@ -72,6 +74,7 @@ export const DM = {
 /** Action ids for the in-group settings card (@bot /settings). */
 export const GS = {
   setNoMention: 'gs.noMention',
+  setAutoCompact: 'gs.autoCompact',
 } as const;
 
 /** Human label for a project's session-model kind. */
@@ -472,9 +475,17 @@ export function buildNewProjectDoneCard(p: Project): CardObject {
   return card(elements, { header: { title, template: 'green' } });
 }
 
-/** Project list: each project shows its bound group + a jump-to-group link,
- * and lists that group's topics (sessions, most-recent first). Feishu applink
- * can only target the group, not a thread — so the link lands in the group. */
+/** Max topics listed in one project's topics card. Feishu caps a card at ~200
+ * components (error 300305 "element exceeds the limit"); even a single very
+ * active project stays well under this with a generous cap + "+N more" tail. */
+const PROJECT_TOPICS_MAX = 50;
+
+/** Project list — a SLIM overview: one summary line per project + a row of
+ * actions (the 🧵 button drills into that project's topics). Topics are NOT
+ * listed inline: an active group accumulates dozens, and rendering them all
+ * pushed the whole card past Feishu's ~200-component cap (→ silent overflow).
+ * The overview's size now scales with the project COUNT only, so it fits ~10+
+ * projects comfortably; topics live in {@link buildProjectTopicsCard}. */
 export function buildProjectListCard(
   projects: Project[],
   sessionsByChat: Map<string, SessionRecord[]> = new Map(),
@@ -487,27 +498,16 @@ export function buildProjectListCard(
   }
   const elements: CardObject[] = [];
   for (const p of projects) {
+    const topicCount = (p.chatId ? sessionsByChat.get(p.chatId) : undefined)?.length ?? 0;
+    const dir = `📂 \`${p.cwd}\`${p.branch && p.branch !== '—' ? `   🌿 ${p.branch}` : ''}`;
+    const meta = p.chatId
+      ? `${kindLabel(p.kind)}${(p.origin ?? 'created') === 'joined' ? ' · 🔗已加入' : ''}   ·   免@：${(p.noMention ?? defaultNoMention(p)) ? '开' : '关'}`
+      : '⚠️ 未绑定群';
     elements.push(md(`**${p.name}**${p.blank ? ' _(空白)_' : ''}`));
-    elements.push(note(`📂 \`${p.cwd}\`${p.branch && p.branch !== '—' ? `   🌿 ${p.branch}` : ''}`));
-    elements.push(
-      note(
-        p.chatId
-          ? `💬 群：**${p.name}**   ·   ${kindLabel(p.kind)}${(p.origin ?? 'created') === 'joined' ? ' · 🔗已加入' : ''}   ·   免@：${(p.noMention ?? defaultNoMention(p)) ? '开' : '关'}`
-          : '⚠️ 未绑定群',
-      ),
-    );
-    const sessions = (p.chatId ? sessionsByChat.get(p.chatId) : undefined) ?? [];
-    if (sessions.length === 0) {
-      elements.push(note('（暂无话题）'));
-    } else {
-      const sorted = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt);
-      for (const s of sorted) {
-        const title = (s.summary || '(空)').replace(/\s+/g, ' ').slice(0, 40);
-        elements.push(note(`· ${title} · ${relativeTime(s.updatedAt)}`));
-      }
-    }
+    elements.push(note(`${dir}\n${meta}`));
     const row: CardObject[] = [];
     if (p.chatId) row.push(linkButton('💬 打开群聊', openChatUrl(p.chatId)));
+    row.push(button(`🧵 ${topicCount} 话题`, { a: DM.projectTopics, n: p.name }));
     row.push(button('⚙️ 设置', { a: DM.projectSettings, n: p.name }));
     row.push(button('🗑 删除', { a: DM.rmConfirm, n: p.name }, 'danger'));
     elements.push(actions(row));
@@ -516,6 +516,32 @@ export function buildProjectListCard(
   elements.push(note(`共 ${projects.length} 个项目`));
   elements.push(actions([button('⬅️ 菜单', { a: DM.menu })]));
   return card(elements, { header: { title: '📁 项目列表', template: 'wathet' } });
+}
+
+/** Topic drill-down: one project's topics (sessions), newest first, capped to
+ * stay under the component limit. Reached via the 🧵 button on the overview. */
+export function buildProjectTopicsCard(
+  project: Pick<Project, 'name' | 'chatId'>,
+  sessions: SessionRecord[],
+): CardObject {
+  const elements: CardObject[] = [md(`**${project.name}** · 共 ${sessions.length} 个话题`)];
+  if (sessions.length === 0) {
+    elements.push(note('（暂无话题）'));
+  } else {
+    const sorted = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt);
+    for (const s of sorted.slice(0, PROJECT_TOPICS_MAX)) {
+      const title = (s.summary || '(空)').replace(/\s+/g, ' ').slice(0, 50);
+      elements.push(note(`· ${title} · ${relativeTime(s.updatedAt)}`));
+    }
+    if (sorted.length > PROJECT_TOPICS_MAX) {
+      elements.push(note(`· …还有 ${sorted.length - PROJECT_TOPICS_MAX} 个话题（更早的可在群里 \`/resume\` 恢复）`));
+    }
+  }
+  const nav: CardObject[] = [];
+  if (project.chatId) nav.push(linkButton('💬 打开群聊', openChatUrl(project.chatId)));
+  nav.push(button('⬅️ 项目列表', { a: DM.projects }));
+  elements.push(hr(), actions(nav));
+  return card(elements, { header: { title: `🧵 话题 · ${project.name}`, template: 'wathet' } });
 }
 
 export function buildRmConfirmCard(name: string, origin?: 'created' | 'joined'): CardObject {
@@ -622,9 +648,12 @@ export function buildWatchdogCustomCard(cfg: AppConfig): CardObject {
  * (read-only label); 免@ is a live toggle. Uses option buttons (never lock) like
  * {@link buildSettingsCard}. Admin-gated by the handler.
  */
-export function buildGroupSettingsCard(project: Pick<Project, 'name' | 'kind' | 'noMention' | 'origin'>): CardObject {
+export function buildGroupSettingsCard(
+  project: Pick<Project, 'name' | 'kind' | 'noMention' | 'origin' | 'autoCompact'>,
+): CardObject {
   const kind = project.kind ?? 'multi';
   const noMention = project.noMention ?? defaultNoMention(project);
+  const autoCompact = project.autoCompact ?? true;
   const scopeNote =
     kind === 'single'
       ? '开启后：本群所有消息(不用 @)都交给我处理。'
@@ -639,6 +668,11 @@ export function buildGroupSettingsCard(project: Pick<Project, 'name' | 'kind' | 
       ]),
       note(scopeNote),
       note('⚠️ 免@ 需应用已开通「接收群内所有消息」(im:message.group_msg)权限，否则收不到非 @ 消息。'),
+      ...optionRow('🗜️ 自动压缩上下文', GS.setAutoCompact, autoCompact ? 'on' : 'off', [
+        { label: '开', value: 'on' },
+        { label: '关', value: 'off' },
+      ]),
+      note('开启后：上下文接近上限时 Codex 自动总结早前对话、释放空间（默认开）。改动下一轮会话生效。'),
     ],
     { header: { title: '⚙️ 群设置', template: 'blue' } },
   );
