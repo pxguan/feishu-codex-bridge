@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildCompactFailedCard,
+  buildCompactedCard,
+  buildCompactingCard,
   buildContextCard,
   ctxPercent,
   ctxTier,
@@ -65,5 +68,26 @@ describe('buildContextCard', () => {
   it('degrades gracefully when the window is unknown', () => {
     expect(JSON.stringify(buildContextCard(0, null))).toContain('还没有用量数据');
     expect(JSON.stringify(buildContextCard(1500, null))).toContain('tokens');
+  });
+});
+
+describe('manual /compact card states', () => {
+  it('shows a 压缩中 in-progress line', () => {
+    expect(JSON.stringify(buildCompactingCard())).toContain('正在压缩上下文');
+  });
+  it('shows the post-compaction usage when codex reported it', () => {
+    const json = JSON.stringify(buildCompactedCard({ usedTokens: 50_000, contextWindow: 200_000 }));
+    expect(json).toContain('压缩完成');
+    expect(json).toContain('25%');
+    expect(json).toContain('50k/200k');
+  });
+  it('falls back to a generic done line when no usage is known', () => {
+    const json = JSON.stringify(buildCompactedCard(null));
+    expect(json).toContain('压缩完成');
+    expect(json).toContain('已总结归档');
+    expect(json).not.toContain('%');
+  });
+  it('surfaces the failure reason', () => {
+    expect(JSON.stringify(buildCompactFailedCard('boom'))).toContain('压缩失败：boom');
   });
 });

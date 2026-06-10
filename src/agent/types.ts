@@ -118,6 +118,14 @@ export interface AgentRun {
   turnId(): string | undefined;
 }
 
+/** Outcome of a manual {@link AgentThread.compact}. `compacted` is true iff codex
+ * emitted a thread/compacted notice (false ⇒ nothing to compact). `usage` is the
+ * post-compaction token usage when codex reported one, else null. */
+export interface CompactResult {
+  compacted: boolean;
+  usage: { usedTokens: number; contextWindow: number | null } | null;
+}
+
 /** Per-turn overrides (apply to this turn and persist for subsequent turns). */
 export interface TurnOptions {
   model?: string;
@@ -132,8 +140,10 @@ export interface AgentThread {
   steer(input: AgentInput, expectedTurnId: string): Promise<void>;
   /** interrupt the in-flight turn (watchdog 中止) */
   abort(turnId: string): Promise<void>;
-  /** summarize the thread's history to free context (thread/compact/start). */
-  compact(): Promise<void>;
+  /** Summarize the thread's history to free context (thread/compact/start) and
+   * resolve only once it actually finishes — compaction runs as a background
+   * turn, so this drains the event stream to turn/completed. */
+  compact(): Promise<CompactResult>;
   /** terminate the underlying app-server process */
   close(): Promise<void>;
 }

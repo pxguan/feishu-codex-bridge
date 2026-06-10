@@ -68,6 +68,35 @@ export function buildContextCard(used: number, window: number | null): CardObjec
 }
 
 /**
+ * Manual `/compact` card — sent as a managed entity in the "压缩中" state, then
+ * updated in place to {@link buildCompactedCard} / {@link buildCompactFailedCard}
+ * once codex's background compaction turn actually finishes (it's not instant).
+ */
+export function buildCompactingCard(): CardObject {
+  return card([colorNote('🗜️ 正在压缩上下文…', 'blue'), note('总结早前对话、释放空间，请稍候。')], {
+    summary: '正在压缩上下文',
+  });
+}
+
+/** Terminal "压缩完成" state. Shows the post-compaction usage when codex reported
+ * one; otherwise a generic done line. */
+export function buildCompactedCard(usage: { usedTokens: number; contextWindow: number | null } | null): CardObject {
+  const els: CardElement[] = [colorNote('✅ 上下文压缩完成', 'green')];
+  const pct = usage ? ctxPercent(usage.usedTokens, usage.contextWindow) : null;
+  if (usage && pct !== null && usage.contextWindow) {
+    els.push(note(`早前对话已总结归档，现已用 ${k(usage.usedTokens)}/${k(usage.contextWindow)} tokens（${pct}%）。`));
+  } else {
+    els.push(note('早前对话已总结归档、腾出空间继续；最近的上下文保留。'));
+  }
+  return card(els, { summary: '上下文压缩完成' });
+}
+
+/** Terminal "压缩失败" state of the manual `/compact` card. */
+export function buildCompactFailedCard(message: string): CardObject {
+  return card([colorNote(`⚠️ 压缩失败：${message}`, 'red')], { summary: '压缩失败' });
+}
+
+/**
  * The auto-compact notice — a deliberately distinct little card posted whenever
  * codex auto-compacts a thread mid-turn (a manual `/compact` is suppressed). The
  * divider + 🗜️ frame sets it apart from run cards / replies.

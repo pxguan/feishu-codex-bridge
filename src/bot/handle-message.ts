@@ -41,7 +41,13 @@ import { ANSWER_EID, buildRunCard, buildRunCardPlain, RC, type RunCardState } fr
 import { RunCardStream } from '../card/run-card-stream';
 import { buildCleanCard, extractCardFences } from '../card/markdown-render';
 import { imageSources, uploadOutboundImages } from '../card/outbound-images';
-import { buildAutoCompactCard, buildContextCard } from '../card/context-gauge';
+import {
+  buildAutoCompactCard,
+  buildCompactFailedCard,
+  buildCompactedCard,
+  buildCompactingCard,
+  buildContextCard,
+} from '../card/context-gauge';
 import { log, withTrace } from '../core/logger';
 import {
   buildAddAdminCard,
@@ -312,11 +318,6 @@ export function createOrchestrator(
   /** latest context usage per session (sessionKey → tokens), for `/context`.
    * Fed from context_usage events in the run loop; keyed like topicThreadId. */
   const lastUsage = new Map<string, { used: number; window: number | null }>();
-  /** sessions whose NEXT thread/compacted is a drained manual `/compact` (so the
-   * run loop skips the auto-compact notice for it). Best-effort: cleared on
-   * consume; a manual compact that never emits the notice leaves it set until the
-   * next genuine auto-compact eats it (one missed notice, acceptable). */
-  const suppressCompactNotice = new Set<string>();
   let modelsCache: ModelInfo[] | null = null;
 
   async function listModels(): Promise<ModelInfo[]> {
@@ -975,7 +976,9 @@ export function createOrchestrator(
 
   /** `/compact`: summarize the session's history to free context. Idle-only (a
    * running turn owns the thread's single event stream); resumes the session
-   * under its current tier if it isn't live. */
+   * under its current tier if it isn't live. Compaction is a background turn (not
+   * instant), so we post a managed "压缩中" card and flip it in place to
+   * 压缩完成/失败 once {@link AgentThread.compact} actually settles. */
   async function runCompact(
     msg: NormalizedMessage,
     sessionKey: string,
@@ -999,20 +1002,38 @@ export function createOrchestrator(
       await reply('这个会话还没开始，先发条消息聊两句再 `/compact`。');
       return;
     }
-    // Mark so the drained thread/compacted (arriving on the NEXT turn) doesn't
-    // fire the auto-compact notice — this compaction was manual.
-    suppressCompactNotice.add(sessionKey);
+
+    // "压缩中" card we flip in place to the result. Keep its messageId so the
+    // settle step can update the same entity; fall back to a fresh card if the
+    // initial send (or the in-place update) fails.
+    let cardMsgId: string | undefined;
     try {
-      await thread.compact();
-      lastUsage.delete(sessionKey); // refreshes on the next turn's usage event
-      log.info('intake', 'compact', { sessionKey });
-      await reply('🗜️ 已压缩上下文：早前对话已总结归档，下一轮生效。');
+      const sent = await sendManagedCard(channel, msg.chatId, buildCompactingCard(), msg.messageId, inThread);
+      cardMsgId = sent.messageId;
     } catch (err) {
-      suppressCompactNotice.delete(sessionKey);
+      log.fail('card', err, { phase: 'compact-start-card' });
+    }
+    const settle = async (result: object): Promise<void> => {
+      if (cardMsgId && (await updateManagedCard(channel, cardMsgId, result))) return;
+      await sendManagedCard(channel, msg.chatId, result, msg.messageId, inThread).catch((err) =>
+        log.fail('card', err, { phase: 'compact-settle' }),
+      );
+    };
+
+    try {
+      // Resolves only when codex's compaction turn truly finishes (compact()
+      // drains the stream to turn/completed), so the card flips at the right
+      // time AND no stale `done` leaks into the next turn.
+      const { usage } = await thread.compact();
+      if (usage) lastUsage.set(sessionKey, { used: usage.usedTokens, window: usage.contextWindow });
+      else lastUsage.delete(sessionKey); // refreshes on the next turn's usage event
+      log.info('intake', 'compact', { sessionKey, used: usage?.usedTokens ?? null });
+      await settle(buildCompactedCard(usage));
+    } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       const unsupported = /method not found|-32601|unknown (method|request)/i.test(m);
       log.fail('intake', err, { phase: 'compact' });
-      await reply(unsupported ? '⚠️ 当前 codex 版本不支持 `/compact`，请升级 codex 后再试。' : `⚠️ 压缩失败：${m}`);
+      await settle(buildCompactFailedCard(unsupported ? '当前 codex 版本不支持 /compact，请升级后再试。' : m));
     }
   }
 
@@ -2022,15 +2043,12 @@ export function createOrchestrator(
             const cu = ev as { usedTokens: number; contextWindow: number | null };
             lastUsage.set(topicThreadId, { used: cu.usedTokens, window: cu.contextWindow });
           } else if (et === 'context_compacted') {
-            // A manual /compact's drained notice is suppressed; anything else is a
-            // genuine auto-compaction → post the special notice (non-blocking).
-            if (topicThreadId && suppressCompactNotice.has(topicThreadId)) {
-              suppressCompactNotice.delete(topicThreadId);
-            } else {
-              void sendManagedCard(channel, opts.chatId, buildAutoCompactCard(), cardMsgId, !opts.flat).catch((err) =>
-                log.fail('card', err, { phase: 'auto-compact-notice' }),
-              );
-            }
+            // Only genuine auto-compaction reaches the turn loop — a manual
+            // /compact drains its own events in runCompact, so this is always an
+            // auto-compaction → post the special notice (non-blocking).
+            void sendManagedCard(channel, opts.chatId, buildAutoCompactCard(), cardMsgId, !opts.flat).catch((err) =>
+              log.fail('card', err, { phase: 'auto-compact-notice' }),
+            );
           }
           render.apply(ev);
           rc.rs = render.snapshot();

@@ -5,6 +5,7 @@ import type {
   AgentInput,
   AgentRun,
   AgentThread,
+  CompactResult,
   HistoryTool,
   HistoryTurn,
   ModelInfo,
@@ -115,6 +116,10 @@ const BRIDGE_DEVELOPER_INSTRUCTIONS = [
 /** Hard ceiling on a history read so a wedged codex can't hang the resume card. */
 const READ_HISTORY_TIMEOUT_MS = 20_000;
 
+/** Hard ceiling on a manual compaction (an LLM summarization turn) so a wedged
+ * codex can't hang the "压缩中" card forever. */
+const COMPACT_TIMEOUT_MS = 120_000;
+
 /** Reject `p` if it hasn't settled within `ms` (the timer never keeps the event
  * loop alive past resolution). */
 function withDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -211,8 +216,48 @@ class CodexThread implements AgentThread {
     await this.client.request('turn/interrupt', { threadId: this.codexThreadId, turnId });
   }
 
-  async compact(): Promise<void> {
-    await this.client.request('thread/compact/start', { threadId: this.codexThreadId });
+  async compact(): Promise<CompactResult> {
+    // thread/compact/start only ACKS the kickoff; compaction then runs as a
+    // background turn and ends with turn/completed (done). We MUST drain the
+    // stream to that terminal — both so the caller knows compaction truly
+    // finished (its "压缩中" card can flip to "压缩完成"), and so a trailing
+    // turn/completed doesn't leak into the NEXT real turn's stream (which would
+    // read a premature `done` and reply "未返回内容"). Mirrors runStreamed's
+    // start-race so an immediate rejection (e.g. unsupported on old codex)
+    // surfaces instead of hanging.
+    let startError: Error | undefined;
+    const startFailed: Promise<'start-failed'> = new Promise((resolve) => {
+      this.client.request('thread/compact/start', { threadId: this.codexThreadId }).then(undefined, (err: unknown) => {
+        startError = err instanceof Error ? err : new Error(String(err));
+        log.fail('agent', startError, { phase: 'thread/compact/start' });
+        resolve('start-failed');
+      });
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout: Promise<'timeout'> = new Promise((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), COMPACT_TIMEOUT_MS);
+    });
+
+    const stream = this.client.stream()[Symbol.asyncIterator]();
+    let compacted = false;
+    let usage: CompactResult['usage'] = null;
+    try {
+      while (true) {
+        const step = await Promise.race([stream.next(), startFailed, timeout]);
+        if (step === 'start-failed') throw startError ?? new Error('thread/compact/start 请求失败');
+        if (step === 'timeout') throw new Error(`压缩超时（codex 未在 ${COMPACT_TIMEOUT_MS / 1000}s 内完成）`);
+        if (step.done) break;
+        const ev = mapNotification(step.value);
+        if (!ev) continue;
+        if (ev.type === 'context_usage') usage = { usedTokens: ev.usedTokens, contextWindow: ev.contextWindow };
+        else if (ev.type === 'context_compacted') compacted = true;
+        else if (ev.type === 'error' && !ev.willRetry) throw new Error(ev.message);
+        else if (ev.type === 'done') break;
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    return { compacted, usage };
   }
 
   async close(): Promise<void> {
