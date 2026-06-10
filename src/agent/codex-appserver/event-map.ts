@@ -24,9 +24,14 @@ export function mapNotification(n: ServerNotification): AgentEvent | null {
     case 'item/completed':
       return mapItemComplete(n.params.item);
     case 'thread/tokenUsage/updated':
+      // `last` (most recent turn), NOT `total` (cumulative session sum). `total`
+      // only ever grows — it can exceed the window and never drops after a
+      // /compact — so it's wrong for a "how full is the context right now" gauge.
+      // `last.totalTokens` is the size of the latest request's context, which is
+      // what gets re-sent next turn and what shrinks once compaction takes hold.
       return {
         type: 'context_usage',
-        usedTokens: n.params.tokenUsage.total.totalTokens,
+        usedTokens: n.params.tokenUsage.last.totalTokens,
         contextWindow: n.params.tokenUsage.modelContextWindow,
       };
     case 'thread/compacted':

@@ -5,8 +5,9 @@ import { card, colorNote, hr, note, type CardElement, type CardObject, type Note
  * crosses a tier it surfaces a colored one-liner nudging `/compact`. The same
  * tiers back the on-demand `/context` card (which always shows, even below the
  * first threshold) and the model/window numbers come from
- * `thread/tokenUsage/updated` (used = total.totalTokens, window =
- * modelContextWindow). Thresholds are fractions of the window — tune here.
+ * `thread/tokenUsage/updated` (used = last.totalTokens — the current context
+ * occupancy, NOT cumulative total; window = modelContextWindow). Thresholds are
+ * fractions of the window — tune here.
  */
 export const CTX_WARN = 0.7; // 🟡 first visible tier
 export const CTX_HIGH = 0.85; // 🟠
@@ -85,15 +86,26 @@ export function buildCompactingCard(tick = 0): CardObject {
   });
 }
 
-/** Terminal "压缩完成" state. Shows the post-compaction usage when codex reported
- * one; otherwise a generic done line. */
-export function buildCompactedCard(usage: { usedTokens: number; contextWindow: number | null } | null): CardObject {
+/**
+ * Terminal "压缩完成" state. `usage` is the post-compaction occupancy (from
+ * `last`), `before` the pre-compaction reading. We only print a number when it
+ * actually dropped (showing 旧% → 新%): codex sometimes only surfaces the reduced
+ * context on the *next* turn, so a stale, unchanged number would just look broken
+ * — in that case say the reduction lands on the next message instead.
+ */
+export function buildCompactedCard(
+  usage: { usedTokens: number; contextWindow: number | null } | null,
+  before?: { used: number; window: number | null } | null,
+): CardObject {
   const els: CardElement[] = [colorNote('✅ 上下文压缩完成', 'green')];
   const pct = usage ? ctxPercent(usage.usedTokens, usage.contextWindow) : null;
-  if (usage && pct !== null && usage.contextWindow) {
-    els.push(note(`早前对话已总结归档，现已用 ${k(usage.usedTokens)}/${k(usage.contextWindow)} tokens（${pct}%）。`));
+  const dropped = usage != null && before != null && usage.usedTokens < before.used;
+  if (usage && pct !== null && usage.contextWindow && (dropped || before == null)) {
+    const beforePct = before ? ctxPercent(before.used, before.window) : null;
+    const from = dropped && beforePct !== null ? `${beforePct}% → ` : '';
+    els.push(note(`早前对话已总结归档，现已用 ${from}${pct}%（${k(usage.usedTokens)}/${k(usage.contextWindow)} tokens）。`));
   } else {
-    els.push(note('早前对话已总结归档、腾出空间继续；最近的上下文保留。'));
+    els.push(note('早前对话已总结归档、腾出空间继续；发下一条消息后，`/context` 即可看到占用下降。'));
   }
   return card(els, { summary: '上下文压缩完成' });
 }

@@ -93,6 +93,19 @@ describe('manual /compact card states', () => {
     expect(json).toContain('已总结归档');
     expect(json).not.toContain('%');
   });
+  it('shows the 旧% → 新% drop when usage actually fell', () => {
+    const json = JSON.stringify(
+      buildCompactedCard({ usedTokens: 50_000, contextWindow: 200_000 }, { used: 180_000, window: 200_000 }),
+    );
+    expect(json).toContain('90% → 25%');
+  });
+  it('does not show a stale number when usage did not drop (reduction lands next turn)', () => {
+    const json = JSON.stringify(
+      buildCompactedCard({ usedTokens: 180_000, contextWindow: 200_000 }, { used: 180_000, window: 200_000 }),
+    );
+    expect(json).not.toContain('%'); // no misleading unchanged percentage
+    expect(json).toContain('下一条消息');
+  });
   it('surfaces the failure reason', () => {
     expect(JSON.stringify(buildCompactFailedCard('boom'))).toContain('压缩失败：boom');
   });

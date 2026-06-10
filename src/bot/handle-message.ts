@@ -1052,6 +1052,8 @@ export function createOrchestrator(
       );
     };
 
+    // Pre-compaction occupancy, so the result card can show 旧% → 新%.
+    const before = lastUsage.get(sessionKey) ?? null;
     try {
       // Resolves only when codex's compaction turn truly finishes (compact()
       // drains the stream to turn/completed), so the card flips at the right
@@ -1059,8 +1061,8 @@ export function createOrchestrator(
       const { usage } = await thread.compact();
       if (usage) lastUsage.set(sessionKey, { used: usage.usedTokens, window: usage.contextWindow });
       else lastUsage.delete(sessionKey); // refreshes on the next turn's usage event
-      log.info('intake', 'compact', { sessionKey, used: usage?.usedTokens ?? null });
-      await settle(buildCompactedCard(usage));
+      log.info('intake', 'compact', { sessionKey, used: usage?.usedTokens ?? null, before: before?.used ?? null });
+      await settle(buildCompactedCard(usage, before));
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       const unsupported = /method not found|-32601|unknown (method|request)/i.test(m);

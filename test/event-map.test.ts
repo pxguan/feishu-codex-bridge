@@ -122,11 +122,13 @@ describe('mapNotification', () => {
   });
 
   it('maps token usage + compaction notifications', () => {
+    // Reads `last` (current context occupancy), NOT `total` (cumulative). A high
+    // cumulative total alongside a small last must surface the small one.
     expect(
       mapNotification(notification('thread/tokenUsage/updated', {
         threadId: 'thread-1',
         turnId: 'turn-1',
-        tokenUsage: { total: { totalTokens: 4096 }, last: {}, modelContextWindow: 8192 },
+        tokenUsage: { total: { totalTokens: 999999 }, last: { totalTokens: 4096 }, modelContextWindow: 8192 },
       })),
     ).toEqual({ type: 'context_usage', usedTokens: 4096, contextWindow: 8192 });
 
@@ -134,7 +136,7 @@ describe('mapNotification', () => {
       mapNotification(notification('thread/tokenUsage/updated', {
         threadId: 'thread-1',
         turnId: 'turn-1',
-        tokenUsage: { total: { totalTokens: 100 }, last: {}, modelContextWindow: null },
+        tokenUsage: { total: { totalTokens: 5000 }, last: { totalTokens: 100 }, modelContextWindow: null },
       })),
     ).toEqual({ type: 'context_usage', usedTokens: 100, contextWindow: null });
 
