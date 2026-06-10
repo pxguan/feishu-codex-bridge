@@ -78,7 +78,7 @@ export interface ManagedCardSendResult {
  * was created (no duplicate on resend). Genuine errors and network losses (where
  * a message MAY have been created) are NOT matched, so they never duplicate.
  */
-function isCardIdNotReady(err: unknown): boolean {
+export function isCardIdNotReady(err: unknown): boolean {
   const data = (err as { response?: { data?: { code?: number; msg?: string } } })?.response?.data;
   return data?.code === 230099 || /11310|cardid is invalid/i.test(data?.msg ?? '');
 }
