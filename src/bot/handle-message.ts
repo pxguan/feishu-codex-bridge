@@ -974,6 +974,10 @@ export function createOrchestrator(
     );
   }
 
+  /** Spinner cadence for the "压缩中" card. ~0.8s reads as live without spamming
+   * card updates (each is a round-trip). */
+  const COMPACT_ANIM_INTERVAL_MS = 800;
+
   /** `/compact`: summarize the session's history to free context. Idle-only (a
    * running turn owns the thread's single event stream); resumes the session
    * under its current tier if it isn't live. Compaction is a background turn (not
@@ -1008,12 +1012,40 @@ export function createOrchestrator(
     // initial send (or the in-place update) fails.
     let cardMsgId: string | undefined;
     try {
-      const sent = await sendManagedCard(channel, msg.chatId, buildCompactingCard(), msg.messageId, inThread);
+      const sent = await sendManagedCard(channel, msg.chatId, buildCompactingCard(0), msg.messageId, inThread);
       cardMsgId = sent.messageId;
     } catch (err) {
       log.fail('card', err, { phase: 'compact-start-card' });
     }
+
+    // Spin the "压缩中" card so it visibly keeps working (compaction can take a
+    // while). Self-rescheduling tick — never overlaps an in-flight update, and
+    // checks `stop` right before each render so no frame can clobber the result;
+    // the card has no buttons, so these updates can't hit an interaction lock.
+    let stop = false;
+    const wakers: Array<() => void> = [];
+    const sleep = (ms: number): Promise<void> =>
+      new Promise((res) => {
+        const t = setTimeout(res, ms);
+        wakers.push(() => {
+          clearTimeout(t);
+          res();
+        });
+      });
+    const anim = (async () => {
+      let tick = 0;
+      while (!stop && cardMsgId) {
+        await sleep(COMPACT_ANIM_INTERVAL_MS);
+        if (stop || !cardMsgId) break;
+        tick++;
+        await updateManagedCard(channel, cardMsgId, buildCompactingCard(tick)).catch(() => undefined);
+      }
+    })();
+
     const settle = async (result: object): Promise<void> => {
+      stop = true;
+      wakers.forEach((w) => w()); // cut the current sleep so the result shows promptly
+      await anim; // let the in-flight frame finish so it can't land after the result
       if (cardMsgId && (await updateManagedCard(channel, cardMsgId, result))) return;
       await sendManagedCard(channel, msg.chatId, result, msg.messageId, inThread).catch((err) =>
         log.fail('card', err, { phase: 'compact-settle' }),

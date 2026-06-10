@@ -67,13 +67,20 @@ export function buildContextCard(used: number, window: number | null): CardObjec
   return card(els, { summary: '上下文用量' });
 }
 
+/** Spinner frames for the "压缩中" card — a rotating half-filled circle the
+ * caller cycles by re-rendering with an incrementing tick, so the card visibly
+ * keeps working instead of looking stuck. */
+const COMPACT_SPINNER = ['◐', '◓', '◑', '◒'];
+
 /**
  * Manual `/compact` card — sent as a managed entity in the "压缩中" state, then
- * updated in place to {@link buildCompactedCard} / {@link buildCompactFailedCard}
- * once codex's background compaction turn actually finishes (it's not instant).
+ * re-rendered in place at an incrementing `tick` (rotating spinner ⇒ liveness)
+ * until codex's background compaction turn finishes (it's not instant), at which
+ * point it flips to {@link buildCompactedCard} / {@link buildCompactFailedCard}.
  */
-export function buildCompactingCard(): CardObject {
-  return card([colorNote('🗜️ 正在压缩上下文…', 'blue'), note('总结早前对话、释放空间，请稍候。')], {
+export function buildCompactingCard(tick = 0): CardObject {
+  const spin = COMPACT_SPINNER[((tick % COMPACT_SPINNER.length) + COMPACT_SPINNER.length) % COMPACT_SPINNER.length];
+  return card([colorNote(`🗜️ 正在压缩上下文 ${spin}`, 'blue'), note('总结早前对话、释放空间，请稍候。')], {
     summary: '正在压缩上下文',
   });
 }

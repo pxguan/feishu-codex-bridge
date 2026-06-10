@@ -75,6 +75,12 @@ describe('manual /compact card states', () => {
   it('shows a 压缩中 in-progress line', () => {
     expect(JSON.stringify(buildCompactingCard())).toContain('正在压缩上下文');
   });
+  it('advances the spinner across ticks (so the card looks alive) and cycles', () => {
+    const f0 = JSON.stringify(buildCompactingCard(0));
+    const f1 = JSON.stringify(buildCompactingCard(1));
+    expect(f0).not.toBe(f1); // a different frame ⇒ visible motion
+    expect(JSON.stringify(buildCompactingCard(4))).toBe(f0); // 4 frames, wraps around
+  });
   it('shows the post-compaction usage when codex reported it', () => {
     const json = JSON.stringify(buildCompactedCard({ usedTokens: 50_000, contextWindow: 200_000 }));
     expect(json).toContain('压缩完成');
