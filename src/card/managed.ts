@@ -70,6 +70,19 @@ export interface ManagedCardSendResult {
  * directly — Feishu opens/uses the p2p chat — used to send the bind card to the
  * admin who added the bot to a group. Ignored when `replyTo` is set.
  */
+/**
+ * A just-created CardKit entity occasionally hasn't propagated when the message
+ * that references it is sent — Feishu 400s with 230099 / ErrCode 11310 "cardid
+ * is invalid", so the card silently fails to appear (intermittent). Only this
+ * transient is safe to retry: Feishu rejected the message outright, so nothing
+ * was created (no duplicate on resend). Genuine errors and network losses (where
+ * a message MAY have been created) are NOT matched, so they never duplicate.
+ */
+function isCardIdNotReady(err: unknown): boolean {
+  const data = (err as { response?: { data?: { code?: number; msg?: string } } })?.response?.data;
+  return data?.code === 230099 || /11310|cardid is invalid/i.test(data?.msg ?? '');
+}
+
 export async function sendManagedCard(
   channel: LarkChannel,
   to: string,
@@ -79,35 +92,48 @@ export async function sendManagedCard(
   receiveIdType: 'chat_id' | 'open_id' = 'chat_id',
 ): Promise<ManagedCardSendResult> {
   stampRenderToken(card);
-  const created = await channel.rawClient.cardkit.v1.card.create({
-    data: { type: 'card_json', data: JSON.stringify(card) },
-  });
-  const cardId = (created as { data?: { card_id?: string } }).data?.card_id;
-  if (!cardId) {
-    throw new Error(`cardkit.card.create returned no card_id: ${JSON.stringify(created).slice(0, 200)}`);
-  }
+  const data = JSON.stringify(card);
 
-  const content = JSON.stringify({ type: 'card', data: { card_id: cardId } });
-  let messageId: string | undefined;
-  if (replyTo) {
-    const sent = await channel.rawClient.im.v1.message.reply({
-      path: { message_id: replyTo },
-      data: { msg_type: 'interactive', content, reply_in_thread: replyInThread },
-    });
-    messageId = (sent as { data?: { message_id?: string } }).data?.message_id;
-  } else {
-    const sent = await channel.rawClient.im.v1.message.create({
-      params: { receive_id_type: receiveIdType },
-      data: { receive_id: to, msg_type: 'interactive', content },
-    });
-    messageId = (sent as { data?: { message_id?: string } }).data?.message_id;
-  }
-  if (!messageId) {
-    throw new Error('send card-by-reference returned no message_id');
-  }
+  // One attempt = create the entity + send the message that references it.
+  const attempt = async (): Promise<ManagedCardSendResult> => {
+    const created = await channel.rawClient.cardkit.v1.card.create({ data: { type: 'card_json', data } });
+    const cardId = (created as { data?: { card_id?: string } }).data?.card_id;
+    if (!cardId) {
+      throw new Error(`cardkit.card.create returned no card_id: ${JSON.stringify(created).slice(0, 200)}`);
+    }
+    const content = JSON.stringify({ type: 'card', data: { card_id: cardId } });
+    let messageId: string | undefined;
+    if (replyTo) {
+      const sent = await channel.rawClient.im.v1.message.reply({
+        path: { message_id: replyTo },
+        data: { msg_type: 'interactive', content, reply_in_thread: replyInThread },
+      });
+      messageId = (sent as { data?: { message_id?: string } }).data?.message_id;
+    } else {
+      const sent = await channel.rawClient.im.v1.message.create({
+        params: { receive_id_type: receiveIdType },
+        data: { receive_id: to, msg_type: 'interactive', content },
+      });
+      messageId = (sent as { data?: { message_id?: string } }).data?.message_id;
+    }
+    if (!messageId) {
+      throw new Error('send card-by-reference returned no message_id');
+    }
+    byMessageId.set(messageId, { cardId, sequence: 0 });
+    return { messageId, cardId };
+  };
 
-  byMessageId.set(messageId, { cardId, sequence: 0 });
-  return { messageId, cardId };
+  // Re-create + resend with a short backoff while the entity is still
+  // propagating; bail to the real error on anything else.
+  for (let i = 0; ; i++) {
+    try {
+      return await attempt();
+    } catch (err) {
+      if (i >= 2 || !isCardIdNotReady(err)) throw err;
+      log.fail('card', err, { phase: 'managed-send', attempt: i, retry: true });
+      await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+    }
+  }
 }
 
 /**
