@@ -144,6 +144,14 @@ describe('permission cards', () => {
     expect(json).toContain('其他人');
   });
 
+  it('project settings card carries the auto-compact toggle (project-scoped)', () => {
+    const json = JSON.stringify(
+      buildProjectSettingsCard({ name: 'P', cwd: '/x', kind: 'multi', origin: 'created', mode: 'full', guestMode: 'qa', network: false }),
+    );
+    expect(json).toContain('dm.proj.autoCompact');
+    expect(json).toContain('自动压缩');
+  });
+
   it('permission form has admin + guest tier dropdowns, network, submit, and pre-selects current tiers', () => {
     const json = JSON.stringify(buildPermissionCard({ name: 'P', mode: 'full', guestMode: 'qa', network: false }));
     // two tier selects (select_static inside a form), by name

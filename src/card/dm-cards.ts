@@ -66,6 +66,8 @@ export const DM = {
   // 🧵 话题钻取：项目总览的「🧵 N 话题」按钮 → 该项目话题列表卡
   projectTopics: 'dm.projectTopics',
   setNoMentionDm: 'dm.proj.noMention',
+  // 🗜️ 自动压缩：项目级开关（同群设置里的那个，DM 里也能改），按钮携带项目名 n
+  setAutoCompactDm: 'dm.proj.autoCompact',
   // 🔐 权限：codex 沙箱档位（管理员档 + 普通用户档）+ 联网，做成下拉表单（选+提交）
   permission: 'dm.proj.perm',
   permissionSubmit: 'dm.proj.perm.submit',
@@ -830,10 +832,14 @@ export function buildPermissionCard(p: Pick<Project, 'name' | 'mode' | 'guestMod
  * 各按钮携带项目名 n（DM 里点，不能靠 evt.chatId 取项目）。
  */
 export function buildProjectSettingsCard(
-  project: Pick<Project, 'name' | 'kind' | 'noMention' | 'origin' | 'cwd' | 'mode' | 'guestMode' | 'network'>,
+  project: Pick<
+    Project,
+    'name' | 'kind' | 'noMention' | 'origin' | 'cwd' | 'mode' | 'guestMode' | 'network' | 'autoCompact'
+  >,
 ): CardObject {
   const kind = project.kind ?? 'multi';
   const noMention = project.noMention ?? defaultNoMention(project);
+  const autoCompact = project.autoCompact ?? true;
   return card(
     [
       md(`**项目设置** · ${project.name}`),
@@ -852,6 +858,13 @@ export function buildProjectSettingsCard(
           ? '开启后：本群所有消息(不用 @)都交给我处理。'
           : '开启后：话题内消息(不用 @)都处理；**开新话题仍需 @我**。',
       ),
+      hr(),
+      md('🗜️ 自动压缩上下文'),
+      actions([
+        button('开', { a: DM.setAutoCompactDm, v: 'on', n: project.name }, autoCompact ? 'primary' : 'default'),
+        button('关', { a: DM.setAutoCompactDm, v: 'off', n: project.name }, autoCompact ? 'default' : 'primary'),
+      ]),
+      note('开启后：上下文接近上限时 Codex 自动总结早前对话、释放空间（默认开）。改动下一轮会话生效。'),
       hr(),
       actions([button('🛡 响应白名单', { a: DM.allowlist, n: project.name }, 'primary')]),
       note('设置谁能让我在本群响应 / 跑 codex（空 = 所有人）。'),

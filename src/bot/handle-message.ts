@@ -1754,6 +1754,21 @@ export function createOrchestrator(
         return buildProjectSettingsCard({ ...p, noMention: on });
       });
     })
+    .on(DM.setAutoCompactDm, ({ evt, value }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const name = typeof value.n === 'string' ? value.n : '';
+      const on = value.v === 'on';
+      patch(evt, async () => {
+        const p = await getProjectByName(name);
+        if (!p) return buildDmMenuCard();
+        await updateProject(name, { autoCompact: on });
+        // The auto-compact limit is bound at thread/start, so evict live threads
+        // to rebind under the new setting on the next message (mirrors 群设置).
+        await evictLiveSessionsForChat(p.chatId);
+        log.info('console', 'project-autocompact', { project: name, on });
+        return buildProjectSettingsCard({ ...p, autoCompact: on });
+      });
+    })
     // 🔐 权限：打开下拉表单子卡（管理员档 + 普通用户档 + 联网，选完提交）。
     .on(DM.permission, ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
