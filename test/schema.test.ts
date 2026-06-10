@@ -30,7 +30,8 @@ describe('config schema helpers', () => {
     expect(getRunIdleTimeoutMs(cfg())).toBe(120_000);
     expect(getRunIdleTimeoutMs(cfg({ runIdleTimeoutSeconds: 0 }))).toBeUndefined();
     expect(getRunIdleTimeoutMs(cfg({ runIdleTimeoutSeconds: 1 }))).toBe(10_000);
-    expect(getRunIdleTimeoutMs(cfg({ runIdleTimeoutSeconds: 2000 }))).toBe(1_800_000);
+    expect(getRunIdleTimeoutMs(cfg({ runIdleTimeoutSeconds: 2000 }))).toBe(2_000_000);
+    expect(getRunIdleTimeoutMs(cfg({ runIdleTimeoutSeconds: 5000 }))).toBe(3_600_000);
     expect(getRunIdleTimeoutMs(cfg({ runIdleTimeoutSeconds: 12.9 }))).toBe(12_000);
     expect(getRunIdleTimeoutMs(cfg({ runIdleTimeoutSeconds: -1 }))).toBe(120_000);
   });

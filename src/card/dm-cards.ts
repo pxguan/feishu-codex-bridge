@@ -3,6 +3,8 @@ import {
   getPendingPolicy,
   getShowToolCalls,
   resolveOwner,
+  RUN_IDLE_TIMEOUT_MAX_SEC,
+  RUN_IDLE_TIMEOUT_MIN_SEC,
   type AppConfig,
 } from '../config/schema';
 import { defaultNoMention, effectiveGuestMode, effectiveMode, type Project } from '../project/registry';
@@ -45,6 +47,9 @@ export const DM = {
   rmCancel: 'dm.rmCancel',
   setTools: 'dm.set.tools',
   setWatchdog: 'dm.set.watchdog',
+  // 假死超时「自定义…」：watchdogCustom 打开输入卡，watchdogCustomSubmit 保存任意秒数
+  watchdogCustom: 'dm.set.watchdog.custom',
+  watchdogCustomSubmit: 'dm.set.watchdog.customSubmit',
   setPending: 'dm.set.pending',
   setConcurrency: 'dm.set.concurrency',
   // 权限管理：全局 admins（settings 卡进入）+ 项目响应白名单（项目列表 / 建项目完成卡进入）
@@ -564,11 +569,12 @@ export function buildSettingsCard(cfg: AppConfig): CardObject {
         { label: '显示', value: 'on' },
         { label: '隐藏', value: 'off' },
       ]),
-      ...optionRow('⏱ 假死超时', DM.setWatchdog, String(watchdogSec), [
-        { label: '关闭', value: '0' },
-        { label: '60秒', value: '60' },
-        { label: '120秒', value: '120' },
-        { label: '300秒', value: '300' },
+      md(`⏱ 假死超时（当前 **${watchdogSec === 0 ? '关闭' : `${watchdogSec} 秒`}**）`),
+      actions([
+        ...[0, 120, 300].map((v) =>
+          button(v === 0 ? '关闭' : `${v}秒`, { a: DM.setWatchdog, v: String(v) }, v === watchdogSec ? 'primary' : 'default'),
+        ),
+        button('自定义…', { a: DM.watchdogCustom }),
       ]),
       ...optionRow('📥 运行中新消息', DM.setPending, getPendingPolicy(cfg), [
         { label: '引导', value: 'steer' },
@@ -580,11 +586,34 @@ export function buildSettingsCard(cfg: AppConfig): CardObject {
         { label: '10', value: '10' },
         { label: '20', value: '20' },
       ]),
-      note('⚠️ 假死超时 / 并发上限 改后需**重启**生效；工具显示 / 运行中新消息 即时生效。'),
+      note('⚠️ 并发上限 改后需**重启**生效；其余设置（含假死超时）即时生效，所有群立即套用。'),
       hr(),
       actions([button('👮 管理员', { a: DM.admins }), button('⬅️ 菜单', { a: DM.menu })]),
     ],
     { header: { title: '⚙️ 设置', template: 'blue' } },
+  );
+}
+
+/**
+ * Custom idle-timeout input card. A dedicated form card (like 新建项目 / 添加管理员)
+ * so the settings card itself stays button-only and never locks. Submit lands on
+ * {@link DM.watchdogCustomSubmit}; 返回 goes back to the settings card in place.
+ */
+export function buildWatchdogCustomCard(cfg: AppConfig): CardObject {
+  const cur = cfg.preferences?.runIdleTimeoutSeconds ?? 120;
+  return card(
+    [
+      md('**自定义假死超时**'),
+      note(
+        `多少秒没有任何输出就自动终止本轮。范围 ${RUN_IDLE_TIMEOUT_MIN_SEC}–${RUN_IDLE_TIMEOUT_MAX_SEC} 秒；填 0 关闭。`,
+      ),
+      form('watchdog_custom', [
+        input({ name: 'sec', label: '超时秒数', placeholder: '例如 600', value: String(cur), required: true }),
+        actions([submitButton('✅ 保存', { a: DM.watchdogCustomSubmit }, 'primary', 'submit_watchdog')]),
+      ]),
+      actions([button('⬅️ 返回设置', { a: DM.settings })]),
+    ],
+    { header: { title: '⏱ 自定义超时', template: 'blue' } },
   );
 }
 

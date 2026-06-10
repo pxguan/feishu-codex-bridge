@@ -135,15 +135,20 @@ export function getAgentStopGraceMs(cfg: AppConfig): number {
   return Math.min(30_000, Math.max(100, Math.floor(raw)));
 }
 
+/** Watchdog clamp bounds in seconds — shared by the read path and the settings
+ * card's custom-input validation so stored value == effective value. */
+export const RUN_IDLE_TIMEOUT_MIN_SEC = 10;
+export const RUN_IDLE_TIMEOUT_MAX_SEC = 3600;
+
 /**
  * Per-turn idle watchdog in ms. Default 120s, ON. `0` disables. Clamps to
- * [10, 1800] seconds when set.
+ * [10, 3600] seconds when set.
  */
 export function getRunIdleTimeoutMs(cfg: AppConfig): number | undefined {
   const raw = cfg.preferences?.runIdleTimeoutSeconds;
   if (raw === 0) return undefined;
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return 120_000;
-  const clamped = Math.min(Math.max(Math.floor(raw), 10), 1800);
+  const clamped = Math.min(Math.max(Math.floor(raw), RUN_IDLE_TIMEOUT_MIN_SEC), RUN_IDLE_TIMEOUT_MAX_SEC);
   return clamped * 1000;
 }
 

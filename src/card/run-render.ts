@@ -35,8 +35,8 @@ export class RunRender {
   }
 
   /** Mark the run as watchdog-killed (idle timeout). */
-  timeout(minutes: number): void {
-    this.state = markIdleTimeout(this.state, minutes);
+  timeout(seconds: number): void {
+    this.state = markIdleTimeout(this.state, seconds);
   }
 
   /** Mark the run as user-interrupted (⏹). */

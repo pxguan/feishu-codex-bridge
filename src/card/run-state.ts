@@ -45,8 +45,8 @@ export interface RunState {
   footer: FooterStatus;
   terminal: Terminal;
   errorMsg?: string;
-  /** set when terminal === 'idle_timeout' — minutes idle before watchdog gave up */
-  idleTimeoutMinutes?: number;
+  /** set when terminal === 'idle_timeout' — seconds idle before watchdog gave up */
+  idleTimeoutSeconds?: number;
 }
 
 export const initialState: RunState = {
@@ -200,14 +200,14 @@ export function markInterrupted(state: RunState): RunState {
   };
 }
 
-export function markIdleTimeout(state: RunState, minutes: number): RunState {
+export function markIdleTimeout(state: RunState, seconds: number): RunState {
   return {
     ...state,
     blocks: closeStreamingText(state.blocks),
     reasoningActive: false,
     terminal: 'idle_timeout',
     footer: null,
-    idleTimeoutMinutes: minutes,
+    idleTimeoutSeconds: seconds,
   };
 }
 

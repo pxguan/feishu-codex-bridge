@@ -161,7 +161,9 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
   if (state.terminal === 'interrupted') {
     elements.push(noteMd('_⏹ 已被中断_'));
   } else if (state.terminal === 'idle_timeout') {
-    elements.push(noteMd(`_⏱ ${state.idleTimeoutMinutes ?? 0} 分钟无响应，已自动终止_`));
+    const s = state.idleTimeoutSeconds ?? 0;
+    const idleLabel = s > 0 && s % 60 === 0 ? `${s / 60} 分钟` : `${s} 秒`;
+    elements.push(noteMd(`_⏱ ${idleLabel}无响应，已自动终止_`));
   } else if (state.terminal === 'error' && state.errorMsg) {
     elements.push(noteMd(`⚠️ agent 失败：${state.errorMsg}`));
   } else if (state.terminal === 'done' && !answer) {

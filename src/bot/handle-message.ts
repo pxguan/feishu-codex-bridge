@@ -10,6 +10,8 @@ import {
   isChatAllowed,
   isUserAllowedInProject,
   resolveOwner,
+  RUN_IDLE_TIMEOUT_MAX_SEC,
+  RUN_IDLE_TIMEOUT_MIN_SEC,
   secretKeyForApp,
   type AppAccess,
   type AppConfig,
@@ -57,6 +59,7 @@ import {
   buildRmConfirmCard,
   buildSettingsCard,
   buildUpdateCard,
+  buildWatchdogCustomCard,
   DM,
   GS,
   type DoctorInfo,
@@ -286,7 +289,10 @@ export function createOrchestrator(
   /** Per-doc serialization for comment runs (see {@link withDocLock}). */
   const docLocks = new Map<string, Promise<void>>();
   const sema = new Semaphore(getMaxConcurrentRuns(cfg));
-  const idleMs = getRunIdleTimeoutMs(cfg) ?? 0;
+  // Read live per run (not frozen at startup) so the settings card's change to
+  // the idle timeout applies immediately to every group/thread — no daemon
+  // restart. `cfg` is the same object `applyPref` mutates, so this sees edits.
+  const currentIdleMs = (): number => getRunIdleTimeoutMs(cfg) ?? 0;
   // pendingPolicy is read per-message (settings card can change it live)
   /** pending /resume cards, keyed by the card's messageId */
   const resumePending = new Map<string, ResumeCardState>();
@@ -1453,6 +1459,24 @@ export function createOrchestrator(
       const n = Number(value.v);
       if (Number.isFinite(n)) applyPref(evt, (p) => (p.runIdleTimeoutSeconds = n));
     })
+    // 「自定义…」→ 打开输入卡（设置卡本身保持纯按钮、不会锁死）
+    .on(DM.watchdogCustom, ({ evt }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      void patch(evt, buildWatchdogCustomCard(cfg));
+    })
+    // 保存自定义秒数：钳到 [MIN, MAX]（0=关闭）后写入，确保存的值即为生效值；
+    // applyPref 落盘并 patch 回设置卡，currentIdleMs() 下一轮立即读到新值。
+    .on(DM.watchdogCustomSubmit, ({ evt, formValue }) => {
+      const raw = String(formValue?.sec ?? '').trim();
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0) {
+        void patch(evt, buildWatchdogCustomCard(cfg));
+        return;
+      }
+      const sec =
+        n === 0 ? 0 : Math.min(Math.max(Math.floor(n), RUN_IDLE_TIMEOUT_MIN_SEC), RUN_IDLE_TIMEOUT_MAX_SEC);
+      applyPref(evt, (p) => (p.runIdleTimeoutSeconds = sec));
+    })
     .on(DM.setPending, ({ evt, value }) => {
       if (value.v === 'steer' || value.v === 'queue') applyPref(evt, (p) => (p.pendingPolicy = value.v as PendingPolicy));
     })
@@ -1845,6 +1869,7 @@ export function createOrchestrator(
           interrupted = true;
           resolveStop();
         };
+        const idleMs = currentIdleMs();
         const guarded = withIdleTimeout(
           run.events,
           idleMs,
@@ -1883,7 +1908,7 @@ export function createOrchestrator(
         await stream.drain(); // flush the last coalesced frame before terminal
         state.interrupt = undefined; // turn done; nothing left to interrupt
         const killed = interrupted || timedOut;
-        if (timedOut) render.timeout(Math.max(1, Math.round(idleMs / 60_000)));
+        if (timedOut) render.timeout(Math.round(idleMs / 1000));
         else if (interrupted) render.interrupt();
         else render.finalize();
         rc.rs = render.snapshot();
@@ -2028,7 +2053,7 @@ export function createOrchestrator(
 
             let state: RunState = initialState;
             let timedOut = false;
-            const guarded = withIdleTimeout(run.events, idleMs, () => {
+            const guarded = withIdleTimeout(run.events, currentIdleMs(), () => {
               timedOut = true;
             });
             for await (const ev of guarded) state = reduce(state, ev);

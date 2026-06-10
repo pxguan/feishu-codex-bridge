@@ -180,10 +180,16 @@ describe('buildRunCard — terminal collapse', () => {
     expect(json).toContain('agent 失败：boom');
   });
 
-  it('shows the idle-timeout note', () => {
+  it('shows the idle-timeout note in minutes for round values', () => {
     let rs = run([{ type: 'tool_use', itemId: 't1', title: 'hang' }]);
-    rs = markIdleTimeout(rs, 7);
+    rs = markIdleTimeout(rs, 420);
     expect(JSON.stringify(bodyEls(buildRunCard({ rs })))).toContain('7 分钟无响应');
+  });
+
+  it('shows the idle-timeout note in seconds for non-round values', () => {
+    let rs = run([{ type: 'tool_use', itemId: 't1', title: 'hang' }]);
+    rs = markIdleTimeout(rs, 90);
+    expect(JSON.stringify(bodyEls(buildRunCard({ rs })))).toContain('90 秒无响应');
   });
 
   it('reports no content when a done run produced no text', () => {
