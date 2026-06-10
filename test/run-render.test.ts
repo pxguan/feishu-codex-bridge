@@ -229,4 +229,19 @@ describe('context usage gauge', () => {
     const rs = run([{ type: 'context_usage', usedTokens: 999999, contextWindow: null }]);
     expect(JSON.stringify(buildRunCard({ rs }))).not.toContain('上下文');
   });
+
+  it('renders the gauge as the closing footnote, below the answer', () => {
+    const rs = run([
+      { type: 'context_usage', usedTokens: 8000, contextWindow: 8192 },
+      { type: 'text', itemId: 'a', text: 'FINAL ANSWER' },
+      { type: 'done', turnId: 'turn-1' },
+    ]);
+    const els = bodyEls(buildRunCard({ rs }));
+    const last = els[els.length - 1]!;
+    expect(JSON.stringify(last)).toContain('上下文');
+    // the answer must come before the gauge footnote
+    const answerIdx = els.findIndex((e) => JSON.stringify(e).includes('FINAL ANSWER'));
+    expect(answerIdx).toBeGreaterThanOrEqual(0);
+    expect(answerIdx).toBeLessThan(els.length - 1);
+  });
 });

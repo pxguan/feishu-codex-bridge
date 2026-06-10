@@ -101,9 +101,6 @@ export function buildRunCard(rc: RunCardState): CardObject {
 function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
   const elements: CardElement[] = [];
 
-  const gauge = gaugeEl(state);
-  if (gauge) elements.push(gauge);
-
   const reasoning = reasoningContent(state);
   if (reasoning) elements.push(reasoningPanel(reasoning, state.reasoningActive));
 
@@ -127,6 +124,10 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
 
   if (state.footer) elements.push(footerStatus(state.footer));
   if (rc.cardKey) elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')]));
+  // Context-usage gauge rides at the very bottom as a footnote (only at/above
+  // the warn tier) so it never pushes the answer down.
+  const gauge = gaugeEl(state);
+  if (gauge) elements.push(gauge);
   return elements;
 }
 
@@ -140,9 +141,6 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
  */
 function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
   const elements: CardElement[] = [];
-
-  const gauge = gaugeEl(state);
-  if (gauge) elements.push(gauge);
 
   const answerIdx = lastTextIndex(state.blocks);
   const answer = answerIdx >= 0 ? (state.blocks[answerIdx] as Extract<Block, { kind: 'text' }>).content.trim() : '';
@@ -181,6 +179,10 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
   } else if (state.terminal === 'done' && !answer) {
     elements.push(noteMd('_（未返回内容）_'));
   }
+
+  // Context-usage gauge as the closing footnote (only at/above the warn tier).
+  const gauge = gaugeEl(state);
+  if (gauge) elements.push(gauge);
 
   return elements;
 }
