@@ -92,7 +92,11 @@ export class AppServerClient {
 
     await this.request('initialize', {
       clientInfo: { name: this.opts.clientName ?? 'feishu-codex-bridge', version: '0.0.1' },
-      capabilities: null,
+      // experimentalApi opts into experimental JSON-RPC methods + fields — REQUIRED
+      // for the goal RPCs (thread/goal/set|get|clear). Verified against codex 0.139:
+      // without it, thread/goal/set is rejected. The `goals` feature itself is
+      // stable+on by default there, so no experimentalFeature/enablement/set needed.
+      capabilities: { experimentalApi: true, requestAttestation: false },
     });
     this.notify('initialized');
   }

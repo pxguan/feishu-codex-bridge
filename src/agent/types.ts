@@ -110,7 +110,41 @@ export type AgentEvent =
   // surfaces a notice; a manual /compact is suppressed (see handle-message).
   | { type: 'context_compacted' }
   | { type: 'done'; turnId: string }
+  // A codex goal's state changed (thread/goal/updated). Only emitted during a
+  // goal run (runGoal); the normal turn loop ignores it. `status` is an open
+  // string — see {@link isGoalTerminal}.
+  | {
+      type: 'goal_update';
+      status: string;
+      objective: string;
+      tokensUsed: number;
+      timeUsedSeconds: number;
+      tokenBudget: number | null;
+    }
   | { type: 'error'; message: string; willRetry: boolean };
+
+/**
+ * A codex goal's lifecycle status (thread/goal/updated). The vendored protocol
+ * type lists only active|paused|budgetLimited|complete, but codex 0.139 also
+ * emits `usageLimited` and `blocked` at runtime (observed) — so treat it as an
+ * open string and decide terminality defensively here, never by exhaustive enum.
+ */
+export type GoalStatus = string;
+
+/** Terminal goal states — the goal run is over (no more auto-continuation). */
+export function isGoalTerminal(status: string): boolean {
+  return (
+    status === 'complete' ||
+    status === 'budgetLimited' ||
+    status === 'usageLimited' ||
+    status === 'blocked'
+  );
+}
+
+/** The goal finished successfully (vs an abnormal stop). */
+export function isGoalSuccess(status: string): boolean {
+  return status === 'complete';
+}
 
 export interface AgentRun {
   events: AsyncIterable<AgentEvent>;
@@ -136,6 +170,18 @@ export interface AgentThread {
   readonly codexThreadId: string;
   /** start a turn, streaming events until turn completion/error */
   runStreamed(input: AgentInput, turn?: TurnOptions): AgentRun;
+  /**
+   * Set a persistent goal on this thread (thread/goal/set) and stream its
+   * autonomous, multi-turn execution until the goal reaches a terminal status.
+   * codex auto-starts AND auto-continues every turn — we do NOT call turn/start;
+   * we set the goal and consume. Emits the normal turn events PLUS `goal_update`
+   * on each state change; the stream ends on a terminal goal status or a fatal
+   * error. (Verified on codex 0.139: set alone kicks off turn 1.)
+   */
+  runGoal(objective: string): AgentRun;
+  /** Clear this thread's goal (thread/goal/clear) so a non-complete goal won't
+   * reactivate when the thread is later resumed. Best-effort. */
+  clearGoal(): Promise<void>;
   /** inject input into the in-flight turn (引导) */
   steer(input: AgentInput, expectedTurnId: string): Promise<void>;
   /** interrupt the in-flight turn (watchdog 中止) */

@@ -38,6 +38,30 @@ describe('mapNotification', () => {
     ).toEqual({ type: 'error', message: 'network failed', willRetry: true });
   });
 
+  it('maps thread/goal/updated to goal_update and ignores thread/goal/cleared', () => {
+    const goal = {
+      threadId: 'thread-1',
+      objective: 'migrate services/ to pydantic v2',
+      status: 'usageLimited', // a runtime status NOT in the vendored 4-value enum
+      tokenBudget: null,
+      tokensUsed: 290497,
+      timeUsedSeconds: 461,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    expect(
+      mapNotification(notification('thread/goal/updated', { threadId: 'thread-1', turnId: null, goal })),
+    ).toEqual({
+      type: 'goal_update',
+      status: 'usageLimited',
+      objective: 'migrate services/ to pydantic v2',
+      tokensUsed: 290497,
+      timeUsedSeconds: 461,
+      tokenBudget: null,
+    });
+    expect(mapNotification(notification('thread/goal/cleared', { threadId: 'thread-1' }))).toBeNull();
+  });
+
   it('maps agent message deltas and completed text', () => {
     expect(
       mapNotification(notification('item/agentMessage/delta', {

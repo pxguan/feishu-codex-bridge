@@ -1,6 +1,7 @@
 import type { BotAddedEvent, CardActionEvent, CommentEvent, LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { createBackend } from '../agent';
 import type { AgentInput, AgentRun, AgentThread, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
+import { isGoalTerminal } from '../agent/types';
 import {
   getMaxConcurrentRuns,
   getPendingPolicy,
@@ -38,6 +39,7 @@ import {
 } from '../card/command-cards';
 import { buildHistoryCard, type HistoryCardState } from '../card/history-card';
 import { ANSWER_EID, buildRunCard, buildRunCardPlain, RC, type RunCardState } from '../card/run-card';
+import { buildGoalDoneCard } from '../card/goal-card';
 import { RunCardStream } from '../card/run-card-stream';
 import { buildCleanCard, extractCardFences } from '../card/markdown-render';
 import { imageSources, uploadOutboundImages } from '../card/outbound-images';
@@ -286,6 +288,25 @@ export interface Orchestrator {
  * default on) lets non-@ messages run too — multi only inside a topic, single
  * whole-group (needs the im:message.group_msg scope). @bot /settings toggles it.
  */
+
+/**
+ * Detect a `/goal` trigger ANYWHERE in the message (not just a leading command):
+ * a standalone, whitespace-delimited `/goal` token. Returns the objective — the
+ * message with the token stripped and whitespace collapsed — or null if there's
+ * no token or nothing left after it. The token must be whitespace-bounded so
+ * paths and URLs containing `/goal` (e.g. `src/goal/x.ts`, `cmd/goal/main.go`,
+ * `https://x/goal`) never trigger. No /goal pause|resume|clear|status — a goal
+ * runs to its terminal status with no manual controls, by design.
+ */
+export function parseGoalTrigger(text: string): string | null {
+  if (!/(^|\s)\/goal(?=\s|$)/i.test(text)) return null;
+  const objective = text
+    .replace(/(^|\s)\/goal(?=\s|$)/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return objective.length > 0 ? objective : null;
+}
+
 export function createOrchestrator(
   channel: LarkChannel,
   cfg: AppConfig,
@@ -428,6 +449,10 @@ export function createOrchestrator(
 
     const text = msg.content.trim();
     const cmd = parseCommand(text);
+    // `/goal <objective>` anywhere in the message → a persistent autonomous goal
+    // run (OKR reaction as the receipt, streaming cards, then a terminal card).
+    // Explicit slash COMMANDS above still take priority (clear, leading intent).
+    const goalObjective = parseGoalTrigger(text);
 
     // Single-session group: the whole group is one session keyed by chatId. No
     // topics — reply by quoting (引用回复); runs serialize per chatId (active[chatId]).
@@ -452,6 +477,11 @@ export function createOrchestrator(
       }
       if (cmd === 'context') {
         await postContextCard(msg, ts.sessionKey, false);
+        return;
+      }
+      if (goalObjective) {
+        void addReaction(msg.messageId, 'OKR');
+        startReservedRun(msg, goalObjective, ts.sessionKey, true, project, ts, undefined, undefined, undefined, true);
         return;
       }
       handleTurn(msg, text, ts.sessionKey, true, project, ts);
@@ -479,6 +509,11 @@ export function createOrchestrator(
         await postContextCard(msg, ts.sessionKey, true);
         return;
       }
+      if (goalObjective) {
+        void addReaction(msg.messageId, 'OKR');
+        startReservedRun(msg, goalObjective, ts.sessionKey, false, project, ts, undefined, undefined, undefined, true);
+        return;
+      }
       handleTurn(msg, text, ts.sessionKey, false, project, ts);
       return;
     }
@@ -503,6 +538,11 @@ export function createOrchestrator(
         .catch(() => undefined);
       return;
     }
+    if (goalObjective) {
+      void addReaction(msg.messageId, 'OKR');
+      startTopicDirectly(msg, goalObjective, project, true);
+      return;
+    }
     startTopicDirectly(msg, text, project);
   };
 
@@ -524,14 +564,15 @@ export function createOrchestrator(
    * single: whole group. multi: inside a topic, OR a slash command in the main
    * area — plain chatter in the main area still needs @ (开新话题 是明确意图，
    * 不能让随便一句话就开话题)，but explicit commands (/help /resume /settings
-   * /model) respond without @ since they're unambiguous intent.
+   * /model) and a `/goal` trigger respond without @ since they're unambiguous intent.
    * 即使开了免@，若消息 @了所有人 或 @了具体的(非机器人)用户,说明是定向给别人的,
    * bot 不插话。(此函数仅在 !mentionedBot 时调用,故 @到 bot 的情况已被排除。) */
   function shouldRespondWithoutMention(project: Project, msg: NormalizedMessage): boolean {
     if (!(project.noMention ?? defaultNoMention(project))) return false;
     if (msg.mentionAll || msg.mentions.some((m) => !m.isBot)) return false;
     if ((project.kind ?? 'multi') === 'single') return true;
-    return Boolean(msg.threadId) || parseCommand(msg.content.trim()) !== null;
+    const content = msg.content.trim();
+    return Boolean(msg.threadId) || parseCommand(content) !== null || parseGoalTrigger(content) !== null;
   }
 
   /** 非管理员触发 owner-only 命令(/resume、/settings)时的统一无权限提示。
@@ -689,9 +730,18 @@ export function createOrchestrator(
     preloadedImages?: string[],
     preIngested?: boolean,
     summaryText?: string,
+    goal?: boolean,
   ): void {
     const existing = active.get(sessionKey);
     if (existing) {
+      // A goal can't co-run with (or queue behind) a turn on the same session —
+      // it's an autonomous multi-turn run, not a follow-up. Tell the user and skip.
+      if (goal) {
+        void channel
+          .send(msg.chatId, { markdown: '当前会话有任务在跑，请等它结束后再发 `/goal`。' }, { replyTo: msg.messageId, replyInThread: !flat })
+          .catch(() => undefined);
+        return;
+      }
       // A run appeared between handleTurn's check and here (we awaited an image
       // download) — queue onto it rather than launch a second turn. `text` is
       // already file-woven when preIngested (handleTurn's fall-through).
@@ -702,7 +752,9 @@ export function createOrchestrator(
     const reserved: ActiveState = { queue: [], requesterOpenId: msg.senderId };
     active.set(sessionKey, reserved);
     void withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
-      const reaction = runReaction(msg.messageId, !sema.hasFree());
+      // Goal runs use the OKR reaction (added at dispatch) as their only receipt,
+      // not the ⏳/🫳 run-reaction lifecycle.
+      const reaction = goal ? undefined : runReaction(msg.messageId, !sema.hasFree());
       try {
         // Images preloaded by handleTurn's fall-through, else fetch them now
         // (inside the detached run, after the synchronous reservation).
@@ -748,7 +800,11 @@ export function createOrchestrator(
         // 话题上文：在话题里 @bot 时，把 bot 还没喂给 codex 的人对人消息补进开场。
         // codexEmpty（新会话 / resume 失败重建）→ 拉最近 N 条全量；已有会话 → 只拉水位
         // 标记之后的增量（没有标记说明是 resume 上来的旧会话，codex 已带历史，跳过以免重复喂）。
-        if (msg.threadId && (codexEmpty || prior?.lastSeenAt !== undefined)) {
+        // Goals skip the topic-history weave: the objective must stay self-contained
+        // (and under codex's ~4000-char goal limit), and a resumed thread already
+        // carries codex's own history — weaving chat transcript into a goal would
+        // pollute it and risk a rejected thread/goal/set.
+        if (!goal && msg.threadId && (codexEmpty || prior?.lastSeenAt !== undefined)) {
           const history = await fetchThreadContext(channel, msg.threadId, {
             sinceTime: codexEmpty ? 0 : (prior?.lastSeenAt ?? 0),
             excludeMessageId: msg.messageId,
@@ -759,23 +815,22 @@ export function createOrchestrator(
         // (a brand-new session already wrote it in the upsert above.)
         if (!neverSeen) void patchSession(sessionKey, { lastSeenAt: msg.createTime }).catch(() => undefined);
         reserved.thread = thread;
-        await launchRun(
-          {
-            chatId: msg.chatId,
-            replyTo: msg.messageId,
-            replyInThread: !flat,
-            flat,
-            thread,
-            firstText,
-            images,
-            knownThreadId: sessionKey,
-            requesterOpenId: msg.senderId,
-          },
-          reaction,
-        );
+        const launchOpts: LaunchOpts = {
+          chatId: msg.chatId,
+          replyTo: msg.messageId,
+          replyInThread: !flat,
+          flat,
+          thread,
+          firstText,
+          images,
+          knownThreadId: sessionKey,
+          requesterOpenId: msg.senderId,
+        };
+        if (goal) await launchGoalRun(launchOpts);
+        else await launchRun(launchOpts, reaction);
       } catch (err) {
         active.delete(sessionKey); // release the reservation so the session isn't wedged
-        reaction.done();
+        reaction?.done();
         log.fail('intake', err);
         await channel
           .send(msg.chatId, { markdown: `❌ ${err instanceof Error ? err.message : String(err)}` }, { replyTo: msg.messageId, replyInThread: !flat })
@@ -863,13 +918,14 @@ export function createOrchestrator(
   /** Group @bot (no topic): create the topic + run with the default model.
    * Detached — onMessage must return fast (see {@link handleTurn}); a new
    * topic has a unique reply target so no same-topic reservation is needed. */
-  function startTopicDirectly(msg: NormalizedMessage, text: string, project?: Project): void {
+  function startTopicDirectly(msg: NormalizedMessage, text: string, project?: Project, goal?: boolean): void {
     void withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
       // 🫳 Typing on receive (⏳ OneSecond if a slot isn't free) → ✅ DONE once
       // the topic is created (onTopicCreated, below). For this path the acked
       // action is "建话题", not the full reply — so DONE fires on first card,
-      // unlike an in-topic turn (see handleTurn).
-      const reaction = runReaction(msg.messageId, !sema.hasFree());
+      // unlike an in-topic turn (see handleTurn). Goal runs skip this lifecycle —
+      // the OKR reaction (added at dispatch) is their receipt.
+      const reaction = goal ? undefined : runReaction(msg.messageId, !sema.hasFree());
       const cwd = project?.cwd ?? fallbackCwd;
       // The topic creator's role decides this new topic's tier; roleSuffix (when
       // tiers are split) namespaces the persisted session so the other role gets
@@ -882,7 +938,7 @@ export function createOrchestrator(
       try {
         thread = await backend.startThread({ cwd, model, effort, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
       } catch (err) {
-        reaction.done();
+        reaction?.done();
         log.fail('card', err, { phase: 'start-topic' });
         await channel
           .send(msg.chatId, { markdown: `❌ 启动失败：${err instanceof Error ? err.message : String(err)}` }, { replyTo: msg.messageId })
@@ -893,25 +949,28 @@ export function createOrchestrator(
       // and any file attachments (their paths get woven into the prompt text).
       const images = messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined;
       const firstText = (await ingestContext(msg, text)) || '你好，我们开始吧。';
-      log.info('card', 'start', { project: project?.name ?? '(unregistered)', model, effort, images: images?.length ?? 0 });
-      await launchRun(
-        {
-          chatId: msg.chatId,
-          replyTo: msg.messageId,
-          replyInThread: true,
-          thread,
-          firstText,
-          images,
-          model,
-          effort,
-          cwd,
-          summary: stripFileTokens(text).slice(0, 80) || '(空)',
-          requesterOpenId: msg.senderId,
-          roleSuffix: perm.roleSuffix,
-        },
-        reaction,
-        () => reaction.done(), // topic created → ✅ DONE (don't wait for the reply)
-      );
+      log.info('card', 'start', { project: project?.name ?? '(unregistered)', model, effort, images: images?.length ?? 0, goal: Boolean(goal) });
+      const launchOpts: LaunchOpts = {
+        chatId: msg.chatId,
+        replyTo: msg.messageId,
+        replyInThread: true,
+        thread,
+        firstText,
+        images,
+        model,
+        effort,
+        cwd,
+        summary: stripFileTokens(text).slice(0, 80) || '(空)',
+        requesterOpenId: msg.senderId,
+        roleSuffix: perm.roleSuffix,
+      };
+      if (goal) await launchGoalRun(launchOpts);
+      else
+        await launchRun(
+          launchOpts,
+          reaction,
+          () => reaction?.done(), // topic created → ✅ DONE (don't wait for the reply)
+        );
     }).catch((err) => log.fail('intake', err));
   }
 
@@ -1090,6 +1149,9 @@ export function createOrchestrator(
   // ── card actions ──────────────────────────────────────────────────
   const dispatcher = new CardDispatcher(channel, cfg);
   const PENDING_TTL_MS = 30 * 60_000; // abandoned config cards expire after 30 min
+  // Hard wall-clock cap on a goal run (its per-turn idle watchdog is OFF, so this
+  // is the only backstop against a wedged codex pinning a concurrency slot).
+  const GOAL_MAX_MS = 30 * 60_000;
 
   // A card update issued from inside a cardAction handler must land AFTER Feishu
   // is done with the click's interaction window — Feishu locks the card during
@@ -2195,6 +2257,215 @@ export function createOrchestrator(
       active.delete(activeKey);
       if (curCardKey) runsByCard.delete(curCardKey);
       reaction?.done(); // run ended (complete / ⏹ / timeout / error) → ✅ DONE
+      release();
+    }
+  }
+
+  /**
+   * Goal run: set a persistent codex goal (opts.firstText is the objective) and
+   * render its autonomous, multi-turn execution as a sequence of streaming run
+   * cards, then post a terminal 「目标已完成 / 已中止」 card with the run metadata.
+   *
+   * Differs from {@link launchRun}: turns are auto-started AND auto-continued by
+   * codex (we never call turn/start — see {@link AgentThread.runGoal}); the
+   * per-turn idle watchdog is OFF (goals run long) with only a hard wall-clock cap
+   * as a backstop; the run cards carry no ⏹ button (goals have no manual stop, by
+   * design). The codex process is recycled at the end — a terminated goal leaves
+   * trailing notifications that would poison the next turn's stream — and any
+   * non-complete goal is cleared first so it won't reactivate on the next resume.
+   */
+  async function launchGoalRun(opts: LaunchOpts): Promise<void> {
+    const objective = opts.firstText;
+    const release = await sema.acquire();
+    let activeKey = opts.knownThreadId ?? `pending:${opts.replyTo}`;
+    let topicThreadId = opts.knownThreadId;
+    const state: ActiveState = active.get(activeKey) ?? { queue: [], requesterOpenId: opts.requesterOpenId };
+    state.thread = opts.thread;
+    if (opts.requesterOpenId) state.requesterOpenId = opts.requesterOpenId;
+    active.set(activeKey, state);
+    if (opts.knownThreadId) sessions.set(opts.knownThreadId, opts.thread);
+
+    const persist = async (threadId: string): Promise<void> => {
+      await upsertSession({
+        threadId,
+        chatId: opts.chatId,
+        cwd: opts.cwd ?? fallbackCwd,
+        codexThreadId: opts.thread.codexThreadId,
+        model: opts.model,
+        effort: opts.effort,
+        summary: opts.summary ?? objective.slice(0, 80),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }).catch(() => undefined);
+    };
+
+    // One streaming run card per codex turn. `cur` is the in-flight turn's render
+    // context (null between turns); assigned directly in the loop so TS narrows it.
+    type GoalTurnCtx = { render: RunRender; rc: RunCardState; stream: RunCardStream; cardMsgId: string };
+    let cur: GoalTurnCtx | null = null;
+    let replyTo = opts.replyTo;
+    let replyInThread = opts.flat ? false : (opts.replyInThread ?? Boolean(opts.knownThreadId));
+
+    const adoptThreadId = async (messageId: string, card: RunCardState): Promise<void> => {
+      if (activeKey.startsWith('pending:')) {
+        const tid = await getThreadId(channel, messageId);
+        if (tid) {
+          const key = opts.roleSuffix ? `${tid}#${opts.roleSuffix}` : tid;
+          active.delete(activeKey);
+          active.set(key, state);
+          sessions.set(key, opts.thread);
+          activeKey = key;
+          topicThreadId = key;
+          card.threadId = key;
+          await persist(key);
+        }
+      } else {
+        topicThreadId = activeKey;
+        card.threadId = activeKey;
+      }
+    };
+
+    const promoteCard = (msgId: string, card: RunCardState): void => {
+      if (!topicThreadId) return;
+      const prev = lastRunCard.get(topicThreadId);
+      if (prev && prev !== msgId) {
+        const prevState = runCards.get(prev);
+        const prevStream = runStreams.get(prev);
+        if (prevState && prevStream) void prevStream.updateCard(channel, buildRunCardPlain(prevState));
+        runCards.delete(prev);
+        runStreams.delete(prev);
+      }
+      lastRunCard.set(topicThreadId, msgId);
+      runCards.set(msgId, card);
+    };
+
+    /** Finalize a turn's card (terminal render), if any. */
+    const finalizeCard = async (ctx: GoalTurnCtx | null): Promise<void> => {
+      if (!ctx) return;
+      await ctx.stream.drain();
+      ctx.render.finalize();
+      ctx.rc.rs = ctx.render.snapshot();
+      await ctx.stream.updateCard(channel, buildRunCard(ctx.rc));
+      runsByCard.delete(ctx.cardMsgId);
+      promoteCard(ctx.cardMsgId, ctx.rc);
+    };
+
+    /** Open a fresh streaming run card for a new codex turn. */
+    const startCard = async (): Promise<GoalTurnCtx> => {
+      const render = new RunRender();
+      render.showTools = getShowToolCalls(cfg);
+      const rc: RunCardState = { rs: render.snapshot(), requesterOpenId: opts.requesterOpenId, showTools: render.showTools, hideStop: true };
+      const stream = new RunCardStream();
+      const cardMsgId = await stream.create(channel, opts.chatId, buildRunCard(rc), { replyTo, replyInThread });
+      rc.cardKey = cardMsgId;
+      runsByCard.set(cardMsgId, state);
+      runStreams.set(cardMsgId, stream);
+      await adoptThreadId(cardMsgId, rc);
+      // chain the next turn's card (and the terminal card) under this one
+      replyTo = cardMsgId;
+      replyInThread = !opts.flat;
+      return { render, rc, stream, cardMsgId };
+    };
+
+    let lastStatus = 'active';
+    let goalTokens = 0;
+    let goalSeconds = 0;
+    let goalErrorMsg: string | undefined;
+    let capped = false;
+    let resolveCap!: () => void;
+    const capSignal = new Promise<void>((res) => {
+      resolveCap = res;
+    });
+    const capTimer = setTimeout(() => {
+      capped = true;
+      resolveCap();
+    }, GOAL_MAX_MS);
+
+    try {
+      const run = opts.thread.runGoal(objective);
+      state.run = run;
+      // idleMs=0 → no per-turn idle timeout (goals run long); capSignal is the only
+      // backstop (a hard wall-clock cap). Ends the loop WITHOUT killing the process,
+      // so we can clear the goal + recycle cleanly afterwards.
+      const guarded = withIdleTimeout(run.events, 0, () => undefined, capSignal);
+      for await (const ev of guarded) {
+        if (ev.type === 'goal_update') {
+          lastStatus = ev.status;
+          goalTokens = ev.tokensUsed;
+          goalSeconds = ev.timeUsedSeconds;
+          continue;
+        }
+        if (ev.type === 'context_usage') {
+          if (topicThreadId) lastUsage.set(topicThreadId, { used: ev.usedTokens, window: ev.contextWindow });
+          if (cur) {
+            cur.render.apply(ev);
+            cur.rc.rs = cur.render.snapshot();
+          }
+          continue;
+        }
+        if (ev.type === 'context_compacted') {
+          void sendManagedCard(channel, opts.chatId, buildAutoCompactCard(), cur?.cardMsgId, !opts.flat).catch((err) =>
+            log.fail('card', err, { phase: 'auto-compact-notice' }),
+          );
+          continue;
+        }
+        if (ev.type === 'turn_started') {
+          await finalizeCard(cur); // close the previous turn's card before opening the next
+          cur = await startCard();
+          continue;
+        }
+        if (ev.type === 'done') {
+          // turn/completed for an intermediate turn — finalize its card. codex
+          // auto-continues with the next turn (a terminal goal status, handled
+          // after the loop, preempts the final turn's done).
+          if (cur) {
+            cur.render.apply(ev);
+            await finalizeCard(cur);
+            cur = null;
+          }
+          continue;
+        }
+        if (ev.type === 'error') {
+          goalErrorMsg = ev.message;
+          if (!cur) continue; // set-failure before any turn → terminal card only
+        }
+        // text / thinking / tool → fold into the current turn's card.
+        if (!cur) cur = await startCard();
+        cur.render.apply(ev);
+        cur.rc.rs = cur.render.snapshot();
+        cur.stream.streamCoalesced(channel, buildRunCard(cur.rc), ANSWER_EID);
+      }
+      await finalizeCard(cur);
+      cur = null;
+
+      // A non-complete goal (cap / abnormal / fatal error) must be cleared so codex
+      // doesn't reactivate it on the next resume; `complete` is already terminal.
+      if (capped || lastStatus !== 'complete') await opts.thread.clearGoal().catch(() => undefined);
+
+      const status = capped ? 'timeout' : goalErrorMsg && !isGoalTerminal(lastStatus) ? 'error' : lastStatus;
+      await sendManagedCard(
+        channel,
+        opts.chatId,
+        buildGoalDoneCard({ objective, status, tokensUsed: goalTokens, timeUsedSeconds: goalSeconds, errorMessage: goalErrorMsg }),
+        replyTo,
+        !opts.flat,
+      ).catch((err) => log.fail('card', err, { phase: 'goal-done' }));
+      if (topicThreadId) await patchSession(topicThreadId, { updatedAt: Date.now() }).catch(() => undefined);
+      log.info('card', 'goal-final', { status, tokens: goalTokens, seconds: goalSeconds });
+    } catch (err) {
+      log.fail('intake', err);
+      await channel
+        .send(opts.chatId, { markdown: `❌ ${err instanceof Error ? err.message : String(err)}` }, { replyTo: opts.replyTo, replyInThread: !opts.flat })
+        .catch(() => undefined);
+    } finally {
+      clearTimeout(capTimer);
+      active.delete(activeKey);
+      if (cur) runsByCard.delete(cur.cardMsgId);
+      // Recycle the codex process (it may still be mid-goal on a cap, and a
+      // terminated goal leaves trailing notifications); the persisted record stays
+      // so the next message resumes a fresh process.
+      void opts.thread.close().catch(() => undefined);
+      if (topicThreadId) sessions.delete(topicThreadId);
       release();
     }
   }

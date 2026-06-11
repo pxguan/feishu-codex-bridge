@@ -38,6 +38,18 @@ export function mapNotification(n: ServerNotification): AgentEvent | null {
       return { type: 'context_compacted' };
     case 'turn/completed':
       return { type: 'done', turnId: n.params.turn.id };
+    case 'thread/goal/updated': {
+      const g = n.params.goal;
+      return {
+        type: 'goal_update',
+        status: g.status,
+        objective: g.objective,
+        tokensUsed: g.tokensUsed,
+        timeUsedSeconds: g.timeUsedSeconds,
+        tokenBudget: g.tokenBudget,
+      };
+    }
+    // thread/goal/cleared — we clear goals ourselves; nothing to surface.
     case 'error':
       return { type: 'error', message: n.params.error.message, willRetry: n.params.willRetry };
     default:

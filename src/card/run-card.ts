@@ -63,6 +63,9 @@ export interface RunCardState {
   requesterOpenId?: string;
   /** drop tool blocks from the render (pref) */
   showTools?: boolean;
+  /** suppress the ⏹ 终止 button — goal run cards have no manual stop (the goal
+   * runs autonomously to its terminal status). */
+  hideStop?: boolean;
   /** `![](src) → image_key` for the final answer's images (populated at terminal
    * after upload; absent while streaming, so refs show as text until then). */
   images?: ReadonlyMap<string, string>;
@@ -123,7 +126,7 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
   if (answer) elements.push(mdStream(answer, ANSWER_EID));
 
   if (state.footer) elements.push(footerStatus(state.footer));
-  if (rc.cardKey) elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')]));
+  if (rc.cardKey && !rc.hideStop) elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')]));
   // Context-usage gauge rides at the very bottom as a footnote (only at/above
   // the warn tier) so it never pushes the answer down.
   const gauge = gaugeEl(state);

@@ -17,6 +17,7 @@ import type {
   ThreadSummary,
   TurnOptions,
 } from '../types';
+import { isGoalTerminal } from '../types';
 import { AppServerClient } from './app-server-client';
 import { mapNotification } from './event-map';
 import { codexVersion, resolveCodexBin } from './locate';
@@ -202,6 +203,51 @@ class CodexThread implements AgentThread {
       }
     }
     return { events: gen(), turnId: () => self.currentTurnId };
+  }
+
+  runGoal(objective: string): AgentRun {
+    const self = this;
+    this.currentTurnId = undefined;
+    async function* gen(): AsyncGenerator<AgentEvent> {
+      // thread/goal/set registers the goal AND auto-starts the first turn (codex
+      // idle-continuation) — verified on 0.139, so we never call turn/start; codex
+      // drives every turn. Race the set rejection so a disabled-feature / bad-param
+      // error surfaces instead of hanging (mirrors runStreamed's start-race).
+      let setError: Error | undefined;
+      const setFailed: Promise<'set-failed'> = new Promise((resolve) => {
+        self.client
+          .request('thread/goal/set', { threadId: self.codexThreadId, objective })
+          .then(undefined, (err: unknown) => {
+            setError = err instanceof Error ? err : new Error(String(err));
+            log.fail('agent', setError, { phase: 'thread/goal/set' });
+            resolve('set-failed');
+          });
+      });
+
+      const stream = self.client.stream()[Symbol.asyncIterator]();
+      while (true) {
+        const step = await Promise.race([stream.next(), setFailed]);
+        if (step === 'set-failed') {
+          yield { type: 'error', message: setError?.message ?? 'thread/goal/set 请求失败', willRetry: false };
+          return;
+        }
+        if (step.done) return;
+        const ev = mapNotification(step.value);
+        if (!ev) continue;
+        if (ev.type === 'turn_started') self.currentTurnId = ev.turnId;
+        yield ev;
+        // A goal spans many auto-continued turns — a per-turn `done` (turn/completed)
+        // is NOT the end. Stop only when the goal itself reaches a terminal status,
+        // or a fatal (non-retryable) error kills the run.
+        if (ev.type === 'goal_update' && isGoalTerminal(ev.status)) return;
+        if (ev.type === 'error' && !ev.willRetry) return;
+      }
+    }
+    return { events: gen(), turnId: () => self.currentTurnId };
+  }
+
+  async clearGoal(): Promise<void> {
+    await this.client.request('thread/goal/clear', { threadId: this.codexThreadId });
   }
 
   async steer(input: AgentInput, expectedTurnId: string): Promise<void> {
