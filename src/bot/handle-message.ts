@@ -2301,7 +2301,9 @@ export function createOrchestrator(
 
     // One streaming run card per codex turn. `cur` is the in-flight turn's render
     // context (null between turns); assigned directly in the loop so TS narrows it.
-    type GoalTurnCtx = { render: RunRender; rc: RunCardState; stream: RunCardStream; cardMsgId: string };
+    // `stream`/`cardMsgId` are null until the turn produces real output — a card is
+    // sent LAZILY on first content, so a planning-only turn leaves no empty box.
+    type GoalTurnCtx = { render: RunRender; rc: RunCardState; stream: RunCardStream | null; cardMsgId: string | null };
     let cur: GoalTurnCtx | null = null;
     let replyTo = opts.replyTo;
     let replyInThread = opts.flat ? false : (opts.replyInThread ?? Boolean(opts.knownThreadId));
@@ -2339,9 +2341,10 @@ export function createOrchestrator(
       runCards.set(msgId, card);
     };
 
-    /** Finalize a turn's card (terminal render), if any. */
+    /** Finalize a turn's card (terminal render). No-op for a render-only turn that
+     * never produced content (no card was sent) — that's how empty turns vanish. */
     const finalizeCard = async (ctx: GoalTurnCtx | null): Promise<void> => {
-      if (!ctx) return;
+      if (!ctx || !ctx.stream || !ctx.cardMsgId) return;
       await ctx.stream.drain();
       ctx.render.finalize();
       ctx.rc.rs = ctx.render.snapshot();
@@ -2350,21 +2353,28 @@ export function createOrchestrator(
       promoteCard(ctx.cardMsgId, ctx.rc);
     };
 
-    /** Open a fresh streaming run card for a new codex turn. */
-    const startCard = async (): Promise<GoalTurnCtx> => {
+    /** Begin a turn's render context WITHOUT sending a card yet. */
+    const startTurn = (): GoalTurnCtx => {
       const render = new RunRender();
       render.showTools = getShowToolCalls(cfg);
       const rc: RunCardState = { rs: render.snapshot(), requesterOpenId: opts.requesterOpenId, showTools: render.showTools, hideStop: true };
+      return { render, rc, stream: null, cardMsgId: null };
+    };
+
+    /** Send this turn's streaming card on first real content (idempotent). */
+    const ensureCard = async (ctx: GoalTurnCtx): Promise<void> => {
+      if (ctx.stream) return;
       const stream = new RunCardStream();
-      const cardMsgId = await stream.create(channel, opts.chatId, buildRunCard(rc), { replyTo, replyInThread });
-      rc.cardKey = cardMsgId;
+      const cardMsgId = await stream.create(channel, opts.chatId, buildRunCard(ctx.rc), { replyTo, replyInThread });
+      ctx.rc.cardKey = cardMsgId;
+      ctx.stream = stream;
+      ctx.cardMsgId = cardMsgId;
       runsByCard.set(cardMsgId, state);
       runStreams.set(cardMsgId, stream);
-      await adoptThreadId(cardMsgId, rc);
+      await adoptThreadId(cardMsgId, ctx.rc);
       // chain the next turn's card (and the terminal card) under this one
       replyTo = cardMsgId;
       replyInThread = !opts.flat;
-      return { render, rc, stream, cardMsgId };
     };
 
     let lastStatus = 'active';
@@ -2404,19 +2414,19 @@ export function createOrchestrator(
           continue;
         }
         if (ev.type === 'context_compacted') {
-          void sendManagedCard(channel, opts.chatId, buildAutoCompactCard(), cur?.cardMsgId, !opts.flat).catch((err) =>
+          void sendManagedCard(channel, opts.chatId, buildAutoCompactCard(), cur?.cardMsgId ?? undefined, !opts.flat).catch((err) =>
             log.fail('card', err, { phase: 'auto-compact-notice' }),
           );
           continue;
         }
         if (ev.type === 'turn_started') {
-          await finalizeCard(cur); // close the previous turn's card before opening the next
-          cur = await startCard();
+          await finalizeCard(cur); // close the previous turn's card (if it produced one)
+          cur = startTurn(); // render-only; the card is sent lazily on first content
           continue;
         }
         if (ev.type === 'done') {
-          // turn/completed for an intermediate turn — finalize its card. codex
-          // auto-continues with the next turn (a terminal goal status, handled
+          // turn/completed for an intermediate turn — finalize its card (if any).
+          // codex auto-continues with the next turn (a terminal goal status, handled
           // after the loop, preempts the final turn's done).
           if (cur) {
             cur.render.apply(ev);
@@ -2429,11 +2439,21 @@ export function createOrchestrator(
           goalErrorMsg = ev.message;
           if (!cur) continue; // set-failure before any turn → terminal card only
         }
-        // text / thinking / tool → fold into the current turn's card.
-        if (!cur) cur = await startCard();
+        if (!cur) cur = startTurn();
         cur.render.apply(ev);
+        // Reasoning ALONE doesn't warrant a card (a planning-only turn must not leave
+        // an empty box); only real output (text / tool calls) sends the card. Once a
+        // card exists, keep streaming everything (incl. reasoning) into it.
+        if (ev.type === 'thinking' || ev.type === 'thinking_delta') {
+          if (cur.stream) {
+            cur.rc.rs = cur.render.snapshot();
+            cur.stream.streamCoalesced(channel, buildRunCard(cur.rc), ANSWER_EID);
+          }
+          continue;
+        }
+        await ensureCard(cur);
         cur.rc.rs = cur.render.snapshot();
-        cur.stream.streamCoalesced(channel, buildRunCard(cur.rc), ANSWER_EID);
+        cur.stream!.streamCoalesced(channel, buildRunCard(cur.rc), ANSWER_EID);
       }
       await finalizeCard(cur);
       cur = null;
@@ -2462,7 +2482,7 @@ export function createOrchestrator(
     } finally {
       clearTimeout(capTimer);
       active.delete(activeKey);
-      if (cur) runsByCard.delete(cur.cardMsgId);
+      if (cur?.cardMsgId) runsByCard.delete(cur.cardMsgId);
       // Recycle the codex process (it may still be mid-goal on a cap, and a
       // terminated goal leaves trailing notifications); the persisted record stays
       // so the next message resumes a fresh process.
