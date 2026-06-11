@@ -308,6 +308,17 @@ export function sanitizeContext(s: string, maxLen: number, oneLine: boolean): st
 }
 
 /**
+ * Prepend a fenced context block above the user's actual text (the instruction
+ * codex acts on), separated by a blank line. Returns the block alone when the
+ * user text is empty. Shared by every weave* below so the "block ↕ base"
+ * convention lives in one place.
+ */
+function prependBlock(block: string, text: string): string {
+  const base = text.trim();
+  return base ? `${block}\n\n${base}` : block;
+}
+
+/**
  * Prepend a fenced "引用的消息" block before the user's text. Returns `text`
  * unchanged when there's no quoted message or it sanitizes to empty.
  */
@@ -320,8 +331,7 @@ export function weaveQuote(text: string, quoted: ContextMessage | undefined): st
   const body = sanitizeContext(quoted.text, QUOTE_MAX, true);
   if (!body) return text;
   const block = `[用户引用了一条消息（来自 ${who}）：\n${body}\n]`;
-  const base = text.trim();
-  return base ? `${block}\n\n${base}` : block;
+  return prependBlock(block, text);
 }
 
 /**
@@ -339,8 +349,7 @@ export function weaveThreadHistory(text: string, msgs: ContextMessage[]): string
     .filter((l) => l.length > 0);
   if (lines.length === 0) return text;
   const block = `[话题中在此之前已有的消息（按时间先后排列，供你理解上下文）：\n${lines.join('\n')}\n]`;
-  const base = text.trim();
-  return base ? `${block}\n\n${base}` : block;
+  return prependBlock(block, text);
 }
 
 /** Max chars for the woven sender display name (matches the per-line history clamp). */
@@ -362,6 +371,5 @@ export function weaveSender(text: string, sender: { senderId?: string; senderNam
   if (!id) return text;
   const who = sanitizeContext(sender.senderName ?? '', SENDER_NAME_MAX, true) || '某用户';
   const block = `[本条消息的发信人：${who}（open_id：${id}）]`;
-  const base = text.trim();
-  return base ? `${block}\n\n${base}` : block;
+  return prependBlock(block, text);
 }
