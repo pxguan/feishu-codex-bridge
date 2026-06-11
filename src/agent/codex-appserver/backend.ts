@@ -232,6 +232,8 @@ class CodexThread implements AgentThread {
       // goal_updates whose objective isn't ours, and don't honor a terminal status
       // until our goal has actually started (a turn started, or it went active).
       let armed = false;
+      let turnActive = false;
+      let goalDone = false; // a terminal goal status was seen; drain the live turn, then stop
       while (true) {
         const step = await Promise.race([stream.next(), setFailed]);
         if (step === 'set-failed') {
@@ -244,7 +246,15 @@ class CodexThread implements AgentThread {
         if (ev.type === 'turn_started') {
           self.currentTurnId = ev.turnId;
           armed = true; // a real turn for our goal is running
+          turnActive = true;
           yield ev;
+          continue;
+        }
+        if (ev.type === 'done') {
+          turnActive = false;
+          yield ev;
+          // The goal is terminal AND its final turn just finished — now stop.
+          if (goalDone) return;
           continue;
         }
         if (ev.type === 'goal_update') {
@@ -252,8 +262,15 @@ class CodexThread implements AgentThread {
           if (ev.status === 'active' || ev.status === 'paused') armed = true;
           yield ev;
           // A goal spans many auto-continued turns — a per-turn `done` is NOT the
-          // end. Stop only on a terminal goal status (once our goal has started).
-          if (armed && isGoalTerminal(ev.status)) return;
+          // end. On a terminal goal status: codex emits update_goal(complete) BEFORE
+          // the model's closing answer (verified — the final agentMessage arrives a
+          // couple seconds AFTER goal/complete), so returning here would cut the
+          // result off. If a turn is in flight, keep consuming until its turn/completed
+          // so the final answer renders; otherwise stop now.
+          if (armed && isGoalTerminal(ev.status)) {
+            if (turnActive) goalDone = true;
+            else return;
+          }
           continue;
         }
         yield ev;
