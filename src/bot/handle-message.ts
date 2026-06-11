@@ -2438,9 +2438,11 @@ export function createOrchestrator(
       await finalizeCard(cur);
       cur = null;
 
-      // A non-complete goal (cap / abnormal / fatal error) must be cleared so codex
-      // doesn't reactivate it on the next resume; `complete` is already terminal.
-      if (capped || lastStatus !== 'complete') await opts.thread.clearGoal().catch(() => undefined);
+      // Always clear the goal when the run ends: a non-complete goal would
+      // reactivate on the next resume, and a LEFTOVER goal (even complete) gets
+      // re-broadcast as a stale snapshot when this thread is next resumed, which
+      // would make the next /goal "complete" instantly (see runGoal's stale guard).
+      await opts.thread.clearGoal().catch(() => undefined);
 
       const status = capped ? 'timeout' : goalErrorMsg && !isGoalTerminal(lastStatus) ? 'error' : lastStatus;
       await sendManagedCard(

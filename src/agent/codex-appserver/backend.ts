@@ -225,6 +225,13 @@ class CodexThread implements AgentThread {
       });
 
       const stream = self.client.stream()[Symbol.asyncIterator]();
+      // Guard against a STALE goal snapshot: resuming a thread that had a prior
+      // goal re-emits a thread/goal/updated for THAT goal (often already complete)
+      // around resume time — before ours runs. If we honored it we'd "complete"
+      // instantly with the old goal's stats and never do the work. So: ignore
+      // goal_updates whose objective isn't ours, and don't honor a terminal status
+      // until our goal has actually started (a turn started, or it went active).
+      let armed = false;
       while (true) {
         const step = await Promise.race([stream.next(), setFailed]);
         if (step === 'set-failed') {
@@ -234,13 +241,23 @@ class CodexThread implements AgentThread {
         if (step.done) return;
         const ev = mapNotification(step.value);
         if (!ev) continue;
-        if (ev.type === 'turn_started') self.currentTurnId = ev.turnId;
+        if (ev.type === 'turn_started') {
+          self.currentTurnId = ev.turnId;
+          armed = true; // a real turn for our goal is running
+          yield ev;
+          continue;
+        }
+        if (ev.type === 'goal_update') {
+          if (ev.objective !== objective) continue; // stale snapshot for a different goal
+          if (ev.status === 'active' || ev.status === 'paused') armed = true;
+          yield ev;
+          // A goal spans many auto-continued turns — a per-turn `done` is NOT the
+          // end. Stop only on a terminal goal status (once our goal has started).
+          if (armed && isGoalTerminal(ev.status)) return;
+          continue;
+        }
         yield ev;
-        // A goal spans many auto-continued turns — a per-turn `done` (turn/completed)
-        // is NOT the end. Stop only when the goal itself reaches a terminal status,
-        // or a fatal (non-retryable) error kills the run.
-        if (ev.type === 'goal_update' && isGoalTerminal(ev.status)) return;
-        if (ev.type === 'error' && !ev.willRetry) return;
+        if (ev.type === 'error' && !ev.willRetry) return; // a fatal error kills the run
       }
     }
     return { events: gen(), turnId: () => self.currentTurnId };
