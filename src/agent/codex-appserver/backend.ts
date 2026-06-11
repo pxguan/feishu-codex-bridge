@@ -209,6 +209,17 @@ class CodexThread implements AgentThread {
     const self = this;
     this.currentTurnId = undefined;
     async function* gen(): AsyncGenerator<AgentEvent> {
+      // Clear any leftover goal on this thread FIRST. codex keeps a goal attached
+      // even after it completes and re-broadcasts it on every resume (verified);
+      // worse, a thread/goal/set whose objective is IDENTICAL to an already-complete
+      // goal is a NO-OP — so re-running the same goal would do nothing and report
+      // stale stats. And a leftover ACTIVE goal (from a crashed/killed run, or
+      // pre-fix dirty data) auto-continues on resume. runGoal only runs when STARTING
+      // a fresh goal (a busy session is gated out upstream), so any goal currently on
+      // the thread is leftover — clearing it guarantees the set below makes a fresh,
+      // actually-running goal and self-heals every leftover case.
+      await self.client.request('thread/goal/clear', { threadId: self.codexThreadId }).catch(() => undefined);
+
       // thread/goal/set registers the goal AND auto-starts the first turn (codex
       // idle-continuation) — verified on 0.139, so we never call turn/start; codex
       // drives every turn. Race the set rejection so a disabled-feature / bad-param
