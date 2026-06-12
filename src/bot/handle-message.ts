@@ -313,6 +313,33 @@ export function parseGoalTrigger(text: string): string | null {
   return objective.length > 0 ? objective : null;
 }
 
+/**
+ * 入站事件去重（飞书事件 at-least-once：WS 重连窗口会重推同一事件）。卡片回调
+ * SDK 自带 12h 去重，消息/评论侧没有 —— 重推的指令会排队后双跑 codex（写盘类
+ * 指令二次执行）。Map 的插入序即 LRU 序：TTL 内命中视为重复；超容量剔除最旧。
+ */
+export class RecentIdCache {
+  private readonly entries = new Map<string, number>();
+  constructor(
+    private readonly maxEntries = 2048,
+    private readonly ttlMs = 10 * 60_000,
+  ) {}
+
+  /** Record `id`; true ⇔ already seen within the TTL (i.e. a duplicate). */
+  seen(id: string): boolean {
+    const now = Date.now();
+    const at = this.entries.get(id);
+    if (at !== undefined && now - at < this.ttlMs) return true;
+    this.entries.delete(id); // re-insert so the Map's order stays oldest-first
+    this.entries.set(id, now);
+    if (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest !== undefined) this.entries.delete(oldest);
+    }
+    return false;
+  }
+}
+
 export function createOrchestrator(
   channel: LarkChannel,
   cfg: AppConfig,
@@ -345,6 +372,8 @@ export function createOrchestrator(
   /** latest context usage per session (sessionKey → tokens), for `/context`.
    * Fed from context_usage events in the run loop; keyed like topicThreadId. */
   const lastUsage = new Map<string, { used: number; window: number | null }>();
+  /** inbound message/comment dedup (at-least-once delivery, see RecentIdCache) */
+  const seenInbound = new RecentIdCache();
   let modelsCache: ModelInfo[] | null = null;
 
   async function listModels(): Promise<ModelInfo[]> {
@@ -415,6 +444,10 @@ export function createOrchestrator(
 
   // ── inbound messages ──────────────────────────────────────────────
   const onMessage = async (msg: NormalizedMessage): Promise<void> => {
+    if (seenInbound.seen(msg.messageId)) {
+      log.info('intake', 'reject', { reason: 'duplicate', msgId: msg.messageId });
+      return;
+    }
     log.info('intake', 'recv', {
       chatType: msg.chatType,
       mentionedBot: msg.mentionedBot,
@@ -2584,6 +2617,11 @@ export function createOrchestrator(
    * watchdog is the only kill switch.
    */
   const onComment = async (evt: CommentEvent): Promise<void> => {
+    // 评论事件没有 messageId，按 commentId+replyId 去重（前缀防与消息 id 混淆）。
+    if (seenInbound.seen(`comment:${evt.commentId}:${evt.replyId ?? ''}`)) {
+      log.info('comment', 'skip', { reason: 'duplicate', commentId: evt.commentId });
+      return;
+    }
     await withTrace({ chatId: 'comment' }, async () => {
       log.info('comment', 'enter', {
         doc: evt.fileToken,
