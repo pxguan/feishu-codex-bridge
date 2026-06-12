@@ -29,6 +29,8 @@ function gaugeEl(state: RunState): CardElement | null {
 /** Action ids for the in-topic run card. */
 export const RC = {
   stop: 'run.stop',
+  /** goal-only: clear the goal but let the in-flight turn finish (no auto-continue). */
+  endGoal: 'goal.end',
 } as const;
 
 /**
@@ -63,9 +65,14 @@ export interface RunCardState {
   requesterOpenId?: string;
   /** drop tool blocks from the render (pref) */
   showTools?: boolean;
-  /** suppress the ⏹ 终止 button — goal run cards have no manual stop (the goal
-   * runs autonomously to its terminal status). */
+  /** suppress the ⏹ 终止 button (used by non-goal cards that opt out of stop). */
   hideStop?: boolean;
+  /** goal run cards: show TWO controls — `⏹ 终止` (clear goal + cut output now)
+   * and `🎯 结束目标` (clear goal, let the current turn finish, then stop). */
+  goalControls?: boolean;
+  /** goal run cards, after 🎯 结束目标 was tapped: the goal is cleared and this
+   * turn is finishing — drop the 结束目标 button (keep ⏹ 终止) and show a notice. */
+  goalEnding?: boolean;
   /** `![](src) → image_key` for the final answer's images (populated at terminal
    * after upload; absent while streaming, so refs show as text until then). */
   images?: ReadonlyMap<string, string>;
@@ -126,7 +133,24 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
   if (answer) elements.push(mdStream(answer, ANSWER_EID));
 
   if (state.footer) elements.push(footerStatus(state.footer));
-  if (rc.cardKey && !rc.hideStop) elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')]));
+  if (rc.cardKey && rc.goalControls) {
+    if (rc.goalEnding) {
+      // 结束目标 已触发:目标已解除,本轮输出完即停。仅留 ⏹ 终止(可再点掐断)。
+      elements.push(noteMd('_🎯 目标已解除，本轮输出完成后停止_'));
+      elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')]));
+    } else {
+      // Goal: 终止 = clear goal + cut output now; 结束目标 = clear goal, let this
+      // turn finish, then stop (no auto-continue). Both routed by the card's msgId.
+      elements.push(
+        actions([
+          button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger'),
+          button('🎯 结束目标', { a: RC.endGoal, m: rc.cardKey }, 'default'),
+        ]),
+      );
+    }
+  } else if (rc.cardKey && !rc.hideStop) {
+    elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')]));
+  }
   // Context-usage gauge rides at the very bottom as a footnote (only at/above
   // the warn tier) so it never pushes the answer down.
   const gauge = gaugeEl(state);

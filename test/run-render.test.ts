@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../src/agent/types';
-import { buildRunCard } from '../src/card/run-card';
+import { buildRunCard, RC } from '../src/card/run-card';
 import {
   initialState,
   markIdleTimeout,
@@ -114,6 +114,51 @@ describe('buildRunCard', () => {
     const json = JSON.stringify(buildRunCard({ rs, showTools: false }));
     expect(json).not.toContain('npm test');
     expect(json).toContain('text only');
+  });
+});
+
+/** Collect every button's {label, action, msgId} from a built card. */
+function buttons(node: unknown, acc: { label: string; a: unknown; m: unknown }[] = []): { label: string; a: unknown; m: unknown }[] {
+  if (Array.isArray(node)) node.forEach((n) => buttons(n, acc));
+  else if (node && typeof node === 'object') {
+    const o = node as Record<string, any>;
+    if (o.tag === 'button') {
+      const value = o.behaviors?.[0]?.value ?? {};
+      acc.push({ label: o.text?.content, a: value.a, m: value.m });
+    }
+    for (const k of Object.keys(o)) buttons(o[k], acc);
+  }
+  return acc;
+}
+
+describe('buildRunCard — goal controls', () => {
+  const running = (): RunState => run([{ type: 'text_delta', itemId: 'a', delta: 'working…' }]);
+
+  it('renders BOTH 终止 and 结束目标 on a goal card, wired to the right actions', () => {
+    const btns = buttons(buildRunCard({ rs: running(), cardKey: 'g1', goalControls: true }));
+    expect(btns).toHaveLength(2);
+    const stop = btns.find((b) => b.a === RC.stop);
+    const end = btns.find((b) => b.a === RC.endGoal);
+    expect(stop).toMatchObject({ label: '⏹ 终止', m: 'g1' });
+    expect(end).toMatchObject({ label: '🎯 结束目标', m: 'g1' });
+  });
+
+  it('renders only ⏹ 终止 on a normal (non-goal) run card', () => {
+    const btns = buttons(buildRunCard({ rs: running(), cardKey: 'm1' }));
+    expect(btns).toHaveLength(1);
+    expect(btns[0]).toMatchObject({ label: '⏹ 终止', a: RC.stop });
+  });
+
+  it('renders no controls without a cardKey (nothing to route to)', () => {
+    expect(buttons(buildRunCard({ rs: running(), goalControls: true }))).toHaveLength(0);
+  });
+
+  it('after 结束目标 (goalEnding): drops 结束目标, keeps ⏹ 终止, shows the notice', () => {
+    const card = buildRunCard({ rs: running(), cardKey: 'g1', goalControls: true, goalEnding: true });
+    const btns = buttons(card);
+    expect(btns).toHaveLength(1);
+    expect(btns[0]).toMatchObject({ label: '⏹ 终止', a: RC.stop });
+    expect(JSON.stringify(card)).toContain('目标已解除');
   });
 });
 

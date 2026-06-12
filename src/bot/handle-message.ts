@@ -241,8 +241,14 @@ interface ActiveState {
   requesterOpenId?: string;
   /** ⏹ 终止: abort the codex turn AND end the local consume loop. Set per-turn
    * while a run is in flight; codex emits no mappable terminal on interrupt, so
-   * the loop must be stopped locally rather than waiting on the backend. */
+   * the loop must be stopped locally rather than waiting on the backend. For a
+   * goal run this also clears the goal first (so it won't reactivate on resume)
+   * and suppresses the goal summary card. */
   interrupt?: () => void;
+  /** 🎯 结束目标 (goal runs only): clear the goal so codex stops auto-continuing,
+   * but let the in-flight turn finish streaming; the loop then ends after that
+   * turn's `done` (or immediately if no turn is in flight). No summary card. */
+  endGoal?: () => void;
 }
 
 /** Message-reaction lifecycle controller (see {@link runReaction}). */
@@ -295,8 +301,8 @@ export interface Orchestrator {
  * message with the token stripped and whitespace collapsed — or null if there's
  * no token or nothing left after it. The token must be whitespace-bounded so
  * paths and URLs containing `/goal` (e.g. `src/goal/x.ts`, `cmd/goal/main.go`,
- * `https://x/goal`) never trigger. No /goal pause|resume|clear|status — a goal
- * runs to its terminal status with no manual controls, by design.
+ * `https://x/goal`) never trigger. No /goal pause|resume|clear|status slash
+ * subcommands — manual control is via the run card's ⏹ 终止 / 🎯 结束目标 buttons.
  */
 export function parseGoalTrigger(text: string): string | null {
   if (!/(^|\s)\/goal(?=\s|$)/i.test(text)) return null;
@@ -1149,9 +1155,13 @@ export function createOrchestrator(
   // ── card actions ──────────────────────────────────────────────────
   const dispatcher = new CardDispatcher(channel, cfg);
   const PENDING_TTL_MS = 30 * 60_000; // abandoned config cards expire after 30 min
-  // Hard wall-clock cap on a goal run (its per-turn idle watchdog is OFF, so this
-  // is the only backstop against a wedged codex pinning a concurrency slot).
-  const GOAL_MAX_MS = 30 * 60_000;
+  // Goal runs have NO total wall-clock cap (a healthy goal may legitimately run
+  // for days — matching codex's native behavior). The only automatic backstop is
+  // an IDLE watchdog: if codex emits NO event at all for this long, the run is
+  // presumed wedged and torn down to free its concurrency slot. A live goal
+  // streams events continuously, so this never fires on real work; manual control
+  // is the run card's ⏹ 终止 / 🎯 结束目标 buttons.
+  const GOAL_IDLE_MS = 30 * 60_000;
 
   // A card update issued from inside a cardAction handler must land AFTER Feishu
   // is done with the click's interaction window — Feishu locks the card during
@@ -1292,6 +1302,15 @@ export function createOrchestrator(
       if (!st || !runOwnerOrAdmin(evt, st.requesterOpenId)) return;
       st.interrupt?.();
       log.info('card', 'action', { actionId: 'run.stop', stopped: Boolean(st.interrupt) });
+    })
+    // 🎯 结束目标 (goal cards): clear the goal, let the current turn finish, then
+    // stop — no auto-continue. Owner-or-admin gated like ⏹.
+    .on(RC.endGoal, ({ evt, value }) => {
+      const key = typeof value.m === 'string' ? value.m : evt.messageId;
+      const st = runsByCard.get(key);
+      if (!st || !runOwnerOrAdmin(evt, st.requesterOpenId)) return;
+      st.endGoal?.();
+      log.info('card', 'action', { actionId: 'goal.end', ended: Boolean(st.endGoal) });
     });
 
   // DM management console buttons (design §3.1). Admin-gated; sub-views patch
@@ -2357,7 +2376,7 @@ export function createOrchestrator(
     const startTurn = (): GoalTurnCtx => {
       const render = new RunRender();
       render.showTools = getShowToolCalls(cfg);
-      const rc: RunCardState = { rs: render.snapshot(), requesterOpenId: opts.requesterOpenId, showTools: render.showTools, hideStop: true };
+      const rc: RunCardState = { rs: render.snapshot(), requesterOpenId: opts.requesterOpenId, showTools: render.showTools, goalControls: true };
       return { render, rc, stream: null, cardMsgId: null };
     };
 
@@ -2381,23 +2400,58 @@ export function createOrchestrator(
     let goalTokens = 0;
     let goalSeconds = 0;
     let goalErrorMsg: string | undefined;
-    let capped = false;
-    let resolveCap!: () => void;
-    const capSignal = new Promise<void>((res) => {
-      resolveCap = res;
+    let interrupted = false; // ⏹ 终止 was tapped
+    let goalEnded = false; // 🎯 结束目标 was tapped
+    let idledOut = false; // idle watchdog fired (presumed-wedged backstop)
+    let resolveStop!: () => void; // 终止 → end the loop NOW (cuts current output)
+    let resolveEnd!: () => void; // 结束目标 with no turn in flight → end the loop now
+    const stopSignal = new Promise<void>((res) => {
+      resolveStop = res;
     });
-    const capTimer = setTimeout(() => {
-      capped = true;
-      resolveCap();
-    }, GOAL_MAX_MS);
+    const endSignal = new Promise<void>((res) => {
+      resolveEnd = res;
+    });
 
     try {
       const run = opts.thread.runGoal(objective);
       state.run = run;
-      // idleMs=0 → no per-turn idle timeout (goals run long); capSignal is the only
-      // backstop (a hard wall-clock cap). Ends the loop WITHOUT killing the process,
-      // so we can clear the goal + recycle cleanly afterwards.
-      const guarded = withIdleTimeout(run.events, 0, () => undefined, capSignal);
+      // ⏹ 终止: clear the goal first (so it won't reactivate on resume), then end
+      // the loop immediately — cutting the in-flight turn's output.
+      state.interrupt = () => {
+        if (interrupted) return;
+        interrupted = true;
+        void opts.thread.clearGoal().catch(() => undefined);
+        resolveStop();
+      };
+      // 🎯 结束目标: clear the goal so codex stops auto-continuing, but let the
+      // in-flight turn finish. With no turn in flight, end now; otherwise the
+      // `done` branch below breaks the loop after the current turn completes.
+      state.endGoal = () => {
+        if (goalEnded || interrupted) return;
+        goalEnded = true;
+        void opts.thread.clearGoal().catch(() => undefined);
+        if (cur) {
+          // Immediate feedback: drop the 结束目标 button + show "本轮完成后停止"
+          // while the in-flight turn keeps streaming. The flag lives on rc, so
+          // later frames keep it; this push refreshes the card right away (a
+          // structure change forces a whole-card update).
+          cur.rc.goalEnding = true;
+          if (cur.stream) {
+            cur.rc.rs = cur.render.snapshot();
+            cur.stream.streamCoalesced(channel, buildRunCard(cur.rc), ANSWER_EID);
+          }
+        } else {
+          resolveEnd(); // no turn in flight → end now
+        }
+      };
+      // No total wall-clock cap (goals may run for days). GOAL_IDLE_MS is a
+      // presumed-wedged backstop: a live goal streams events continuously, so it
+      // only fires when codex goes fully silent. stopSignal/endSignal end the loop
+      // WITHOUT killing the process, so we can clear the goal + recycle cleanly.
+      const stop = Promise.race([stopSignal, endSignal]);
+      const guarded = withIdleTimeout(run.events, GOAL_IDLE_MS, () => {
+        idledOut = true;
+      }, stop);
       for await (const ev of guarded) {
         if (ev.type === 'goal_update') {
           lastStatus = ev.status;
@@ -2433,6 +2487,10 @@ export function createOrchestrator(
             await finalizeCard(cur);
             cur = null;
           }
+          // 🎯 结束目标: the goal was cleared mid-turn; that turn is now done and
+          // codex won't auto-continue, so stop here (codex emits no terminal we'd
+          // otherwise wait on — goal/cleared is ignored by the event map).
+          if (goalEnded) break;
           continue;
         }
         if (ev.type === 'error') {
@@ -2455,6 +2513,9 @@ export function createOrchestrator(
         cur.rc.rs = cur.render.snapshot();
         cur.stream!.streamCoalesced(channel, buildRunCard(cur.rc), ANSWER_EID);
       }
+      // ⏹ 终止: mark the in-flight turn's card as interrupted before finalizing
+      // (finalize() is a no-op once terminal, so this doesn't clash).
+      if (interrupted && cur) cur.render.interrupt();
       await finalizeCard(cur);
       cur = null;
 
@@ -2462,30 +2523,38 @@ export function createOrchestrator(
       // reactivate on the next resume, and a LEFTOVER goal (even complete) gets
       // re-broadcast as a stale snapshot when this thread is next resumed, which
       // would make the next /goal "complete" instantly (see runGoal's stale guard).
+      // (Manual 终止/结束目标 already cleared it; this is idempotent + covers the
+      // natural-terminal / idle-backstop paths.)
       await opts.thread.clearGoal().catch(() => undefined);
 
-      const status = capped ? 'timeout' : goalErrorMsg && !isGoalTerminal(lastStatus) ? 'error' : lastStatus;
-      await sendManagedCard(
-        channel,
-        opts.chatId,
-        buildGoalDoneCard({ objective, status, tokensUsed: goalTokens, timeUsedSeconds: goalSeconds, errorMessage: goalErrorMsg }),
-        replyTo,
-        !opts.flat,
-      ).catch((err) => log.fail('card', err, { phase: 'goal-done' }));
+      // Summary card only for an autonomous end (natural terminal status, or the
+      // idle backstop). Manual ⏹ 终止 / 🎯 结束目标 end silently — the run card(s)
+      // already convey the outcome.
+      if (!interrupted && !goalEnded) {
+        const status = idledOut ? 'timeout' : goalErrorMsg && !isGoalTerminal(lastStatus) ? 'error' : lastStatus;
+        await sendManagedCard(
+          channel,
+          opts.chatId,
+          buildGoalDoneCard({ objective, status, tokensUsed: goalTokens, timeUsedSeconds: goalSeconds, errorMessage: goalErrorMsg }),
+          replyTo,
+          !opts.flat,
+        ).catch((err) => log.fail('card', err, { phase: 'goal-done' }));
+        log.info('card', 'goal-final', { status, tokens: goalTokens, seconds: goalSeconds });
+      } else {
+        log.info('card', 'goal-final', { status: interrupted ? 'interrupted' : 'ended', tokens: goalTokens, seconds: goalSeconds });
+      }
       if (topicThreadId) await patchSession(topicThreadId, { updatedAt: Date.now() }).catch(() => undefined);
-      log.info('card', 'goal-final', { status, tokens: goalTokens, seconds: goalSeconds });
     } catch (err) {
       log.fail('intake', err);
       await channel
         .send(opts.chatId, { markdown: `❌ ${err instanceof Error ? err.message : String(err)}` }, { replyTo: opts.replyTo, replyInThread: !opts.flat })
         .catch(() => undefined);
     } finally {
-      clearTimeout(capTimer);
       active.delete(activeKey);
       if (cur?.cardMsgId) runsByCard.delete(cur.cardMsgId);
-      // Recycle the codex process (it may still be mid-goal on a cap, and a
-      // terminated goal leaves trailing notifications); the persisted record stays
-      // so the next message resumes a fresh process.
+      // Recycle the codex process (it may still be mid-goal, and a terminated goal
+      // leaves trailing notifications); the persisted record stays so the next
+      // message resumes a fresh process.
       void opts.thread.close().catch(() => undefined);
       if (topicThreadId) sessions.delete(topicThreadId);
       release();
