@@ -507,11 +507,11 @@ export function createOrchestrator(
       }
       const ts = turnSession(msg.chatId, project, msg.senderId);
       if (cmd === 'model') {
-        await postModelCard(msg, ts.sessionKey);
+        postModelCard(msg, ts.sessionKey);
         return;
       }
       if (cmd === 'compact') {
-        await runCompact(msg, ts.sessionKey, false, ts);
+        runCompact(msg, ts.sessionKey, false, ts);
         return;
       }
       if (cmd === 'context') {
@@ -537,11 +537,11 @@ export function createOrchestrator(
       }
       const ts = turnSession(msg.threadId, project, msg.senderId);
       if (cmd === 'model') {
-        await postModelCard(msg, ts.sessionKey);
+        postModelCard(msg, ts.sessionKey);
         return;
       }
       if (cmd === 'compact') {
-        await runCompact(msg, ts.sessionKey, true, ts);
+        runCompact(msg, ts.sessionKey, true, ts);
         return;
       }
       if (cmd === 'context') {
@@ -564,7 +564,7 @@ export function createOrchestrator(
       return;
     }
     if (cmd === 'resume') {
-      await postResumeCard(msg);
+      postResumeCard(msg);
       return;
     }
     if (cmd === 'settings') {
@@ -1021,51 +1021,70 @@ export function createOrchestrator(
   }
 
   /** Group @bot /resume: post the history picker for this project's cwd. Owner-only
-   * (admins[]) — 恢复会话会改变上下文，属管理类命令；非管理员收到无权限提示。 */
-  async function postResumeCard(msg: NormalizedMessage): Promise<void> {
-    if (!isAdmin(cfg, msg.senderId)) {
-      await denyAdminCommand(msg, 'resume');
-      return;
-    }
-    await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
-      const project = await getProjectByChatId(msg.chatId);
-      const cwd = project?.cwd ?? fallbackCwd;
-      const threads = await backend.listThreads(cwd);
-      const state: ResumeCardState = {
-        chatId: msg.chatId,
-        originalMsgId: msg.messageId,
-        requesterOpenId: msg.senderId,
-        cwd,
-        projectName: project?.name,
-        threads,
-        createdAt: Date.now(),
-      };
-      const res = await sendManagedCard(channel, msg.chatId, buildResumeCard(state), msg.messageId);
-      pruneResumePending();
-      resumePending.set(res.messageId, state);
-      log.info('card', 'resume', { project: project?.name ?? '(unregistered)', threads: threads.length });
+   * (admins[]) — 恢复会话会改变上下文，属管理类命令；非管理员收到无权限提示。
+   * Detached — listThreads spawns an app-server (slow); holding onMessage on it
+   * would pin the SDK's per-chat queue (sibling topics + ⏹ card-actions stall). */
+  function postResumeCard(msg: NormalizedMessage): void {
+    void withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
+      if (!isAdmin(cfg, msg.senderId)) {
+        await denyAdminCommand(msg, 'resume');
+        return;
+      }
+      try {
+        const project = await getProjectByChatId(msg.chatId);
+        const cwd = project?.cwd ?? fallbackCwd;
+        const threads = await backend.listThreads(cwd);
+        const state: ResumeCardState = {
+          chatId: msg.chatId,
+          originalMsgId: msg.messageId,
+          requesterOpenId: msg.senderId,
+          cwd,
+          projectName: project?.name,
+          threads,
+          createdAt: Date.now(),
+        };
+        const res = await sendManagedCard(channel, msg.chatId, buildResumeCard(state), msg.messageId);
+        pruneResumePending();
+        resumePending.set(res.messageId, state);
+        log.info('card', 'resume', { project: project?.name ?? '(unregistered)', threads: threads.length });
+      } catch (err) {
+        // detached: surface the failure as a reply, never die silently
+        log.fail('card', err, { cmd: 'resume' });
+        await channel
+          .send(msg.chatId, { markdown: `❌ ${err instanceof Error ? err.message : String(err)}` }, { replyTo: msg.messageId })
+          .catch(() => undefined);
+      }
     });
   }
 
   /** @bot /model: post the model/effort picker for the session keyed by
-   * `sessionKey` (topic threadId for multi, chatId for single). */
-  async function postModelCard(msg: NormalizedMessage, sessionKey: string): Promise<void> {
-    await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
-      const [models, rec] = await Promise.all([listModels(), getSession(sessionKey)]);
-      const def = pickDefault(models);
-      const state: ModelCardState = {
-        chatId: msg.chatId,
-        threadId: sessionKey,
-        requesterOpenId: msg.senderId,
-        models,
-        model: rec?.model ?? def.model,
-        effort: rec?.effort ?? def.effort,
-        createdAt: Date.now(),
-      };
-      const res = await sendManagedCard(channel, msg.chatId, buildModelCard(state), msg.messageId, true);
-      pruneModelPending();
-      modelPending.set(res.messageId, state);
-      log.info('card', 'model', { threadId: sessionKey, model: state.model, effort: state.effort });
+   * `sessionKey` (topic threadId for multi, chatId for single).
+   * Detached — listModels can cold-spawn an app-server; see postResumeCard. */
+  function postModelCard(msg: NormalizedMessage, sessionKey: string): void {
+    void withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
+      try {
+        const [models, rec] = await Promise.all([listModels(), getSession(sessionKey)]);
+        const def = pickDefault(models);
+        const state: ModelCardState = {
+          chatId: msg.chatId,
+          threadId: sessionKey,
+          requesterOpenId: msg.senderId,
+          models,
+          model: rec?.model ?? def.model,
+          effort: rec?.effort ?? def.effort,
+          createdAt: Date.now(),
+        };
+        const res = await sendManagedCard(channel, msg.chatId, buildModelCard(state), msg.messageId, true);
+        pruneModelPending();
+        modelPending.set(res.messageId, state);
+        log.info('card', 'model', { threadId: sessionKey, model: state.model, effort: state.effort });
+      } catch (err) {
+        // detached: surface the failure as a reply, never die silently
+        log.fail('card', err, { cmd: 'model' });
+        await channel
+          .send(msg.chatId, { markdown: `❌ ${err instanceof Error ? err.message : String(err)}` }, { replyTo: msg.messageId })
+          .catch(() => undefined);
+      }
     });
   }
 
@@ -1087,93 +1106,118 @@ export function createOrchestrator(
    * running turn owns the thread's single event stream); resumes the session
    * under its current tier if it isn't live. Compaction is a background turn (not
    * instant), so we post a managed "压缩中" card and flip it in place to
-   * 压缩完成/失败 once {@link AgentThread.compact} actually settles. */
-  async function runCompact(
+   * 压缩完成/失败 once {@link AgentThread.compact} actually settles.
+   *
+   * Detached (startReservedRun 同模式): the session is reserved SYNCHRONOUSLY so
+   * a message racing in mid-compaction queues instead of launching a turn that
+   * would steal the thread's single event stream — then everything slow
+   * (resolveThread, the compaction turn, up to COMPACT_TIMEOUT_MS) runs off the
+   * await chain. Holding onMessage here would pin the SDK's per-chat queue —
+   * sibling topics and the ⏹ card-action would stall for the whole compaction. */
+  function runCompact(
     msg: NormalizedMessage,
     sessionKey: string,
     inThread: boolean,
     perm: TurnPerm,
-  ): Promise<void> {
+  ): void {
     const reply = (markdown: string): Promise<void> =>
       channel
         .send(msg.chatId, { markdown }, { replyTo: msg.messageId, replyInThread: inThread })
         .then(() => undefined, () => undefined);
     if (active.get(sessionKey)) {
-      await reply('⏳ 这一轮还在跑，结束后再 `/compact`。');
+      void reply('⏳ 这一轮还在跑，结束后再 `/compact`。');
       return;
     }
-    const { thread } = await resolveThread(sessionKey, msg.chatId, {
-      mode: perm.mode,
-      network: perm.network,
-      autoCompact: perm.autoCompact,
-    });
-    if (!thread) {
-      await reply('这个会话还没开始，先发条消息聊两句再 `/compact`。');
-      return;
-    }
-
-    // "压缩中" card we flip in place to the result. Keep its messageId so the
-    // settle step can update the same entity; fall back to a fresh card if the
-    // initial send (or the in-place update) fails.
-    let cardMsgId: string | undefined;
-    try {
-      const sent = await sendManagedCard(channel, msg.chatId, buildCompactingCard(0), msg.messageId, inThread);
-      cardMsgId = sent.messageId;
-    } catch (err) {
-      log.fail('card', err, { phase: 'compact-start-card' });
-    }
-
-    // Spin the "压缩中" card so it visibly keeps working (compaction can take a
-    // while). Self-rescheduling tick — never overlaps an in-flight update, and
-    // checks `stop` right before each render so no frame can clobber the result;
-    // the card has no buttons, so these updates can't hit an interaction lock.
-    let stop = false;
-    const wakers: Array<() => void> = [];
-    const sleep = (ms: number): Promise<void> =>
-      new Promise((res) => {
-        const t = setTimeout(res, ms);
-        wakers.push(() => {
-          clearTimeout(t);
-          res();
+    const reserved: ActiveState = { queue: [], requesterOpenId: msg.senderId };
+    active.set(sessionKey, reserved);
+    void withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
+      try {
+        const { thread } = await resolveThread(sessionKey, msg.chatId, {
+          mode: perm.mode,
+          network: perm.network,
+          autoCompact: perm.autoCompact,
         });
-      });
-    const anim = (async () => {
-      let tick = 0;
-      while (!stop && cardMsgId) {
-        await sleep(COMPACT_ANIM_INTERVAL_MS);
-        if (stop || !cardMsgId) break;
-        tick++;
-        await updateManagedCard(channel, cardMsgId, buildCompactingCard(tick)).catch(() => undefined);
+        if (!thread) {
+          await reply('这个会话还没开始，先发条消息聊两句再 `/compact`。');
+          return;
+        }
+
+        // "压缩中" card we flip in place to the result. Keep its messageId so the
+        // settle step can update the same entity; fall back to a fresh card if the
+        // initial send (or the in-place update) fails.
+        let cardMsgId: string | undefined;
+        try {
+          const sent = await sendManagedCard(channel, msg.chatId, buildCompactingCard(0), msg.messageId, inThread);
+          cardMsgId = sent.messageId;
+        } catch (err) {
+          log.fail('card', err, { phase: 'compact-start-card' });
+        }
+
+        // Spin the "压缩中" card so it visibly keeps working (compaction can take a
+        // while). Self-rescheduling tick — never overlaps an in-flight update, and
+        // checks `stop` right before each render so no frame can clobber the result;
+        // the card has no buttons, so these updates can't hit an interaction lock.
+        let stop = false;
+        const wakers: Array<() => void> = [];
+        const sleep = (ms: number): Promise<void> =>
+          new Promise((res) => {
+            const t = setTimeout(res, ms);
+            wakers.push(() => {
+              clearTimeout(t);
+              res();
+            });
+          });
+        const anim = (async () => {
+          let tick = 0;
+          while (!stop && cardMsgId) {
+            await sleep(COMPACT_ANIM_INTERVAL_MS);
+            if (stop || !cardMsgId) break;
+            tick++;
+            await updateManagedCard(channel, cardMsgId, buildCompactingCard(tick)).catch(() => undefined);
+          }
+        })();
+
+        const settle = async (result: object): Promise<void> => {
+          stop = true;
+          wakers.forEach((w) => w()); // cut the current sleep so the result shows promptly
+          await anim; // let the in-flight frame finish so it can't land after the result
+          if (cardMsgId && (await updateManagedCard(channel, cardMsgId, result))) return;
+          await sendManagedCard(channel, msg.chatId, result, msg.messageId, inThread).catch((err) =>
+            log.fail('card', err, { phase: 'compact-settle' }),
+          );
+        };
+
+        // Pre-compaction occupancy, so the result card can show 旧% → 新%.
+        const before = lastUsage.get(sessionKey) ?? null;
+        try {
+          // Resolves only when codex's compaction turn truly finishes (compact()
+          // drains the stream to turn/completed), so the card flips at the right
+          // time AND no stale `done` leaks into the next turn.
+          const { usage } = await thread.compact();
+          if (usage) lastUsage.set(sessionKey, { used: usage.usedTokens, window: usage.contextWindow });
+          else lastUsage.delete(sessionKey); // refreshes on the next turn's usage event
+          log.info('intake', 'compact', { sessionKey, used: usage?.usedTokens ?? null, before: before?.used ?? null });
+          await settle(buildCompactedCard(usage, before));
+        } catch (err) {
+          const m = err instanceof Error ? err.message : String(err);
+          const unsupported = /method not found|-32601|unknown (method|request)/i.test(m);
+          log.fail('intake', err, { phase: 'compact' });
+          await settle(buildCompactFailedCard(unsupported ? '当前 codex 版本不支持 /compact，请升级后再试。' : m));
+        }
+      } catch (err) {
+        // pre-card failures (resolveThread 等) have no card to land on — surface
+        // them as a plain reply rather than dying silently in the detached task.
+        log.fail('intake', err, { phase: 'compact-detached' });
+        await reply(`❌ ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        if (active.get(sessionKey) === reserved) active.delete(sessionKey);
+        // Messages that queued onto the reservation during compaction never ran —
+        // say so instead of dropping them silently (same contract as a killed run).
+        if (reserved.queue.length > 0) {
+          await reply(`⚠️ 压缩期间收到的 ${reserved.queue.length} 条消息未进入会话，请重发。`);
+        }
       }
-    })();
-
-    const settle = async (result: object): Promise<void> => {
-      stop = true;
-      wakers.forEach((w) => w()); // cut the current sleep so the result shows promptly
-      await anim; // let the in-flight frame finish so it can't land after the result
-      if (cardMsgId && (await updateManagedCard(channel, cardMsgId, result))) return;
-      await sendManagedCard(channel, msg.chatId, result, msg.messageId, inThread).catch((err) =>
-        log.fail('card', err, { phase: 'compact-settle' }),
-      );
-    };
-
-    // Pre-compaction occupancy, so the result card can show 旧% → 新%.
-    const before = lastUsage.get(sessionKey) ?? null;
-    try {
-      // Resolves only when codex's compaction turn truly finishes (compact()
-      // drains the stream to turn/completed), so the card flips at the right
-      // time AND no stale `done` leaks into the next turn.
-      const { usage } = await thread.compact();
-      if (usage) lastUsage.set(sessionKey, { used: usage.usedTokens, window: usage.contextWindow });
-      else lastUsage.delete(sessionKey); // refreshes on the next turn's usage event
-      log.info('intake', 'compact', { sessionKey, used: usage?.usedTokens ?? null, before: before?.used ?? null });
-      await settle(buildCompactedCard(usage, before));
-    } catch (err) {
-      const m = err instanceof Error ? err.message : String(err);
-      const unsupported = /method not found|-32601|unknown (method|request)/i.test(m);
-      log.fail('intake', err, { phase: 'compact' });
-      await settle(buildCompactFailedCard(unsupported ? '当前 codex 版本不支持 /compact，请升级后再试。' : m));
-    }
+    });
   }
 
   /** `/help`: post the command cheat-sheet for the caller's current scope. */
