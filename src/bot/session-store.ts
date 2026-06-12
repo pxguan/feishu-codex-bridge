@@ -1,4 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import { paths } from '../config/paths';
 import type { ReasoningEffort } from '../agent/types';
@@ -46,9 +47,23 @@ async function read(): Promise<SessionRecord[]> {
   }
 }
 
+// 同进程内并发的「读-改-写」串行化（upsertSession/patchSession）：话题天然并行
+// （semaphore 默认 10），两个话题同时落盘会基于同一旧快照算结果、后写覆盖前写——
+// 其中一个话题的 codexThreadId 绑定静默丢失，重启后上下文蒸发。与 registry.ts 的
+// 同款锁一致：配合函数式 updater，把 read+算+write 收进一个临界区。
+let opChain: Promise<unknown> = Promise.resolve();
+function withLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = opChain.then(fn, fn);
+  opChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 async function write(sessions: SessionRecord[]): Promise<void> {
   await mkdir(dirname(paths.sessionsFile), { recursive: true });
-  const tmp = `${paths.sessionsFile}.tmp-${process.pid}`;
+  const tmp = `${paths.sessionsFile}.tmp-${process.pid}-${randomUUID()}`;
   const body: StoreFile = { version: FILE_VERSION, sessions };
   await writeFile(tmp, `${JSON.stringify(body, null, 2)}\n`, 'utf8');
   await rename(tmp, paths.sessionsFile);
@@ -64,25 +79,34 @@ export async function getSession(threadId: string): Promise<SessionRecord | unde
 
 /** Insert or replace a session by threadId. */
 export async function upsertSession(rec: SessionRecord): Promise<void> {
-  const sessions = await read();
-  const idx = sessions.findIndex((s) => s.threadId === rec.threadId);
-  if (idx === -1) sessions.push(rec);
-  else sessions[idx] = rec;
-  await write(sessions);
+  return withLock(async () => {
+    const sessions = await read();
+    const idx = sessions.findIndex((s) => s.threadId === rec.threadId);
+    if (idx === -1) sessions.push(rec);
+    else sessions[idx] = rec;
+    await write(sessions);
+  });
 }
 
-/** Patch fields of an existing session; no-op if it doesn't exist. */
+/** Patch fields of an existing session; no-op if it doesn't exist. `patch` 可以是
+ * 对象，或一个 `(s) => patch` 函数——后者在同一临界区内基于**最新盘值**计算补丁，
+ * 避免并发读-改-写丢更新。 */
 export async function patchSession(
   threadId: string,
-  patch: Partial<Omit<SessionRecord, 'threadId'>>,
+  patch:
+    | Partial<Omit<SessionRecord, 'threadId'>>
+    | ((s: SessionRecord) => Partial<Omit<SessionRecord, 'threadId'>>),
 ): Promise<void> {
-  const sessions = await read();
-  const rec = sessions.find((s) => s.threadId === threadId);
-  if (!rec) return;
-  const target = rec as unknown as Record<string, unknown>;
-  for (const [k, v] of Object.entries(patch)) {
-    if (v !== undefined) target[k] = v;
-  }
-  rec.updatedAt = Date.now();
-  await write(sessions);
+  return withLock(async () => {
+    const sessions = await read();
+    const rec = sessions.find((s) => s.threadId === threadId);
+    if (!rec) return;
+    const actual = typeof patch === 'function' ? patch(rec) : patch;
+    const target = rec as unknown as Record<string, unknown>;
+    for (const [k, v] of Object.entries(actual)) {
+      if (v !== undefined) target[k] = v;
+    }
+    rec.updatedAt = Date.now();
+    await write(sessions);
+  });
 }

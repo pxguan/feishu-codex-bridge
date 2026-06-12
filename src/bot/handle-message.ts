@@ -2039,7 +2039,7 @@ export function createOrchestrator(
         summary: opts.summary ?? opts.firstText.slice(0, 80),
         createdAt: Date.now(),
         updatedAt: Date.now(),
-      }).catch(() => undefined);
+      }).catch((err) => log.fail('console', err, { phase: 'persist-session', threadId }));
     };
 
     /** Demote the previous turn's card (drop its ⚙️) and promote this one. */
@@ -2315,7 +2315,7 @@ export function createOrchestrator(
         summary: opts.summary ?? objective.slice(0, 80),
         createdAt: Date.now(),
         updatedAt: Date.now(),
-      }).catch(() => undefined);
+      }).catch((err) => log.fail('console', err, { phase: 'persist-session', threadId }));
     };
 
     // One streaming run card per codex turn. `cur` is the in-flight turn's render
