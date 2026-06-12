@@ -123,8 +123,10 @@ import {
 import {
   fetchQuotedMessage,
   fetchThreadContext,
+  filterHistorySince,
   weaveQuote,
   weaveThreadHistory,
+  type ContextMessage,
 } from './context-weave';
 import {
   addCommentReaction,
@@ -869,27 +871,63 @@ export function createOrchestrator(
       // not the ⏳/🫳 run-reaction lifecycle.
       const reaction = goal ? undefined : runReaction(msg.messageId, !sema.hasFree());
       try {
+        const tIntake = Date.now();
+        // ── 入站三路并行（M-1）── 飞书 API（图片下载 / 文件+引用织入）、本地
+        // spawn（resolveThread）与话题上文拉取互不依赖，Promise.all 把串行 RTT
+        // 全部重叠掉。失败语义与串行版一致：resolve/ingest/getSession 失败走外层
+        // catch 终止本轮并回 ❌（Promise.all 自带对其余分支 rejection 的观察，
+        // 不会产生 unhandled rejection）；images/history 内部 best-effort（吞错
+        // 返回空），永不拖死其他路。
         // Images preloaded by handleTurn's fall-through, else fetch them now
         // (inside the detached run, after the synchronous reservation).
-        const images =
-          preloadedImages ?? (messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined);
-        // Same for file attachments — weave their paths into the prompt. Skipped
-        // when preIngested (handleTurn already wove them into `text`).
-        let firstText = preIngested ? text : await ingestContext(msg, text);
-        const { thread: resolved, recreated } = await resolveThread(sessionKey, msg.chatId, {
+        const imagesP = preloadedImages
+          ? Promise.resolve(preloadedImages)
+          : messageHasImages(msg)
+            ? collectInboundImages(channel, msg)
+            : Promise.resolve(undefined);
+        // File attachments / quoted message woven into the prompt. Skipped when
+        // preIngested (handleTurn already wove them into `text`).
+        const ingestP = preIngested ? Promise.resolve(text) : ingestContext(msg, text);
+        let tResolveDone = tIntake;
+        const resolveP = resolveThread(sessionKey, msg.chatId, {
           mode: perm.mode,
           network: perm.network,
           autoCompact: perm.autoCompact,
+        }).then((r) => {
+          tResolveDone = Date.now();
+          return r;
         });
+        // For an already-resumed session the high-water mark (lastSeenAt) tells us
+        // which thread messages codex hasn't seen — a pure local read, NOT
+        // dependent on resolveThread's outcome, so it rides the same Promise.all.
+        const priorP = getSession(sessionKey);
+        // 话题上文投机拉取：sinceTime 只是单页拉取后的本地 filter（API 调用对任何
+        // sinceTime 完全相同），所以不必等 resolveThread 的 codexEmpty —— 先按
+        // 全量拉回来，汇合后用 filterHistorySince 收敛成与串行版逐字节一致的
+        // 增量。唯一不投机的情况：有记录但无水位（resume 上来的旧会话，codex
+        // 已带历史，串行版只在 recreated 罕见路径才拉）—— 留到汇合后补拉。
+        const topicId = goal ? undefined : msg.threadId;
+        const historyP: Promise<ContextMessage[]> = topicId
+          ? priorP.then((p) =>
+              p && p.lastSeenAt === undefined
+                ? []
+                : fetchThreadContext(channel, topicId, { excludeMessageId: msg.messageId }),
+            )
+          : Promise.resolve([]);
+        const [images, ingested, { thread: resolved, recreated }, prior, specHistory] = await Promise.all([
+          imagesP,
+          ingestP,
+          resolveP,
+          priorP,
+          historyP,
+        ]);
+        let firstText = ingested;
         let thread = resolved;
         const neverSeen = !thread;
         // codex's history is EMPTY when the session is brand-new (neverSeen) OR a
         // resume failed and we fell back to a new thread (recreated) — both want
         // the FULL topic woven as opening context, not just the delta.
         const codexEmpty = neverSeen || recreated;
-        // For an already-resumed session the high-water mark (lastSeenAt) tells us
-        // which thread messages codex hasn't seen — read it BEFORE we touch the store.
-        const prior = neverSeen ? undefined : await getSession(sessionKey);
         if (!thread) {
           // Unknown session (created before this bridge, or store lost): treat as
           // a fresh session bound to the resolved cwd, on the project's backend.
@@ -913,17 +951,21 @@ export function createOrchestrator(
           });
         }
         // 话题上文：在话题里 @bot 时，把 bot 还没喂给 codex 的人对人消息补进开场。
-        // codexEmpty（新会话 / resume 失败重建）→ 拉最近 N 条全量；已有会话 → 只拉水位
-        // 标记之后的增量（没有标记说明是 resume 上来的旧会话，codex 已带历史，跳过以免重复喂）。
-        // Goals skip the topic-history weave: the objective must stay self-contained
-        // (and under codex's ~4000-char goal limit), and a resumed thread already
-        // carries codex's own history — weaving chat transcript into a goal would
-        // pollute it and risk a rejected thread/goal/set.
-        if (!goal && msg.threadId && (codexEmpty || prior?.lastSeenAt !== undefined)) {
-          const history = await fetchThreadContext(channel, msg.threadId, {
-            sinceTime: codexEmpty ? 0 : (prior?.lastSeenAt ?? 0),
-            excludeMessageId: msg.messageId,
-          });
+        // codexEmpty（新会话 / resume 失败重建）→ 用最近 N 条全量（即投机结果）；
+        // 已有会话 → 用 filterHistorySince 把投机全量收敛成水位之后的增量（没有
+        // 水位说明是 resume 上来的旧会话，codex 已带历史，跳过以免重复喂）。
+        // Goals skip the topic-history weave (topicId=undefined above): the
+        // objective must stay self-contained (and under codex's ~4000-char goal
+        // limit), and a resumed thread already carries codex's own history —
+        // weaving chat transcript into a goal would pollute it and risk a
+        // rejected thread/goal/set.
+        if (topicId && (codexEmpty || prior?.lastSeenAt !== undefined)) {
+          const history = codexEmpty
+            ? prior && prior.lastSeenAt === undefined
+              ? // 投机被跳过的唯一组合（有记录无水位）撞上 recreated 罕见路径：补拉全量
+                await fetchThreadContext(channel, topicId, { excludeMessageId: msg.messageId })
+              : specHistory
+            : filterHistorySince(specHistory, prior?.lastSeenAt ?? 0);
           firstText = weaveThreadHistory(firstText, history);
         }
         // Advance the high-water mark so the NEXT turn only catches up新消息.
@@ -940,6 +982,10 @@ export function createOrchestrator(
           images,
           knownThreadId: sessionKey,
           requesterOpenId: msg.senderId,
+          // 编织完成 → turn/start 之间不再读盘：首轮直接用预取的会话记录
+          // （prior=undefined 即确知是全新会话，刚 upsert 的记录还没有 model）。
+          firstRec: prior ?? null,
+          timing: { tResolve: tResolveDone - tIntake, tWeave: Date.now() - tIntake },
         };
         if (goal) await launchGoalRun(launchOpts);
         else await launchRun(launchOpts, reaction);
@@ -1063,22 +1109,42 @@ export function createOrchestrator(
       // Pick the default model FROM THE PROJECT'S BACKEND — a claude project must
       // not be handed codex's default ('gpt-5.5'). Unset backend → codex, as before.
       const be = backendFor(project?.backend);
-      const { model, effort } = pickDefault(await listModels(be));
+      // ── 入站并行（M-1）── listModels+startThread（本地 spawn，实测 250ms–1.6s）
+      // 与图片下载 / 文件+引用织入（飞书 API）互不依赖。任何一路失败都终止本轮
+      // 并回 ❌（原先 ingest 失败只进日志、reaction 卡死——顺带修正），但已起的
+      // 进程必须回收：它还不在 sessions 里，不关就是孤儿 app-server。
+      const tIntake = Date.now();
+      let tResolveDone = tIntake;
+      const threadP = (async () => {
+        const { model, effort } = pickDefault(await listModels(be));
+        const thread = await be.startThread({ cwd, model, effort, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
+        tResolveDone = Date.now();
+        return { thread, model, effort };
+      })();
+      // Download any attached/forwarded images so the opening turn can see them,
+      // and any file attachments (their paths get woven into the prompt text).
+      const imagesP = messageHasImages(msg) ? collectInboundImages(channel, msg) : Promise.resolve(undefined);
+      const ingestP = ingestContext(msg, text);
       let thread: AgentThread;
+      let model: string;
+      let effort: ReasoningEffort;
+      let images: string[] | undefined;
+      let firstText: string;
       try {
-        thread = await be.startThread({ cwd, model, effort, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
+        const [started, imgs, ingested] = await Promise.all([threadP, imagesP, ingestP]);
+        ({ thread, model, effort } = started);
+        images = imgs;
+        firstText = ingested || '你好，我们开始吧。';
       } catch (err) {
         reaction?.done();
+        // 失败路互不拖死：threadP 若已成功则回收孤儿进程，若失败吞掉其 rejection。
+        void threadP.then((s) => s.thread.close()).catch(() => undefined);
         log.fail('card', err, { phase: 'start-topic' });
         await channel
           .send(msg.chatId, { markdown: `❌ 启动失败：${err instanceof Error ? err.message : String(err)}` }, { replyTo: msg.messageId })
           .catch(() => undefined);
         return;
       }
-      // Download any attached/forwarded images so the opening turn can see them,
-      // and any file attachments (their paths get woven into the prompt text).
-      const images = messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined;
-      const firstText = (await ingestContext(msg, text)) || '你好，我们开始吧。';
       log.info('card', 'start', { project: project?.name ?? '(unregistered)', model, effort, images: images?.length ?? 0, goal: Boolean(goal) });
       const launchOpts: LaunchOpts = {
         chatId: msg.chatId,
@@ -1094,6 +1160,7 @@ export function createOrchestrator(
         requesterOpenId: msg.senderId,
         roleSuffix: perm.roleSuffix,
         backendId: be.id,
+        timing: { tResolve: tResolveDone - tIntake, tWeave: Date.now() - tIntake },
       };
       if (goal) await launchGoalRun(launchOpts);
       else
@@ -2203,6 +2270,14 @@ export function createOrchestrator(
     /** the backend that created `thread` (persisted into the SessionRecord so a
      * restart resumes on the same runtime). Unset → default (codex). */
     backendId?: string;
+    /** prefetched SessionRecord for the FIRST turn (M-1 极限提前)：免掉编织完成
+     * 与 turn/start 之间的 getSession 读盘。`null` = 确知没有记录（全新会话）；
+     * undefined = 没预取，照旧读。后续排队轮永远重读（⚙️ 可能改了 model）。 */
+    firstRec?: SessionRecord | null;
+    /** intake-phase durations (ms, FIRST turn only) for the stream.timing line:
+     * tResolve = resolveThread/startThread settled, tWeave = 编织完成（含话题
+     * 上文投机拉取），both measured from intake start (M-1 observability). */
+    timing?: { tResolve: number; tWeave: number };
   }
 
   async function launchRun(
@@ -2256,13 +2331,20 @@ export function createOrchestrator(
     // tracks the latest run card key so the finally can clear runsByCard even
     // if the stream producer throws mid-turn (avoids leaking a stale stop target)
     let curCardKey: string | undefined;
+    // intake durations ride the FIRST turn's stream.timing line only (M-1)
+    let intake = opts.timing;
+    let firstRec = opts.firstRec;
     try {
       let turnInput: AgentInput = { text: opts.firstText, images: opts.images };
       let replyTo = opts.replyTo;
       let replyInThread = opts.flat ? false : (opts.replyInThread ?? Boolean(opts.knownThreadId));
       for (;;) {
-        // per-turn model/effort: prefer latest persisted (⚙️ may have changed it)
-        const rec = topicThreadId ? await getSession(topicThreadId) : undefined;
+        // per-turn model/effort: prefer latest persisted (⚙️ may have changed it).
+        // First turn uses the intake-prefetched record (null = known absent) so
+        // runStreamed — i.e. turn/start — fires with zero awaits after weaving.
+        const rec =
+          firstRec !== undefined ? (firstRec ?? undefined) : topicThreadId ? await getSession(topicThreadId) : undefined;
+        firstRec = undefined;
         const turnModel = rec?.model ?? opts.model;
         const turnEffort = rec?.effort ?? opts.effort;
         const run = opts.thread.runStreamed(turnInput, { model: turnModel, effort: turnEffort });
@@ -2303,6 +2385,7 @@ export function createOrchestrator(
         // CardKit streaming entity: body streams with the native typewriter,
         // ⏹/⚙️ ride whole-card updates — both on one card_id (see RunCardStream).
         const stream = new RunCardStream();
+        const tCreate = Date.now();
         try {
           cardMsgId = await stream.create(channel, opts.chatId, buildRunCard(rc), { replyTo, replyInThread });
         } catch (err) {
@@ -2316,6 +2399,7 @@ export function createOrchestrator(
           if (topicThreadId) sessions.delete(topicThreadId);
           throw err; // 外层 catch 把错误回给用户
         }
+        const tCardCreate = Date.now() - tCreate; // 建卡 RTT（与模型推理并行付出）
         curCardKey = cardMsgId;
         rc.cardKey = cardMsgId;
         runsByCard.set(cardMsgId, state);
@@ -2445,6 +2529,9 @@ export function createOrchestrator(
           const terminalAt = Date.now();
           const st = stream.stats();
           log.info('stream', 'timing', {
+            tResolve: intake?.tResolve ?? -1, // 入站段耗时（仅首轮有值；M-1 并行化观测）
+            tWeave: intake?.tWeave ?? -1,
+            tCardCreate,
             tTurnStart: turnStartAt - tStart, // 负数 = turn/start 抢在流循环前多少 ms（QW-1 并行收益）
             firstEv: firstEvAt ? firstEvAt - tStart : -1,
             firstText: firstTextAt ? firstTextAt - tStart : -1,
@@ -2460,6 +2547,7 @@ export function createOrchestrator(
             rttAvg: st.pushCount ? Math.round(st.totalRttMs / st.pushCount) : 0,
             rttMax: st.maxRttMs,
           });
+          intake = undefined; // 排队续轮没有入站段，别把首轮数值带下去
         }
         runsByCard.delete(cardMsgId);
         promoteCard(finalMsgId, rc);

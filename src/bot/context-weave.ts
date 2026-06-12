@@ -140,6 +140,21 @@ export async function fetchThreadContext(
   }
 }
 
+/**
+ * Narrow a speculatively-pulled FULL history (`sinceTime: 0`) down to the delta
+ * an existing session needs — byte-for-byte equivalent to having called
+ * {@link fetchThreadContext} with `sinceTime` directly. The equivalence holds
+ * because the API pull is identical for every sinceTime (one newest-first page;
+ * sinceTime is purely a local filter) and watermark survivors are always the
+ * newest messages, so they can never be evicted by the most-recent-`limit`
+ * slice in favor of older ones. This is what lets the intake path pull 话题上文
+ * in parallel with resolveThread instead of waiting for its codexEmpty answer.
+ */
+export function filterHistorySince(msgs: ContextMessage[], sinceTime: number): ContextMessage[] {
+  if (sinceTime <= 0) return msgs;
+  return msgs.filter((m) => m.createTime > sinceTime);
+}
+
 function toContextMessage(item: RawMsgItem): ContextMessage {
   const id = item.sender?.id ?? '';
   const name = item.sender?.sender_name || (id ? `用户${id.slice(-4)}` : '某人');
