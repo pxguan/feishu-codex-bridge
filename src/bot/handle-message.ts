@@ -433,6 +433,10 @@ export function createOrchestrator(
     if (sessions.has(key)) sessionTouchedAt.set(key, Date.now());
   }
   const active = new Map<string, ActiveState>();
+  /** F8 兜底：到 run 结束都没换到真实话题 id 的线程（getThreadId 重试仍失败）。
+   * 它们不在 `sessions` 里（pending: 键随 finally 即灭，无人能再触达），正常
+   * shutdown 关不到 → 孤儿 app-server；停机时一并 close。 */
+  const unadopted = new Set<AgentThread>();
   /** Per-doc serialization for comment runs (see {@link withDocLock}). */
   const docLocks = new Map<string, Promise<void>>();
   const sema = new Semaphore(getMaxConcurrentRuns(cfg));
@@ -2334,11 +2338,7 @@ export function createOrchestrator(
         // a miss would make the next message start a FRESH empty session. The
         // reply response omits thread_id and the raw lookup can lag right after
         // the reply, so retry a few times before giving up.
-        let tid: string | undefined;
-        for (let attempt = 0; attempt < 4 && !tid; attempt++) {
-          if (attempt > 0) await new Promise((r) => setTimeout(r, 500));
-          tid = await getThreadId(channel, sent.messageId);
-        }
+        const tid = await getThreadId(channel, sent.messageId, 4);
         if (tid) {
           const now = Date.now();
           await upsertSession({
@@ -2566,7 +2566,7 @@ export function createOrchestrator(
 
         const adoptThreadId = async (messageId: string): Promise<void> => {
           if (activeKey.startsWith('pending:')) {
-            const tid = await getThreadId(channel, messageId);
+            const tid = await getThreadId(channel, messageId, 3); // F8: 单次抖动别滞留 pending:
             if (tid) {
               // Logical session key = real Feishu topic id + role suffix (when
               // admin/guest tiers are split), so the two roles keep separate
@@ -2809,6 +2809,12 @@ export function createOrchestrator(
     } finally {
       active.delete(activeKey);
       if (curCardKey) runsByCard.delete(curCardKey);
+      // F8: adopt 始终没成功的线程进 unadopted（已死/已关的跳过；shutdown 再
+      // close 一次也无害——close 幂等，这只是少囤引用）。
+      if (activeKey.startsWith('pending:') && opts.thread.isAlive()) {
+        unadopted.add(opts.thread);
+        log.warn('intake', 'unadopted-thread', { activeKey });
+      }
       reaction?.done(); // run ended (complete / ⏹ / timeout / error) → ✅ DONE
       release();
     }
@@ -2877,7 +2883,7 @@ export function createOrchestrator(
 
     const adoptThreadId = async (messageId: string, card: RunCardState): Promise<void> => {
       if (activeKey.startsWith('pending:')) {
-        const tid = await getThreadId(channel, messageId);
+        const tid = await getThreadId(channel, messageId, 3); // F8: 单次抖动别滞留 pending:
         if (tid) {
           const key = opts.roleSuffix ? `${tid}#${opts.roleSuffix}` : tid;
           active.delete(activeKey);
@@ -3375,8 +3381,10 @@ export function createOrchestrator(
 
   async function shutdown(): Promise<void> {
     clearInterval(reaper);
-    const live = [...sessions.values()];
+    // sessions + unadopted（F8 的 adopt 失败孤儿）合并去重后统一回收。
+    const live = [...new Set([...sessions.values(), ...unadopted])];
     sessions.clear();
+    unadopted.clear();
     // close() SIGKILLs each app-server child; settle all so one hang/throw
     // doesn't block reaping the rest.
     await Promise.allSettled(live.map((t) => t.close()));
@@ -3393,16 +3401,27 @@ export function createOrchestrator(
   return { onMessage, onComment, onBotAddedToChat, onBotRemovedFromChat, dispatcher, shutdown };
 }
 
-/** Resolve a message's thread_id via raw API (reply response omits it). */
-async function getThreadId(channel: LarkChannel, messageId: string): Promise<string | undefined> {
-  try {
-    const res = await channel.rawClient.im.v1.message.get({ path: { message_id: messageId } });
-    const items = (res.data as { items?: { thread_id?: string }[] } | undefined)?.items;
-    const tid = items?.[0]?.thread_id;
-    if (!tid) log.warn('intake', 'threadid-missing', { messageId });
-    return tid;
-  } catch (err) {
-    log.warn('intake', 'threadid-lookup-failed', { messageId, err: String(err) });
-    return undefined;
+/** Resolve a message's thread_id via raw API (reply response omits it). The
+ * lookup can lag right after the reply, and a single API blip used to leave the
+ * run stranded on its `pending:` key（双开 + 孤儿进程，F8）——binding-critical
+ * callers pass `attempts` > 1 to retry (500ms apart) before giving up.
+ * Exported for tests. */
+export async function getThreadId(
+  channel: LarkChannel,
+  messageId: string,
+  attempts = 1,
+): Promise<string | undefined> {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (attempt > 1) await new Promise((r) => setTimeout(r, 500));
+    try {
+      const res = await channel.rawClient.im.v1.message.get({ path: { message_id: messageId } });
+      const items = (res.data as { items?: { thread_id?: string }[] } | undefined)?.items;
+      const tid = items?.[0]?.thread_id;
+      if (tid) return tid;
+      log.warn('intake', 'threadid-missing', { messageId, attempt });
+    } catch (err) {
+      log.warn('intake', 'threadid-lookup-failed', { messageId, attempt, err: String(err) });
+    }
   }
+  return undefined;
 }
