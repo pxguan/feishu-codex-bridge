@@ -33,10 +33,10 @@ export interface ModelInfo {
   hidden: boolean;
 }
 
-/** A past codex thread, for the "恢复历史会话" picker (from thread/list). */
+/** A past agent session, for the "恢复历史会话" picker (codex: thread/list). */
 export interface ThreadSummary {
-  /** codex thread id (pass to resumeThread) */
-  codexThreadId: string;
+  /** backend session id（codex 的 thread id / claude 的 session UUID），传给 resumeThread */
+  sessionId: string;
   /** first user message preview */
   preview: string;
   /** unix seconds */
@@ -172,7 +172,9 @@ export interface TurnOptions {
 }
 
 export interface AgentThread {
-  readonly codexThreadId: string;
+  /** backend session id（codex 的 thread id / claude 的 session UUID）——持久化进
+   * SessionRecord.sessionId，重启后经 resumeThread 找回同一会话。 */
+  readonly sessionId: string;
   /** start a turn, streaming events until turn completion/error */
   runStreamed(input: AgentInput, turn?: TurnOptions): AgentRun;
   /**
@@ -219,7 +221,8 @@ export interface StartThreadOptions {
 }
 
 export interface ResumeThreadOptions extends StartThreadOptions {
-  codexThreadId: string;
+  /** the session to resume (a prior {@link AgentThread.sessionId}) */
+  sessionId: string;
 }
 
 /**
@@ -255,7 +258,7 @@ export interface AgentBackend {
    * `thread/read` (includeTurns) WITHOUT starting a turn or holding the session
    * live. Keeps the last `maxTurns` turns; never throws (returns empty on fail).
    */
-  readHistory(cwd: string, codexThreadId: string, maxTurns?: number): Promise<ThreadHistory>;
+  readHistory(cwd: string, sessionId: string, maxTurns?: number): Promise<ThreadHistory>;
   startThread(opts: StartThreadOptions): Promise<AgentThread>;
   resumeThread(opts: ResumeThreadOptions): Promise<AgentThread>;
 }

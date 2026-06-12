@@ -126,7 +126,7 @@ class ClaudeSdkThread implements AgentThread {
   /** Bridge-assigned session UUID, forced onto the CLI via `--session-id` so
    * the handle exists BEFORE any turn runs (stream-json mode emits no init
    * until the first input — see STARTUP_PROBE_MS). */
-  private readonly sessionId = randomUUID();
+  readonly sessionId = randomUUID();
   private readonly input = new AsyncQueue<SDKUserMessage>();
   private q!: Query;
   private iter!: AsyncIterator<SDKMessage>;
@@ -145,10 +145,6 @@ class ClaudeSdkThread implements AgentThread {
   private staleResults = 0;
 
   constructor(private readonly opts: StartThreadOptions) {}
-
-  get codexThreadId(): string {
-    return this.sessionId;
-  }
 
   /** Spawn the CLI (via query()) and probe that it came up. */
   async connect(): Promise<void> {
@@ -376,7 +372,7 @@ export class ClaudeSdkBackend implements AgentBackend {
     throw notSupported(' /resume 历史会话');
   }
 
-  async readHistory(_cwd: string, _codexThreadId: string, _maxTurns?: number): Promise<ThreadHistory> {
+  async readHistory(_cwd: string, _sessionId: string, _maxTurns?: number): Promise<ThreadHistory> {
     // 接口契约：never throws（resume 卡兜底）。能力守卫下这里不可达，仍按契约返回空。
     return { turns: [], totalTurns: 0 };
   }

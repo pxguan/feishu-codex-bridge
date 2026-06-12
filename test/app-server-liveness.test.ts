@@ -54,7 +54,7 @@ describe.skipIf(process.platform === 'win32')('app-server 进程死亡自愈（Q
     try {
       const backend = new CodexAppServerBackend();
       const thread = await backend.startThread({ cwd: dir });
-      expect(thread.codexThreadId).toBe('th_test');
+      expect(thread.sessionId).toBe('th_test');
       expect(thread.isAlive()).toBe(true);
 
       // 消费这轮事件流：进程死亡 → 流随 notifications.close() 结束（或 start-race

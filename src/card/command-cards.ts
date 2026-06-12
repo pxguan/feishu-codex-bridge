@@ -100,7 +100,7 @@ export function buildResumeCard(state: ResumeCardState): CardObject {
     for (const t of state.threads) {
       const title = (t.name?.trim() || t.preview.trim() || '(无摘要)').replace(/\s+/g, ' ');
       const label = `↩️ ${pickerTime(t.updatedAt || t.createdAt)} · ${truncate(title, RESUME_TITLE_MAX)}`;
-      elements.push(actions([button(label, { a: RES.pick, t: t.codexThreadId })]));
+      elements.push(actions([button(label, { a: RES.pick, t: t.sessionId })]));
     }
   }
   return card(elements, { summary: '恢复历史会话' });

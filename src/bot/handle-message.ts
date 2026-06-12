@@ -901,7 +901,7 @@ export function createOrchestrator(
             threadId: sessionKey,
             chatId: msg.chatId,
             cwd,
-            codexThreadId: thread.codexThreadId,
+            sessionId: thread.sessionId,
             // `text` is already file-woven when preIngested; use the raw
             // `summaryText` (handleTurn's original) so the session label isn't
             // manifest boilerplate + a temp path.
@@ -975,7 +975,7 @@ export function createOrchestrator(
     if (live) {
       if (live.isAlive()) return { thread: live, recreated: false };
       // app-server 子进程已死（崩溃/被 kill）：死线程留在缓存只会反复失败，
-      // 清掉让它落入下面既有的 resume-or-recreate 兜底（持久化的 codexThreadId
+      // 清掉让它落入下面既有的 resume-or-recreate 兜底（持久化的 sessionId
       // 还在，话题自愈而不是僵死到重启）。
       sessions.delete(threadId);
       log.info('agent', 'dead-thread-evict', { threadId });
@@ -991,7 +991,7 @@ export function createOrchestrator(
     try {
       const resumed = await be.resumeThread({
         cwd: rec.cwd,
-        codexThreadId: rec.codexThreadId,
+        sessionId: rec.sessionId,
         model: rec.model,
         effort: rec.effort,
         mode: perm?.mode,
@@ -1014,7 +1014,7 @@ export function createOrchestrator(
       sessions.set(threadId, fresh);
       // The resumed codex thread is gone — repoint the persisted record at the
       // new thread id so a later restart doesn't keep resuming the dead one.
-      await patchSession(threadId, { codexThreadId: fresh.codexThreadId }).catch(() => undefined);
+      await patchSession(threadId, { sessionId: fresh.sessionId }).catch(() => undefined);
       return { thread: fresh, recreated: true };
     }
   }
@@ -1443,12 +1443,12 @@ export function createOrchestrator(
     })
     .on(RES.pick, ({ evt, value }) => {
       const state = authPending(resumePending, evt);
-      const codexThreadId = typeof value.t === 'string' ? value.t : undefined;
-      if (!state || !codexThreadId || state.launching) return;
+      const sessionId = typeof value.t === 'string' ? value.t : undefined;
+      if (!state || !sessionId || state.launching) return;
       state.launching = true;
       settleUpdate(evt.messageId, buildResumeLaunchingCard(state));
       // detach: don't hold the cardAction callback for the whole resume + run
-      void resumeFromCard(evt, state, codexThreadId);
+      void resumeFromCard(evt, state, sessionId);
     });
 
   /** Run-card actions: gated by chat/user allow lists (design §5). */
@@ -2102,12 +2102,12 @@ export function createOrchestrator(
    * Detached — never holds the card-action callback for the whole flow. On
    * failure the picker card flips to a (non-retryable) error and pending clears.
    */
-  async function resumeFromCard(evt: CardActionEvent, state: ResumeCardState, codexThreadId: string): Promise<void> {
+  async function resumeFromCard(evt: CardActionEvent, state: ResumeCardState, sessionId: string): Promise<void> {
     try {
       // thread/read: fetch the transcript without starting a turn or holding the
       // session live (model/effort left to the thread's own remembered config).
       // Never throws — empty history just yields a minimal card.
-      const history = await backend.readHistory(state.cwd, codexThreadId);
+      const history = await backend.readHistory(state.cwd, sessionId);
       resumePending.delete(evt.messageId);
 
       let bound = false;
@@ -2132,7 +2132,7 @@ export function createOrchestrator(
             threadId: tid,
             chatId: state.chatId,
             cwd: state.cwd,
-            codexThreadId,
+            sessionId,
             summary: history.name || history.preview || '(恢复会话)',
             createdAt: now,
             updatedAt: now,
@@ -2141,7 +2141,7 @@ export function createOrchestrator(
         } else {
           log.warn('card', 'resume-no-threadid', { messageId: sent.messageId });
         }
-        log.info('card', 'resume-done', { codexThreadId, threadId: tid ?? null, bound, turns: history.totalTurns });
+        log.info('card', 'resume-done', { sessionId, threadId: tid ?? null, bound, turns: history.totalTurns });
       });
 
       // Only promise continuity once the thread is actually bound — else the
@@ -2211,7 +2211,7 @@ export function createOrchestrator(
         threadId,
         chatId: opts.chatId,
         cwd: opts.cwd ?? fallbackCwd,
-        codexThreadId: opts.thread.codexThreadId,
+        sessionId: opts.thread.sessionId,
         model: opts.model,
         effort: opts.effort,
         summary: opts.summary ?? opts.firstText.slice(0, 80),
@@ -2520,7 +2520,7 @@ export function createOrchestrator(
         threadId,
         chatId: opts.chatId,
         cwd: opts.cwd ?? fallbackCwd,
-        codexThreadId: opts.thread.codexThreadId,
+        sessionId: opts.thread.sessionId,
         model: opts.model,
         effort: opts.effort,
         summary: opts.summary ?? objective.slice(0, 80),
@@ -2907,7 +2907,7 @@ export function createOrchestrator(
       try {
         const resumed = await backend.resumeThread({
           cwd: rec.cwd,
-          codexThreadId: rec.codexThreadId,
+          sessionId: rec.sessionId,
           model: rec.model,
           effort: rec.effort,
         });
@@ -2924,7 +2924,7 @@ export function createOrchestrator(
       threadId: sessionKey,
       chatId: sessionKey,
       cwd: fallbackCwd,
-      codexThreadId: fresh.codexThreadId,
+      sessionId: fresh.sessionId,
       model,
       effort,
       summary: question.slice(0, 80),

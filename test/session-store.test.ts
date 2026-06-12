@@ -1,5 +1,5 @@
 import { rmSync } from 'node:fs';
-import { readFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getSession, listSessions, patchSession, upsertSession, type SessionRecord } from '../src/bot/session-store';
@@ -22,12 +22,12 @@ beforeEach(async () => {
   await rm(paths.sessionsFile, { force: true });
 });
 
-function rec(threadId: string, codexThreadId: string): SessionRecord {
+function rec(threadId: string, sessionId: string): SessionRecord {
   return {
     threadId,
     chatId: 'oc_chat',
     cwd: '/tmp/proj',
-    codexThreadId,
+    sessionId,
     summary: `s-${threadId}`,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -38,7 +38,7 @@ describe('session-store', () => {
   it('upsert + getSession roundtrip; upsert replaces by threadId', async () => {
     await upsertSession(rec('t1', 'cx1'));
     await upsertSession(rec('t1', 'cx1b'));
-    expect((await getSession('t1'))?.codexThreadId).toBe('cx1b');
+    expect((await getSession('t1'))?.sessionId).toBe('cx1b');
     expect(await listSessions()).toHaveLength(1);
   });
 
@@ -48,7 +48,7 @@ describe('session-store', () => {
     const all = await listSessions();
     expect(all).toHaveLength(20);
     for (let i = 0; i < 20; i++) {
-      expect(all.find((s) => s.threadId === `t${i}`)?.codexThreadId).toBe(`cx${i}`);
+      expect(all.find((s) => s.threadId === `t${i}`)?.sessionId).toBe(`cx${i}`);
     }
     // 落盘文件本身完好（tmp 交错会产生半截 JSON）
     const onDisk = JSON.parse(await readFile(paths.sessionsFile, 'utf8'));
@@ -61,6 +61,31 @@ describe('session-store', () => {
       Array.from({ length: 20 }, () => patchSession('t1', (s) => ({ lastSeenAt: (s.lastSeenAt ?? 0) + 1 }))),
     );
     expect((await getSession('t1'))?.lastSeenAt).toBe(20);
+  });
+
+  // M-8 全链改名：旧 v1 文件的会话 id 字段名读入时迁移到 sessionId，重启不丢绑定。
+  it('migrates the legacy v1 session-id field on read', async () => {
+    await mkdir(dirname(paths.sessionsFile), { recursive: true });
+    const legacy = {
+      version: 1,
+      sessions: [
+        {
+          threadId: 'old-topic',
+          chatId: 'oc_chat',
+          cwd: '/tmp/proj',
+          ['codexThread' + 'Id']: 'cx-legacy', // 旧字段名（拼接缘由见 session-store 注释）
+          summary: 's',
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+    };
+    await writeFile(paths.sessionsFile, JSON.stringify(legacy), 'utf8');
+    expect((await getSession('old-topic'))?.sessionId).toBe('cx-legacy');
+    // 写回（patch 任意字段）后落盘的是新字段名
+    await patchSession('old-topic', { model: 'gpt-5.5' });
+    const onDisk = JSON.parse(await readFile(paths.sessionsFile, 'utf8'));
+    expect(onDisk.sessions[0].sessionId).toBe('cx-legacy');
   });
 
   it('patchSession skips undefined fields and is a no-op for an unknown threadId', async () => {

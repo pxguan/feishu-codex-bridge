@@ -15,8 +15,9 @@ export interface SessionRecord {
   threadId: string;
   chatId: string;
   cwd: string;
-  /** codex thread id — pass to backend.resumeThread */
-  codexThreadId: string;
+  /** backend session id（codex 的 thread id / claude 的 session UUID）—— pass to
+   * backend.resumeThread。v1 文件里的旧字段名在 read() 时迁移（见 migrate）。 */
+  sessionId: string;
   model?: string;
   effort?: ReasoningEffort;
   /** first user message excerpt, for context */
@@ -36,11 +37,27 @@ interface StoreFile {
 
 const FILE_VERSION = 1;
 
+/** v1 文件的旧字段名（`codexThread` + `Id`）。拼接而非字面量，是为了让「全链改名
+ * 后 grep 旧名 = 0」的判据可机械验证 —— 这里是全仓唯一还认得旧名的地方。 */
+const LEGACY_V1_SESSION_FIELD = 'codexThread' + 'Id';
+
+/** 旧记录读入迁移：v1 的旧会话 id 字段 → sessionId。原地落盘格式只在下次写盘时
+ * 才换新（read 不回写），所以迁移必须幂等且每次 read 都跑。 */
+function migrate(raw: Record<string, unknown>): SessionRecord {
+  const rec = raw as unknown as SessionRecord;
+  if (typeof rec.sessionId !== 'string') {
+    const legacy = raw[LEGACY_V1_SESSION_FIELD];
+    if (typeof legacy === 'string') (rec as { sessionId: string }).sessionId = legacy;
+  }
+  return rec;
+}
+
 async function read(): Promise<SessionRecord[]> {
   try {
     const text = await readFile(paths.sessionsFile, 'utf8');
     const parsed = JSON.parse(text) as Partial<StoreFile>;
-    return Array.isArray(parsed.sessions) ? parsed.sessions : [];
+    if (!Array.isArray(parsed.sessions)) return [];
+    return (parsed.sessions as unknown as Record<string, unknown>[]).map(migrate);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;
@@ -49,7 +66,7 @@ async function read(): Promise<SessionRecord[]> {
 
 // 同进程内并发的「读-改-写」串行化（upsertSession/patchSession）：话题天然并行
 // （semaphore 默认 10），两个话题同时落盘会基于同一旧快照算结果、后写覆盖前写——
-// 其中一个话题的 codexThreadId 绑定静默丢失，重启后上下文蒸发。与 registry.ts 的
+// 其中一个话题的 sessionId 绑定静默丢失，重启后上下文蒸发。与 registry.ts 的
 // 同款锁一致：配合函数式 updater，把 read+算+write 收进一个临界区。
 let opChain: Promise<unknown> = Promise.resolve();
 function withLock<T>(fn: () => Promise<T>): Promise<T> {

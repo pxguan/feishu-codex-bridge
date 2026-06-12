@@ -42,7 +42,7 @@ describe('claude-sdk backend：能力守卫（无半实现）', () => {
   it('listThreads / resumeThread 抛明确的「暂不支持」错误', async () => {
     await expect(be.listThreads('/tmp')).rejects.toThrow(/暂不支持.*resume 历史会话/);
     await expect(
-      be.resumeThread({ cwd: '/tmp', codexThreadId: 'sess-x' }),
+      be.resumeThread({ cwd: '/tmp', sessionId: 'sess-x' }),
     ).rejects.toThrow(/暂不支持恢复历史会话/);
   });
 

@@ -130,7 +130,7 @@ class CodexThread implements AgentThread {
 
   constructor(
     private readonly client: AppServerClient,
-    readonly codexThreadId: string,
+    readonly sessionId: string,
     private model: string | undefined,
     private effort: ReasoningEffort | undefined,
   ) {}
@@ -146,7 +146,7 @@ class CodexThread implements AgentThread {
     // long-running shell command doesn't read as "wedged".
     let lastActivityAt = Date.now();
     const params: Record<string, unknown> = {
-      threadId: self.codexThreadId,
+      threadId: self.sessionId,
       input: toUserInput(input),
     };
     if (self.model) params.model = self.model;
@@ -211,7 +211,7 @@ class CodexThread implements AgentThread {
       // a fresh goal (a busy session is gated out upstream), so any goal currently on
       // the thread is leftover — clearing it guarantees the set below makes a fresh,
       // actually-running goal and self-heals every leftover case.
-      await self.client.request('thread/goal/clear', { threadId: self.codexThreadId }).catch(() => undefined);
+      await self.client.request('thread/goal/clear', { threadId: self.sessionId }).catch(() => undefined);
 
       // thread/goal/set registers the goal AND auto-starts the first turn (codex
       // idle-continuation) — verified on 0.139, so we never call turn/start; codex
@@ -220,7 +220,7 @@ class CodexThread implements AgentThread {
       let setError: Error | undefined;
       const setFailed: Promise<'set-failed'> = new Promise((resolve) => {
         self.client
-          .request('thread/goal/set', { threadId: self.codexThreadId, objective })
+          .request('thread/goal/set', { threadId: self.sessionId, objective })
           .then(undefined, (err: unknown) => {
             setError = err instanceof Error ? err : new Error(String(err));
             log.fail('agent', setError, { phase: 'thread/goal/set' });
@@ -286,19 +286,19 @@ class CodexThread implements AgentThread {
   }
 
   async clearGoal(): Promise<void> {
-    await this.client.request('thread/goal/clear', { threadId: this.codexThreadId });
+    await this.client.request('thread/goal/clear', { threadId: this.sessionId });
   }
 
   async steer(input: AgentInput, expectedTurnId: string): Promise<void> {
     await this.client.request('turn/steer', {
-      threadId: this.codexThreadId,
+      threadId: this.sessionId,
       expectedTurnId,
       input: toUserInput(input),
     });
   }
 
   async abort(turnId: string): Promise<void> {
-    await this.client.request('turn/interrupt', { threadId: this.codexThreadId, turnId });
+    await this.client.request('turn/interrupt', { threadId: this.sessionId, turnId });
   }
 
   async compact(): Promise<CompactResult> {
@@ -312,7 +312,7 @@ class CodexThread implements AgentThread {
     // surfaces instead of hanging.
     let startError: Error | undefined;
     const startFailed: Promise<'start-failed'> = new Promise((resolve) => {
-      this.client.request('thread/compact/start', { threadId: this.codexThreadId }).then(undefined, (err: unknown) => {
+      this.client.request('thread/compact/start', { threadId: this.sessionId }).then(undefined, (err: unknown) => {
         startError = err instanceof Error ? err : new Error(String(err));
         log.fail('agent', startError, { phase: 'thread/compact/start' });
         resolve('start-failed');
@@ -399,7 +399,7 @@ export class CodexAppServerBackend implements AgentBackend {
       return (res.data ?? [])
         .filter((t) => !t.ephemeral)
         .map((t) => ({
-          codexThreadId: t.id,
+          sessionId: t.id,
           preview: t.preview ?? '',
           createdAt: t.createdAt ?? 0,
           updatedAt: t.updatedAt ?? t.createdAt ?? 0,
@@ -413,7 +413,7 @@ export class CodexAppServerBackend implements AgentBackend {
     }
   }
 
-  async readHistory(cwd: string, codexThreadId: string, maxTurns = 10): Promise<ThreadHistory> {
+  async readHistory(cwd: string, sessionId: string, maxTurns = 10): Promise<ThreadHistory> {
     const empty: ThreadHistory = { turns: [], totalTurns: 0 };
     const bin = resolveCodexBin();
     if (!bin) return empty;
@@ -427,7 +427,7 @@ export class CodexAppServerBackend implements AgentBackend {
       // close() (which SIGKILLs the child), so no orphan and the card resolves.
       const read = (async () => {
         await client.connect();
-        return client.request<{ thread: Thread }>('thread/read', { threadId: codexThreadId, includeTurns: true });
+        return client.request<{ thread: Thread }>('thread/read', { threadId: sessionId, includeTurns: true });
       })();
       read.catch(() => undefined); // close() may reject this late; swallow it
       const res = await withDeadline(read, READ_HISTORY_TIMEOUT_MS, 'thread/read');
@@ -446,7 +446,7 @@ export class CodexAppServerBackend implements AgentBackend {
         updatedAt: thread?.updatedAt,
       };
     } catch (err) {
-      log.fail('agent', err, { phase: 'thread/read', codexThreadId });
+      log.fail('agent', err, { phase: 'thread/read', sessionId });
       return empty;
     } finally {
       await client.close();
@@ -472,7 +472,7 @@ export class CodexAppServerBackend implements AgentBackend {
     const sandbox = withAutoCompact(sandboxParams(opts.mode, opts.network), opts.autoCompact);
     const client = await this.spawn(opts.cwd);
     const res = await client.request<{ thread: { id: string } }>('thread/resume', {
-      threadId: opts.codexThreadId,
+      threadId: opts.sessionId,
       cwd: opts.cwd,
       approvalPolicy: APPROVAL_POLICY,
       ...sandbox,
