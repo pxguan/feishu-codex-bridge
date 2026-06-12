@@ -1,4 +1,11 @@
-import type { BotAddedEvent, CardActionEvent, CommentEvent, LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
+import type {
+  BotAddedEvent,
+  CardActionEvent,
+  CommentEvent,
+  LarkChannel,
+  NormalizedMessage,
+  ReactionEvent,
+} from '@larksuiteoapi/node-sdk';
 import { DEFAULT_BACKEND_ID, createBackend } from '../agent';
 import type { AgentBackend, AgentInput, AgentRun, AgentThread, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
 import { isGoalTerminal, UsageError } from '../agent/types';
@@ -282,6 +289,11 @@ export interface Orchestrator {
   /** bot removed from a group (im.chat.member.bot.deleted_v1, tapped on the raw
    * dispatcher) → auto-unbind the bound project, if any. */
   onBotRemovedFromChat: (chatId: string) => Promise<void>;
+  /** `reaction` event (im.message.reaction.created_v1)：终态 run 卡 👍 = 续轮，
+   * 运行中 run/排队卡 OK/DONE = ⏹ 终止（M-6 零打字驱动）。 */
+  onReaction: (evt: ReactionEvent) => Promise<void>;
+  /** application.bot.menu_v6（raw-tap）：bot 单聊菜单点击 → DM 管理台菜单卡。 */
+  onBotMenu: (evt: { openId?: string; eventKey?: string; eventId?: string }) => Promise<void>;
   dispatcher: CardDispatcher;
   /** Close every live codex session (SIGKILLs the app-server children) so a
    *  graceful exit leaves no orphan processes. */
@@ -324,6 +336,24 @@ export function parseGoalTrigger(text: string): string | null {
     .replace(/\s+/g, ' ')
     .trim();
   return objective.length > 0 ? objective : null;
+}
+
+// ── M-6 Reaction 入站：零打字驱动 ────────────────────────────────────
+/** 运行中卡片上「⏹ 类」表情 → 终止。飞书 reaction 面板没有 ⏹，取语义最近的
+ * OK（👌「到此为止」，synthesis 验收用例）与 DONE（✅）。 */
+export const STOP_EMOJIS: ReadonlySet<string> = new Set(['OK', 'DONE']);
+/** 终态卡片上 👍 → 续轮（等价于在话题里发一句「继续」）。 */
+export const CONTINUE_EMOJIS: ReadonlySet<string> = new Set(['THUMBSUP']);
+export type ReactionIntent = 'stop' | 'continue';
+
+/**
+ * Reaction → 意图的纯决策（exported for tests）：运行中的 run/排队卡只认
+ * STOP_EMOJIS（👍 在运行中无意义，忽略）；终态卡只认 CONTINUE_EMOJIS（终态卡
+ * 没有可终止的东西）。其余 emoji 一律 null —— 群友的日常表情不该有副作用。
+ */
+export function classifyReaction(emojiType: string, running: boolean): ReactionIntent | null {
+  if (running) return STOP_EMOJIS.has(emojiType) ? 'stop' : null;
+  return CONTINUE_EMOJIS.has(emojiType) ? 'continue' : null;
 }
 
 /**
@@ -3349,6 +3379,111 @@ export function createOrchestrator(
     }
   }
 
+  // ── M-6 reaction 入站：零打字驱动 ─────────────────────────────────
+  /**
+   * `reaction` event（SDK 已归一化 im.message.reaction.created_v1 并自带去重）。
+   * 按 message_id 反查归属：运行中的 run/排队卡（runsByCard）→ OK/DONE 走与
+   * RC.stop 同语义的终止；终态 run 卡（runCards，每话题只留最新一张）→ 👍 等价
+   * 在话题里发「继续」。事件天然限机器人所在会话；缺 im:message.reactions:read
+   * scope 时事件根本不会推送 —— 整条链路零报错地静默关闭。
+   */
+  const onReaction = async (evt: ReactionEvent): Promise<void> => {
+    if (evt.action !== 'added') return;
+    // 机器人（含自己的 ⏳/🫳/OKR 生命周期表情）不能触发自己：事件体 operator_type
+    // 标 app 的一律忽略；normalizeReaction 已滤掉无 open_id 的事件，这里再按自身
+    // open_id 双保险。
+    const operatorType = (evt.raw as { operator_type?: string } | undefined)?.operator_type;
+    if (operatorType && operatorType !== 'user') return;
+    const op = evt.operator?.openId;
+    if (!op || op === channel.botIdentity?.openId) return;
+
+    const running = runsByCard.get(evt.messageId);
+    const intent = classifyReaction(evt.emojiType, Boolean(running));
+    if (!intent) return;
+    await withTrace({ msgId: evt.messageId }, async () => {
+      if (intent === 'stop' && running) {
+        // 与 RC.stop 相同的 owner-or-admin 门（杀别人的 run 限发起人/管理员，
+        // design §5）。事件体不带 chat_id，拒绝只记日志、不回贴。
+        if (op !== running.requesterOpenId && !isAdmin(cfg, op)) {
+          log.info('intake', 'reaction-denied', { emoji: evt.emojiType, op: op.slice(-6) });
+          return;
+        }
+        running.interrupt?.();
+        log.info('intake', 'reaction-stop', { emoji: evt.emojiType, stopped: Boolean(running.interrupt) });
+        return;
+      }
+      if (intent !== 'continue') return;
+      const rc = runCards.get(evt.messageId);
+      const sessionKey = rc?.threadId;
+      if (!rc || !sessionKey) return; // 不是（最新的）终态 run 卡 / adopt 失败无会话可续
+      // 随手点赞的群友不该烧一轮 codex：续轮与 run 控件同门（发起人或管理员），
+      // 且会话/用户仍须在白名单内（与真发一条消息的门禁一致）。
+      if (op !== rc.requesterOpenId && !isAdmin(cfg, op)) {
+        log.info('intake', 'reaction-denied', { emoji: evt.emojiType, op: op.slice(-6) });
+        return;
+      }
+      const rec = await getSession(sessionKey);
+      if (!rec) return;
+      const project = await getProjectByChatId(rec.chatId);
+      if (!isChatAllowed(cfg, rec.chatId) || !isUserAllowedInProject(cfg, project, op)) return;
+      const flat = (project?.kind ?? 'multi') === 'single';
+      // 合成一条等价的「继续」消息复用整条消息管线（steer/queue/goal 提示全部
+      // 生效）：replyTo 指向被点的终态卡，⏳/🫳 生命周期表情也落在卡上作回执；
+      // sessionKey 用卡片自己的会话键（含 #role 后缀），续的就是这张卡的会话。
+      const synthetic: NormalizedMessage = {
+        messageId: evt.messageId,
+        chatId: rec.chatId,
+        chatType: 'group',
+        senderId: op,
+        content: '继续',
+        rawContentType: 'text',
+        resources: [],
+        mentions: [],
+        mentionAll: false,
+        mentionedBot: true,
+        threadId: flat ? undefined : sessionKey.replace(/#(admin|guest)$/, ''),
+        createTime: Date.now(),
+      };
+      log.info('intake', 'reaction-continue', { key: sessionKey, op: op.slice(-6) });
+      // 权限档随会话原发起人（LIVE 线程本就钉死在 thread/start 的沙箱档；
+      // recreate 兜底时也不该因点赞者身份升降档）。
+      await handleTurn(synthetic, '继续', sessionKey, flat, project, turnPerm(project, rc.requesterOpenId ?? op));
+    });
+  };
+
+  // ── application.bot.menu_v6（bot 单聊菜单）────────────────────────
+  /**
+   * onboarding 一直引导订阅该事件（README / 启动文案）但 bridge 此前没有处理器
+   * —— 点菜单毫无反应的半成品（research/04 §4）。bot 菜单仅单聊生效，而 DM 正是
+   * 管理台的地盘：任意 event_key 都打开 DM 菜单卡（与私聊发任意消息等价，菜单项
+   * 无需与代码约定 key）；非管理员回拒绝文案（同 handleDmConsole 语义）。事件
+   * 不带 chat_id，发送走 receive_id_type=open_id。
+   */
+  const onBotMenu = async (evt: { openId?: string; eventKey?: string; eventId?: string }): Promise<void> => {
+    const op = evt.openId;
+    if (!op) return;
+    // raw-tap 绕过 SDK 的内建去重（at-least-once 重推会双开菜单卡）——有 event_id
+    // 就按它去重；没有则照常放行（同一菜单点两下本就该出两张卡）。
+    if (evt.eventId && seenInbound.seen(`menu:${evt.eventId}`)) return;
+    log.info('intake', 'bot-menu', { key: evt.eventKey, op: op.slice(-6) });
+    if (!isAdmin(cfg, op)) {
+      await channel.rawClient.im.v1.message
+        .create({
+          params: { receive_id_type: 'open_id' },
+          data: {
+            receive_id: op,
+            msg_type: 'text',
+            content: JSON.stringify({ text: '⛔ 仅管理员可在私聊里管理项目。' }),
+          },
+        })
+        .catch(() => undefined);
+      return;
+    }
+    await sendManagedCard(channel, op, buildDmMenuCard(), undefined, false, 'open_id').catch((err) =>
+      log.fail('console', err, { cmd: 'menu-card' }),
+    );
+  };
+
   // ── M-3 空闲进程 reaper ──────────────────────────────────────────
   // sessions 只增不减：数周 daemon 会积累几十上百个常驻 agent 进程（每个 ~172MB
   // 子树）。周期清扫超过 SESSION_REAP_IDLE_MS 无轮次的 LIVE 会话：close()
@@ -3398,7 +3533,7 @@ export function createOrchestrator(
   // 否则 fallback 会被钉死整个 daemon 生命周期（首次真实调用会自动重试）。
   void backend.listModels().catch((err) => log.fail('agent', err, { phase: 'models-prewarm' }));
 
-  return { onMessage, onComment, onBotAddedToChat, onBotRemovedFromChat, dispatcher, shutdown };
+  return { onMessage, onComment, onBotAddedToChat, onBotRemovedFromChat, onReaction, onBotMenu, dispatcher, shutdown };
 }
 
 /** Resolve a message's thread_id via raw API (reply response omits it). The

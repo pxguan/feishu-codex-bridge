@@ -100,6 +100,22 @@ export const CONTACT_SCOPES = ['contact:user.base:readonly'] as const;
  */
 export const APP_VERSION_SCOPES = ['application:application.app_version:readonly'] as const;
 
+/**
+ * Optional scopes for the in-group discoverability trio (M-6):
+ *   - `im:chat.menu_tree:write_only` — onboarding hangs a「🤖 Codex」group menu
+ *     (im.v1.chatMenuTree.create) above the input box, far more visible than
+ *     the chat tab;
+ *   - `im:message.reactions:read` — receive the `im.message.reaction.created_v1`
+ *     event (限机器人所在会话), powering 终态卡 👍=继续 / 运行卡 OK=终止.
+ * Like the other opt-in groups, deliberately NOT in {@link REQUIRED_SCOPES}:
+ * without them the menu create fails (log + skip) and reaction events simply
+ * aren't pushed — everything else still works, never gate startup on these.
+ */
+export const DISCOVERY_SCOPES = [
+  'im:chat.menu_tree:write_only',
+  'im:message.reactions:read',
+] as const;
+
 /** Everything the one-click grant URL pre-selects: required + opt-in extras. */
 export const GRANT_SCOPES = [
   ...REQUIRED_SCOPES,
@@ -107,6 +123,7 @@ export const GRANT_SCOPES = [
   ...JOIN_GROUP_SCOPES,
   ...CONTACT_SCOPES,
   ...APP_VERSION_SCOPES,
+  ...DISCOVERY_SCOPES,
 ] as const;
 
 /**
@@ -138,6 +155,8 @@ export const SCOPE_LABELS: Record<string, string> = {
   'wiki:wiki:readonly': '读取知识库节点',
   'contact:user.base:readonly': '读取成员姓名（管理员 / 白名单展示）',
   'application:application.app_version:readonly': '读取应用版本信息（自动诊断事件订阅）',
+  'im:chat.menu_tree:write_only': '添加群菜单（群内常驻命令入口）',
+  'im:message.reactions:read': '接收表情回复事件（终态卡 👍 续轮 / 运行卡 OK 终止）',
 };
 
 /** `<中文说明>（<token>）` for a known scope, else the raw token. */

@@ -12,6 +12,15 @@ import { defaultNoMention, type Project } from './registry';
 const HELP_DOC_URL: string = 'https://my.feishu.cn/wiki/PZ23wGr7JiKK5RkIG4rcZXzGn5g';
 
 /**
+ * PC 端深链：让群菜单的链接在飞书**侧边栏**打开而不是弹独立浏览器（官方
+ * `applink … mode=sidebar-semi` 前缀，见群菜单概述文档）。仅用于 menu_tree 的
+ * `pc_url`；移动端走 `common_url` 原链接。Exported for tests.
+ */
+export function sidebarPcUrl(url: string): string {
+  return `https://applink.feishu.cn/client/web_url/open?mode=sidebar-semi&url=${encodeURIComponent(url)}`;
+}
+
+/**
  * Onboard a freshly-created project group (design: 项目=群): post a welcome card
  * listing every command this group supports, Pin it (so it lives in the chat's
  * Pins tab), and add a "👈 查看可使用的命令" url tab pointing at the public manual.
@@ -64,6 +73,35 @@ export async function onboardGroup(channel: LarkChannel, project: Project): Prom
       log.info('project', 'onboard-tab', { name: project.name });
     } catch (err) {
       log.fail('project', err, { phase: 'onboard-tab' });
+    }
+  }
+
+  // 3. 群菜单「🤖 Codex」→ 命令手册（M-6 群内可发现性）。群菜单常驻输入框上方，
+  //    可见性远高于群 Tab；动作只支持 REDIRECT_LINK —— PC 端加 applink
+  //    sidebar-semi 前缀在侧边栏打开，移动端走原链接。需可选 scope
+  //    im:chat.menu_tree:write_only：未开通时 create 报错 → log + 跳过，
+  //    其余 onboarding 不受影响（与 Pin/Tab 一致的 best-effort 语义）。
+  if (decorate && HELP_DOC_URL) {
+    try {
+      await channel.rawClient.im.v1.chatMenuTree.create({
+        path: { chat_id: chatId },
+        data: {
+          menu_tree: {
+            chat_menu_top_levels: [
+              {
+                chat_menu_item: {
+                  action_type: 'REDIRECT_LINK',
+                  name: '🤖 Codex',
+                  redirect_link: { common_url: HELP_DOC_URL, pc_url: sidebarPcUrl(HELP_DOC_URL) },
+                },
+              },
+            ],
+          },
+        },
+      });
+      log.info('project', 'onboard-menu', { name: project.name });
+    } catch (err) {
+      log.fail('project', err, { phase: 'onboard-menu' });
     }
   }
 }

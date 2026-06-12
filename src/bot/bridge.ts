@@ -59,11 +59,16 @@ export async function startBridge(opts: BridgeOptions): Promise<BridgeHandle> {
   // A human added the bot to a group → DM the (admin) adder a bind card to
   // register it as a `joined` project.
   channel.on('botAdded', orchestrator.onBotAddedToChat);
-  // The SDK exposes no named event for bot-*removed* (im.chat.member.bot.deleted_v1),
-  // so tap its private raw EventDispatcher: register() merges by event key, so
-  // this adds our handler without clobbering the SDK's built-ins. Guarded +
-  // best-effort — if the SDK's internals change on a bump we log and degrade to
-  // manual unbind (the console's 删除项目 still works).
+  // Inbound reactions (im.message.reaction.created_v1, SDK-normalized + deduped):
+  // 终态 run 卡 👍 = 续轮，运行中 run/排队卡 OK/DONE = ⏹ 终止（M-6）。Without the
+  // im:message.reactions:read scope the event is simply never pushed — silent off.
+  channel.on('reaction', orchestrator.onReaction);
+  // The SDK exposes no named event for bot-*removed* (im.chat.member.bot.deleted_v1)
+  // nor for bot-menu clicks (application.bot.menu_v6), so tap its private raw
+  // EventDispatcher: register() merges by event key, so this adds our handlers
+  // without clobbering the SDK's built-ins. Guarded + best-effort — if the SDK's
+  // internals change on a bump we log and degrade (manual unbind via the console's
+  // 删除项目 still works; the DM console still opens by messaging the bot).
   try {
     const tap = (
       channel as unknown as {
@@ -77,13 +82,28 @@ export async function startBridge(opts: BridgeOptions): Promise<BridgeHandle> {
           const chatId = ev?.chat_id ?? ev?.event?.chat_id;
           if (chatId) void orchestrator.onBotRemovedFromChat(chatId);
         },
+        // Bot-menu click → DM console menu card. The payload may carry fields at
+        // the top level or under `event` depending on schema version — read both.
+        'application.bot.menu_v6': (raw: unknown) => {
+          const ev = raw as {
+            event_id?: string;
+            event_key?: string;
+            operator?: { operator_id?: { open_id?: string } };
+            event?: { event_key?: string; operator?: { operator_id?: { open_id?: string } } };
+          };
+          void orchestrator.onBotMenu({
+            openId: ev?.operator?.operator_id?.open_id ?? ev?.event?.operator?.operator_id?.open_id,
+            eventKey: ev?.event_key ?? ev?.event?.event_key,
+            eventId: ev?.event_id,
+          });
+        },
       });
-      log.info('ws', 'bot-removed-tap');
+      log.info('ws', 'raw-event-tap', { events: ['im.chat.member.bot.deleted_v1', 'application.bot.menu_v6'] });
     } else {
-      log.info('ws', 'bot-removed-tap-unavailable');
+      log.info('ws', 'raw-event-tap-unavailable');
     }
   } catch (err) {
-    log.fail('ws', err, { phase: 'bot-removed-tap' });
+    log.fail('ws', err, { phase: 'raw-event-tap' });
   }
   channel.on('reject', (evt) => log.info('intake', 'reject', { reason: evt.reason, msgId: evt.messageId }));
   channel.on('error', (err) => log.fail('ws', err));

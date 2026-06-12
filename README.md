@@ -129,6 +129,8 @@ feishu-codex-bridge bot rm <名>     # 移除一个机器人配置
 
 > 「**事件订阅自动诊断**」另需 `application:application.app_version:readonly`（读应用版本信息，见 `APP_VERSION_SCOPES`）。同样**已预勾选**、**不属于** `REQUIRED_SCOPES`，不开通则诊断降级为「未能自动检测」，其余照常。
 
+> 「**群内可发现性**」另需 `im:chat.menu_tree:write_only`（建群时挂「🤖 Codex」群菜单）、`im:message.reactions:read`（接收表情回复事件：终态卡 👍 续轮 / 运行卡 OK 终止，见 `DISCOVERY_SCOPES`）。同样**已预勾选**、**不属于** `REQUIRED_SCOPES`，不开通只是群菜单不出现 / 表情驱动静默关闭。
+
 ### 2）订阅事件 + 回调（长连接模式）
 
 `run` / `start` 初始化到这步会**自动打开**「**事件与回调**」页（`https://open.feishu.cn/app/<app_id>/event`）。这页顶部有「**事件配置**」「**回调配置**」两个独立标签，要分别配（飞书对事件/回调**既无开通 API、也无预选深链**，只能手点；但**事件**的订阅状态可经「获取应用版本信息」API 读到——你配完并发布版本后，前台 `run` 会自动确认并播报「**事件已生效**」。**回调**不在该 API 里，无法检测）：
@@ -140,6 +142,7 @@ feishu-codex-bridge bot rm <名>     # 移除一个机器人配置
 - `drive.notice.comment_add_v1` —— 云文档新增评论（**仅「文档评论回复」功能需要**；不加则该功能静默关闭，其余照常）
 - `im.chat.member.bot.added_v1` —— 机器人被加入群（**仅「把我加进已有群」功能需要**；触发私聊推送绑定卡，不加则拉我进群没反应）
 - `im.chat.member.bot.deleted_v1` —— 机器人被移出群（同上；触发自动解绑项目，不加则被踢后项目不会自动清理）
+- `im.message.reaction.created_v1` —— 新增消息表情回复（**仅「表情驱动」功能需要**：终态卡点 👍 续轮、运行卡点 OK 终止；不加则该功能静默关闭）
 
 **「回调配置」标签** → 「订阅方式」改**长连接** → 点「添加回调」：
 

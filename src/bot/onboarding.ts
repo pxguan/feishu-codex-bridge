@@ -210,6 +210,9 @@ export async function confirmReadyForDaemon(result: OnboardResult): Promise<bool
   console.log('           im.chat.member.bot.added_v1（机器人被加入群 → 私聊推送绑定卡）');
   console.log('           im.chat.member.bot.deleted_v1（机器人被移出群 → 自动解绑项目）');
   console.log('           它们依赖「群信息/群成员」权限（im:chat:readonly / im:chat.members:write_only，已预勾选）；不加则该功能静默关闭。');
+  console.log('       • （可选）想要「点表情驱动：终态卡 👍 续轮 / 运行卡 OK 终止」，再加这一个事件：');
+  console.log('           im.message.reaction.created_v1（新增消息表情回复）');
+  console.log('           它依赖「表情回复读取」权限（im:message.reactions:read，已预勾选）；不加则该功能静默关闭。');
   console.log('       • 切到「回调配置」标签 → 「订阅方式」改「长连接」→ 点「添加回调」勾选：');
   console.log('           card.action.trigger（卡片回传交互）');
   console.log('           ⚠️ 它是「回调」不是「事件」——在上面「添加事件」里搜不到，必须切到「回调配置」这个标签。');
