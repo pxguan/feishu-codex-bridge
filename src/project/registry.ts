@@ -50,6 +50,12 @@ export interface Project {
    * bridge pushes codex's auto-compact token limit past any real usage to disable
    * it (see backend sandboxParams / AUTO_COMPACT_OFF_LIMIT). */
   autoCompact?: boolean;
+  /** agent backend id for this project (see src/agent/index.ts registry).
+   * Omitted on old/normal data → 'codex-appserver' (the historical codex path,
+   * zero behavior change). Routed per project in createOrchestrator's
+   * backendFor(). No picker UI yet — set by editing projects.json (TODO: DM
+   * 项目卡加后端选择). */
+  backend?: string;
 }
 
 /**

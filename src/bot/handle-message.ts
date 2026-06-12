@@ -1,6 +1,6 @@
 import type { BotAddedEvent, CardActionEvent, CommentEvent, LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
-import { createBackend } from '../agent';
-import type { AgentInput, AgentRun, AgentThread, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
+import { DEFAULT_BACKEND_ID, createBackend } from '../agent';
+import type { AgentBackend, AgentInput, AgentRun, AgentThread, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
 import { isGoalTerminal } from '../agent/types';
 import {
   getMaxConcurrentRuns,
@@ -349,7 +349,22 @@ export function createOrchestrator(
   cfg: AppConfig,
   fallbackCwd: string,
 ): Orchestrator {
-  const backend = createBackend();
+  /** Lazily-constructed backends by id — one instance per backend for the whole
+   * bridge (mirrors the old single-instance shape; codex stays the default). */
+  const backends = new Map<string, AgentBackend>();
+  function backendFor(id?: string): AgentBackend {
+    const key = id ?? DEFAULT_BACKEND_ID;
+    let be = backends.get(key);
+    if (!be) {
+      be = createBackend(key);
+      backends.set(key, be);
+    }
+    return be;
+  }
+  /** The default backend (codex app-server). Call sites that aren't project-
+   * routed yet (status card, /usage, models prewarm, resume-picker pick) keep
+   * using it directly — identical to the pre-registry behavior. */
+  const backend = backendFor();
   const sessions = new Map<string, AgentThread>();
   const active = new Map<string, ActiveState>();
   /** Per-doc serialization for comment runs (see {@link withDocLock}). */
@@ -378,11 +393,16 @@ export function createOrchestrator(
   const lastUsage = new Map<string, { used: number; window: number | null }>();
   /** inbound message/comment dedup (at-least-once delivery, see RecentIdCache) */
   const seenInbound = new RecentIdCache();
-  let modelsCache: ModelInfo[] | null = null;
+  /** model list cache per backend id (was a single codex-only cache) */
+  const modelsCaches = new Map<string, ModelInfo[]>();
 
-  async function listModels(): Promise<ModelInfo[]> {
-    if (!modelsCache) modelsCache = await backend.listModels();
-    return modelsCache;
+  async function listModels(be: AgentBackend = backend): Promise<ModelInfo[]> {
+    let cached = modelsCaches.get(be.id);
+    if (!cached) {
+      cached = await be.listModels();
+      modelsCaches.set(be.id, cached);
+    }
+    return cached;
   }
 
   function pickDefault(models: ModelInfo[]): { model: string; effort: ReasoningEffort } {
@@ -873,9 +893,9 @@ export function createOrchestrator(
         const prior = neverSeen ? undefined : await getSession(sessionKey);
         if (!thread) {
           // Unknown session (created before this bridge, or store lost): treat as
-          // a fresh session bound to the resolved cwd.
+          // a fresh session bound to the resolved cwd, on the project's backend.
           const cwd = project?.cwd ?? fallbackCwd;
-          thread = await backend.startThread({ cwd, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
+          thread = await backendFor(project?.backend).startThread({ cwd, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
           sessions.set(sessionKey, thread);
           await upsertSession({
             threadId: sessionKey,
@@ -962,8 +982,14 @@ export function createOrchestrator(
     }
     const rec = await getSession(threadId);
     if (!rec) return { thread: undefined, recreated: false };
+    // Route by the bound project's backend (the SessionRecord itself carries no
+    // backend id yet — that's the M-8 store migration; until then a project's
+    // sessions are assumed to live on its CURRENT backend). Unbound chats →
+    // default (codex), exactly the pre-registry behavior.
+    const project = await getProjectByChatId(chatId);
+    const be = backendFor(project?.backend);
     try {
-      const resumed = await backend.resumeThread({
+      const resumed = await be.resumeThread({
         cwd: rec.cwd,
         codexThreadId: rec.codexThreadId,
         model: rec.model,
@@ -976,9 +1002,8 @@ export function createOrchestrator(
       return { thread: resumed, recreated: false };
     } catch (err) {
       log.fail('agent', err, { phase: 'resume-on-turn', threadId });
-      const project = await getProjectByChatId(chatId);
       const cwd = project?.cwd ?? rec.cwd ?? fallbackCwd;
-      const fresh = await backend.startThread({
+      const fresh = await be.startThread({
         cwd,
         model: rec.model,
         effort: rec.effort,
@@ -1034,10 +1059,13 @@ export function createOrchestrator(
       const perm = turnPerm(project, msg.senderId);
       // lazy banner branch refresh (design §3.2) — best-effort, non-blocking
       if (project) void refreshBranch(channel, project).catch(() => undefined);
-      const { model, effort } = pickDefault(await listModels());
+      // Pick the default model FROM THE PROJECT'S BACKEND — a claude project must
+      // not be handed codex's default ('gpt-5.5'). Unset backend → codex, as before.
+      const be = backendFor(project?.backend);
+      const { model, effort } = pickDefault(await listModels(be));
       let thread: AgentThread;
       try {
-        thread = await backend.startThread({ cwd, model, effort, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
+        thread = await be.startThread({ cwd, model, effort, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
       } catch (err) {
         reaction?.done();
         log.fail('card', err, { phase: 'start-topic' });
@@ -1088,7 +1116,11 @@ export function createOrchestrator(
       try {
         const project = await getProjectByChatId(msg.chatId);
         const cwd = project?.cwd ?? fallbackCwd;
-        const threads = await backend.listThreads(cwd);
+        // Routed so a no-resume backend surfaces its clear "not supported" error
+        // here. NOTE: the pick/readHistory handlers below still use the default
+        // backend — fine while only codex supports the picker (TODO M-8: thread
+        // the backend id through ResumeCardState / the card callback value).
+        const threads = await backendFor(project?.backend).listThreads(cwd);
         const state: ResumeCardState = {
           chatId: msg.chatId,
           originalMsgId: msg.messageId,

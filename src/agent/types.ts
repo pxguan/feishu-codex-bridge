@@ -222,9 +222,30 @@ export interface ResumeThreadOptions extends StartThreadOptions {
   codexThreadId: string;
 }
 
+/**
+ * Feature flags a backend declares so the orchestrator can guard codex-only
+ * affordances instead of calling into methods a backend can't honor. Undefined
+ * (the codex app-server backend) ⇒ every capability is true — the historical
+ * full feature set. A backend that flags `false` MUST also make the
+ * corresponding method(s) throw a clear "not supported" error (capability
+ * guard + hard error, never a silent half-implementation).
+ */
+export interface AgentCapabilities {
+  /** /goal 自治多轮（runGoal/clearGoal） */
+  goal: boolean;
+  /** 在飞行 turn 注入引导（steer）。false ⇒ orchestrator 的 steer try/catch 落入排队。 */
+  steer: boolean;
+  /** /compact 手动压缩（compact） */
+  compact: boolean;
+  /** /resume 历史会话（listThreads/readHistory/resumeThread） */
+  resume: boolean;
+}
+
 export interface AgentBackend {
   readonly id: string;
   readonly displayName: string;
+  /** undefined ⇒ all true (codex 的完整能力面)；见 {@link AgentCapabilities}。 */
+  readonly capabilities?: AgentCapabilities;
   isAvailable(): Promise<boolean>;
   listModels(): Promise<ModelInfo[]>;
   /** recent codex threads under `cwd`, newest first (for resume picker) */
