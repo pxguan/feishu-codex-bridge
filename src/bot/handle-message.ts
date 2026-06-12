@@ -2958,6 +2958,13 @@ export function createOrchestrator(
     log.info('bridge', 'shutdown', { closed: live.length });
   }
 
+  // 启动预热：daemon 首个新话题原本恒吃一次 model/list 冷 spawn（独立 app-server
+  // ~150–300ms），启动是空闲期，提前付掉。必须**直调 backend**——成功时只填
+  // backend 内部缓存，后续 listModels() 包装零成本；失败时 backend 返回
+  // STATIC_MODELS 兜底但不写缓存，所以这里也绝不把结果写进 modelsCache，
+  // 否则 fallback 会被钉死整个 daemon 生命周期（首次真实调用会自动重试）。
+  void backend.listModels().catch((err) => log.fail('agent', err, { phase: 'models-prewarm' }));
+
   return { onMessage, onComment, onBotAddedToChat, onBotRemovedFromChat, dispatcher, shutdown };
 }
 
