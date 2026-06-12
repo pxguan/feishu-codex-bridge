@@ -75,6 +75,10 @@ export interface ResumeCardState {
   requesterOpenId: string;
   cwd: string;
   projectName?: string;
+  /** agent backend id the sessions were listed from — rides each pick button's
+   * callback value (`b`) so the resume stays on the same backend. Unset on
+   * legacy state → default (codex). */
+  backend?: string;
   threads: ThreadSummary[];
   createdAt: number;
   /** in-flight guard (anti double-click) */
@@ -100,7 +104,7 @@ export function buildResumeCard(state: ResumeCardState): CardObject {
     for (const t of state.threads) {
       const title = (t.name?.trim() || t.preview.trim() || '(无摘要)').replace(/\s+/g, ' ');
       const label = `↩️ ${pickerTime(t.updatedAt || t.createdAt)} · ${truncate(title, RESUME_TITLE_MAX)}`;
-      elements.push(actions([button(label, { a: RES.pick, t: t.sessionId })]));
+      elements.push(actions([button(label, { a: RES.pick, t: t.sessionId, ...(state.backend ? { b: state.backend } : {}) })]));
     }
   }
   return card(elements, { summary: '恢复历史会话' });

@@ -50,6 +50,18 @@ describe('buildResumeCard', () => {
     expect(buttons(card).length).toBe(0);
     expect(JSON.stringify(card)).toContain('还没有历史会话');
   });
+
+  // M-8：回调值带 backend 标识（b），pick → readHistory → 重绑全程同后端。
+  it('carries the backend id in each pick button value when the state has one', () => {
+    const threads: ThreadSummary[] = [
+      { sessionId: 'c1', preview: 'x', createdAt: NOW - 60, updatedAt: NOW - 60 },
+    ];
+    const withBackend = buildResumeCard({ ...state(threads), backend: 'claude-sdk' });
+    expect(buttons(withBackend)[0].behaviors[0].value).toMatchObject({ t: 'c1', b: 'claude-sdk' });
+    // 旧 state（无 backend）→ 不带 b，handler 落回默认后端
+    const legacy = buildResumeCard(state(threads));
+    expect(buttons(legacy)[0].behaviors[0].value.b).toBeUndefined();
+  });
 });
 
 describe('buildHelpCard 权限过滤', () => {

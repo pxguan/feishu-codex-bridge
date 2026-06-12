@@ -28,6 +28,7 @@ function rec(threadId: string, sessionId: string): SessionRecord {
     chatId: 'oc_chat',
     cwd: '/tmp/proj',
     sessionId,
+    backend: 'codex-appserver',
     summary: `s-${threadId}`,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -63,8 +64,9 @@ describe('session-store', () => {
     expect((await getSession('t1'))?.lastSeenAt).toBe(20);
   });
 
-  // M-8 全链改名：旧 v1 文件的会话 id 字段名读入时迁移到 sessionId，重启不丢绑定。
-  it('migrates the legacy v1 session-id field on read', async () => {
+  // M-8：旧 v1 文件读入迁移 —— 会话 id 旧字段名 → sessionId；缺 backend 回填
+  // 默认 codex 后端。重启后既不丢绑定，也能按 backend 正确路由 resume。
+  it('migrates a legacy v1 file on read (session-id field rename + backend backfill)', async () => {
     await mkdir(dirname(paths.sessionsFile), { recursive: true });
     const legacy = {
       version: 1,
@@ -81,11 +83,20 @@ describe('session-store', () => {
       ],
     };
     await writeFile(paths.sessionsFile, JSON.stringify(legacy), 'utf8');
-    expect((await getSession('old-topic'))?.sessionId).toBe('cx-legacy');
-    // 写回（patch 任意字段）后落盘的是新字段名
+    const got = await getSession('old-topic');
+    expect(got?.sessionId).toBe('cx-legacy');
+    expect(got?.backend).toBe('codex-appserver');
+    // 写回（patch 任意字段）后落盘的是新字段名 + 回填的 backend + 新文件版本
     await patchSession('old-topic', { model: 'gpt-5.5' });
     const onDisk = JSON.parse(await readFile(paths.sessionsFile, 'utf8'));
+    expect(onDisk.version).toBe(2);
     expect(onDisk.sessions[0].sessionId).toBe('cx-legacy');
+    expect(onDisk.sessions[0].backend).toBe('codex-appserver');
+  });
+
+  it('keeps an explicit non-default backend (no backfill clobber)', async () => {
+    await upsertSession({ ...rec('t-claude', 'sess-uuid'), backend: 'claude-sdk' });
+    expect((await getSession('t-claude'))?.backend).toBe('claude-sdk');
   });
 
   it('patchSession skips undefined fields and is a no-op for an unknown threadId', async () => {

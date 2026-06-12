@@ -4,6 +4,12 @@
  * from codex internals (and lets us swap to exec / SDK / remote later).
  */
 
+/** The backend used when nothing picked one (`Project.backend` / 旧
+ * SessionRecord 缺省)——the historical codex app-server path, which must stay
+ * behavior-identical. Declared here (not index.ts) so pure-type consumers like
+ * session-store can backfill old records without importing the registry. */
+export const DEFAULT_BACKEND_ID = 'codex-appserver';
+
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
 /**

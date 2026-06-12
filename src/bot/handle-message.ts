@@ -895,13 +895,15 @@ export function createOrchestrator(
           // Unknown session (created before this bridge, or store lost): treat as
           // a fresh session bound to the resolved cwd, on the project's backend.
           const cwd = project?.cwd ?? fallbackCwd;
-          thread = await backendFor(project?.backend).startThread({ cwd, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
+          const be = backendFor(project?.backend);
+          thread = await be.startThread({ cwd, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
           sessions.set(sessionKey, thread);
           await upsertSession({
             threadId: sessionKey,
             chatId: msg.chatId,
             cwd,
             sessionId: thread.sessionId,
+            backend: be.id,
             // `text` is already file-woven when preIngested; use the raw
             // `summaryText` (handleTurn's original) so the session label isn't
             // manifest boilerplate + a temp path.
@@ -982,12 +984,12 @@ export function createOrchestrator(
     }
     const rec = await getSession(threadId);
     if (!rec) return { thread: undefined, recreated: false };
-    // Route by the bound project's backend (the SessionRecord itself carries no
-    // backend id yet — that's the M-8 store migration; until then a project's
-    // sessions are assumed to live on its CURRENT backend). Unbound chats →
-    // default (codex), exactly the pre-registry behavior.
+    // Route by the RECORD's backend — the backend that created the session (old
+    // v1 records read back as the codex default). A project switching backends
+    // later must not strand existing sessions on the wrong runtime; the project
+    // is still consulted for cwd / tier defaults on the recreate path below.
     const project = await getProjectByChatId(chatId);
-    const be = backendFor(project?.backend);
+    const be = backendFor(rec.backend);
     try {
       const resumed = await be.resumeThread({
         cwd: rec.cwd,
@@ -1092,6 +1094,7 @@ export function createOrchestrator(
         summary: stripFileTokens(text).slice(0, 80) || '(空)',
         requesterOpenId: msg.senderId,
         roleSuffix: perm.roleSuffix,
+        backendId: be.id,
       };
       if (goal) await launchGoalRun(launchOpts);
       else
@@ -1117,16 +1120,18 @@ export function createOrchestrator(
         const project = await getProjectByChatId(msg.chatId);
         const cwd = project?.cwd ?? fallbackCwd;
         // Routed so a no-resume backend surfaces its clear "not supported" error
-        // here. NOTE: the pick/readHistory handlers below still use the default
-        // backend — fine while only codex supports the picker (TODO M-8: thread
-        // the backend id through ResumeCardState / the card callback value).
-        const threads = await backendFor(project?.backend).listThreads(cwd);
+        // here. The resolved backend id rides the card state AND each pick
+        // button's callback value (`b`), so the pick → readHistory → rebind path
+        // stays on the same backend that listed the sessions.
+        const be = backendFor(project?.backend);
+        const threads = await be.listThreads(cwd);
         const state: ResumeCardState = {
           chatId: msg.chatId,
           originalMsgId: msg.messageId,
           requesterOpenId: msg.senderId,
           cwd,
           projectName: project?.name,
+          backend: be.id,
           threads,
           createdAt: Date.now(),
         };
@@ -1444,11 +1449,14 @@ export function createOrchestrator(
     .on(RES.pick, ({ evt, value }) => {
       const state = authPending(resumePending, evt);
       const sessionId = typeof value.t === 'string' ? value.t : undefined;
+      // backend id from the button value (M-8: card callbacks carry it), with
+      // the card state's copy as fallback for cards minted before the change.
+      const backendId = typeof value.b === 'string' ? value.b : state?.backend;
       if (!state || !sessionId || state.launching) return;
       state.launching = true;
       settleUpdate(evt.messageId, buildResumeLaunchingCard(state));
       // detach: don't hold the cardAction callback for the whole resume + run
-      void resumeFromCard(evt, state, sessionId);
+      void resumeFromCard(evt, state, sessionId, backendId);
     });
 
   /** Run-card actions: gated by chat/user allow lists (design §5). */
@@ -2102,12 +2110,20 @@ export function createOrchestrator(
    * Detached — never holds the card-action callback for the whole flow. On
    * failure the picker card flips to a (non-retryable) error and pending clears.
    */
-  async function resumeFromCard(evt: CardActionEvent, state: ResumeCardState, sessionId: string): Promise<void> {
+  async function resumeFromCard(
+    evt: CardActionEvent,
+    state: ResumeCardState,
+    sessionId: string,
+    backendId?: string,
+  ): Promise<void> {
+    // The backend that listed this session (from the button value / card state);
+    // unset on legacy cards → default (codex), the historical behavior.
+    const be = backendFor(backendId);
     try {
       // thread/read: fetch the transcript without starting a turn or holding the
       // session live (model/effort left to the thread's own remembered config).
       // Never throws — empty history just yields a minimal card.
-      const history = await backend.readHistory(state.cwd, sessionId);
+      const history = await be.readHistory(state.cwd, sessionId);
       resumePending.delete(evt.messageId);
 
       let bound = false;
@@ -2133,6 +2149,7 @@ export function createOrchestrator(
             chatId: state.chatId,
             cwd: state.cwd,
             sessionId,
+            backend: be.id,
             summary: history.name || history.preview || '(恢复会话)',
             createdAt: now,
             updatedAt: now,
@@ -2186,6 +2203,9 @@ export function createOrchestrator(
     /** when admin/guest tiers are split: 'admin'|'guest' to namespace the
      * resolved topic key so the two roles never share a thread (see turnSession). */
     roleSuffix?: 'admin' | 'guest';
+    /** the backend that created `thread` (persisted into the SessionRecord so a
+     * restart resumes on the same runtime). Unset → default (codex). */
+    backendId?: string;
   }
 
   async function launchRun(
@@ -2212,6 +2232,7 @@ export function createOrchestrator(
         chatId: opts.chatId,
         cwd: opts.cwd ?? fallbackCwd,
         sessionId: opts.thread.sessionId,
+        backend: opts.backendId ?? DEFAULT_BACKEND_ID,
         model: opts.model,
         effort: opts.effort,
         summary: opts.summary ?? opts.firstText.slice(0, 80),
@@ -2521,6 +2542,7 @@ export function createOrchestrator(
         chatId: opts.chatId,
         cwd: opts.cwd ?? fallbackCwd,
         sessionId: opts.thread.sessionId,
+        backend: opts.backendId ?? DEFAULT_BACKEND_ID,
         model: opts.model,
         effort: opts.effort,
         summary: opts.summary ?? objective.slice(0, 80),
@@ -2905,7 +2927,8 @@ export function createOrchestrator(
     const rec = await getSession(sessionKey);
     if (rec) {
       try {
-        const resumed = await backend.resumeThread({
+        // Same record-backend routing as resolveThread (doc sessions persist too).
+        const resumed = await backendFor(rec.backend).resumeThread({
           cwd: rec.cwd,
           sessionId: rec.sessionId,
           model: rec.model,
@@ -2925,6 +2948,7 @@ export function createOrchestrator(
       chatId: sessionKey,
       cwd: fallbackCwd,
       sessionId: fresh.sessionId,
+      backend: backend.id,
       model,
       effort,
       summary: question.slice(0, 80),

@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import { paths } from '../config/paths';
-import type { ReasoningEffort } from '../agent/types';
+import { DEFAULT_BACKEND_ID, type ReasoningEffort } from '../agent/types';
 
 /**
  * A persisted session = one Feishu topic (thread) bound to a codex thread.
@@ -18,6 +18,10 @@ export interface SessionRecord {
   /** backend session id（codex 的 thread id / claude 的 session UUID）—— pass to
    * backend.resumeThread。v1 文件里的旧字段名在 read() 时迁移（见 migrate）。 */
   sessionId: string;
+  /** 创建该会话的 agent 后端 id（见 src/agent/index.ts 注册表）。重启后
+   * resolveThread 按它路由 resume —— 项目事后换后端不影响既有会话的归属。
+   * v1 文件缺省 → 默认 codex 后端（read() 时回填）。 */
+  backend: string;
   model?: string;
   effort?: ReasoningEffort;
   /** first user message excerpt, for context */
@@ -35,20 +39,23 @@ interface StoreFile {
   sessions: SessionRecord[];
 }
 
-const FILE_VERSION = 1;
+// v2：会话 id 字段改名 sessionId + 新增 backend 字段（M-8 多后端路由）。
+const FILE_VERSION = 2;
 
 /** v1 文件的旧字段名（`codexThread` + `Id`）。拼接而非字面量，是为了让「全链改名
  * 后 grep 旧名 = 0」的判据可机械验证 —— 这里是全仓唯一还认得旧名的地方。 */
 const LEGACY_V1_SESSION_FIELD = 'codexThread' + 'Id';
 
-/** 旧记录读入迁移：v1 的旧会话 id 字段 → sessionId。原地落盘格式只在下次写盘时
- * 才换新（read 不回写），所以迁移必须幂等且每次 read 都跑。 */
+/** 旧记录读入迁移：v1 的旧会话 id 字段 → sessionId；缺 backend 回填默认 codex
+ * 后端（v1 时代只有它）。原地落盘格式只在下次写盘时才换新（read 不回写），
+ * 所以迁移必须幂等且每次 read 都跑。 */
 function migrate(raw: Record<string, unknown>): SessionRecord {
   const rec = raw as unknown as SessionRecord;
   if (typeof rec.sessionId !== 'string') {
     const legacy = raw[LEGACY_V1_SESSION_FIELD];
     if (typeof legacy === 'string') (rec as { sessionId: string }).sessionId = legacy;
   }
+  if (typeof rec.backend !== 'string') (rec as { backend: string }).backend = DEFAULT_BACKEND_ID;
   return rec;
 }
 

@@ -1,10 +1,9 @@
 import type { AgentBackend } from './types';
+import { DEFAULT_BACKEND_ID } from './types';
 import { CodexAppServerBackend } from './codex-appserver/backend';
 import { ClaudeSdkBackend } from './claude-sdk/backend';
 
-/** The backend used when a project doesn't pick one (`Project.backend` unset) —
- * the historical codex app-server path, which must stay behavior-identical. */
-export const DEFAULT_BACKEND_ID = 'codex-appserver';
+export { DEFAULT_BACKEND_ID } from './types';
 
 /**
  * Backend registry. Construction is lazy (a factory per id) so merely having a
