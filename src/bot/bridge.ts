@@ -41,6 +41,13 @@ export async function startBridge(opts: BridgeOptions): Promise<BridgeHandle> {
     // handle-message) be the single source of truth for 免@. Non-@ delivery
     // still requires the im:message.group_msg scope (Feishu-side push).
     policy: { requireMention: false },
+    // Disable the SDK's 600ms per-chat text batching. It merges messages by
+    // chatId, so two topics in the same group posting within 600ms get their
+    // content concatenated and senderId taken from the last message — breaking
+    // "topic = independent session" and misattributing permissions. delayMs: 0
+    // takes the SDK's pure-serial branch (dedup + chat queue stay on); double
+    // sends are already prevented by startReservedRun's synchronous booking.
+    safety: { batch: { text: { delayMs: 0 } } },
   });
 
   const orchestrator = createOrchestrator(channel, opts.cfg, opts.fallbackCwd);
