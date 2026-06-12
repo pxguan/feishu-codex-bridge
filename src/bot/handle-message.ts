@@ -249,6 +249,10 @@ interface ActiveState {
    * but let the in-flight turn finish streaming; the loop then ends after that
    * turn's `done` (or immediately if no turn is in flight). No summary card. */
   endGoal?: () => void;
+  /** goal run (launchGoalRun): turns are auto-continued by codex and the queue
+   * is never consumed — incoming messages get a prompt instead of queueing
+   * (they'd be dropped silently at the end otherwise). */
+  isGoal?: boolean;
 }
 
 /** Message-reaction lifecycle controller (see {@link runReaction}). */
@@ -714,6 +718,12 @@ export function createOrchestrator(
     // Mid-turn: steer (引导) or queue (排队).
     const existing = active.get(sessionKey);
     if (existing) {
+      // 🎯 goal 会话不接外部输入（turns 由 codex 自续，queue 永远不被消费），
+      // 入队只会在收尾被静默丢弃 —— 直接告知而不是黑洞。
+      if (existing.isGoal) {
+        await replyGoalBusy(msg, flat);
+        return;
+      }
       // Download any images first (best-effort) so the steered/queued turn can
       // carry them. Awaited here — the session is already held by a running
       // turn, so there's no reservation race to protect; gated on
@@ -727,6 +737,11 @@ export function createOrchestrator(
       const cur = active.get(sessionKey);
       if (!cur) {
         startReservedRun(msg, woven, sessionKey, flat, project, perm, images, true, text);
+        return;
+      }
+      // A goal may have started while media downloaded — same prompt as above.
+      if (cur.isGoal) {
+        await replyGoalBusy(msg, flat);
         return;
       }
       if (getPendingPolicy(cfg) === 'steer' && cur.run && cur.thread) {
@@ -747,6 +762,18 @@ export function createOrchestrator(
     }
 
     startReservedRun(msg, text, sessionKey, flat, project, perm);
+  }
+
+  /** 🎯 goal 运行中收到消息的统一提示（goal 会话不入队，见 ActiveState.isGoal）。 */
+  async function replyGoalBusy(msg: NormalizedMessage, flat: boolean): Promise<void> {
+    await channel
+      .send(
+        msg.chatId,
+        { markdown: '🎯 目标运行中，消息不会进入会话；可在卡片上 **⏹ 终止** 或 **🎯 结束目标** 后重发。' },
+        { replyTo: msg.messageId, replyInThread: !flat },
+      )
+      .catch(() => undefined);
+    log.info('intake', 'goal-busy', { msgId: msg.messageId });
   }
 
   /**
@@ -781,6 +808,12 @@ export function createOrchestrator(
           .catch(() => undefined);
         return;
       }
+      // A goal appeared in that window — its queue is never consumed, so prompt
+      // instead of queueing (same as handleTurn's isGoal gate).
+      if (existing.isGoal) {
+        void replyGoalBusy(msg, flat);
+        return;
+      }
       // A run appeared between handleTurn's check and here (we awaited an image
       // download) — queue onto it rather than launch a second turn. `text` is
       // already file-woven when preIngested (handleTurn's fall-through).
@@ -788,7 +821,7 @@ export function createOrchestrator(
       log.info('intake', 'queued', { depth: existing.queue.length });
       return;
     }
-    const reserved: ActiveState = { queue: [], requesterOpenId: msg.senderId };
+    const reserved: ActiveState = { queue: [], requesterOpenId: msg.senderId, isGoal: goal };
     active.set(sessionKey, reserved);
     void withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
       // Goal runs use the OKR reaction (added at dispatch) as their only receipt,
@@ -2350,8 +2383,21 @@ export function createOrchestrator(
         log.info('card', 'final', { terminal: render.terminal() });
 
         // A kill (⏹ / watchdog) or a dead process stops the whole run — drop any
-        // queued follow-ups (they'd run on the recycled, now-closed thread).
-        if (killed || procDead) break;
+        // queued follow-ups (they'd run on the recycled, now-closed thread), but
+        // tell the user instead of swallowing them.
+        if (killed || procDead) {
+          if (state.queue.length > 0) {
+            void channel
+              .send(
+                opts.chatId,
+                { markdown: `⚠️ ${state.queue.length} 条排队消息已丢弃，请重发。` },
+                { replyTo: finalMsgId, replyInThread: !opts.flat },
+              )
+              .catch(() => undefined);
+            log.info('intake', 'queue-dropped', { depth: state.queue.length, killed, procDead });
+          }
+          break;
+        }
         if (state.queue.length === 0) break;
         turnInput = state.queue.shift()!;
       }
@@ -2388,6 +2434,7 @@ export function createOrchestrator(
     let topicThreadId = opts.knownThreadId;
     const state: ActiveState = active.get(activeKey) ?? { queue: [], requesterOpenId: opts.requesterOpenId };
     state.thread = opts.thread;
+    state.isGoal = true; // messages during the goal get a prompt, never queue (handleTurn)
     if (opts.requesterOpenId) state.requesterOpenId = opts.requesterOpenId;
     active.set(activeKey, state);
     if (opts.knownThreadId) sessions.set(opts.knownThreadId, opts.thread);
