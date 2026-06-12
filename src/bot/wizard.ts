@@ -13,6 +13,13 @@ export async function runRegistrationWizard(): Promise<AppConfig> {
   console.log('\n未检测到飞书应用配置，进入扫码创建向导。\n');
 
   const result = await registerApp({
+    // 扫码后的创建页预填应用名/描述（用户仍可改；{user} 由飞书替换为扫码人姓名）。
+    // QR 预填仅支持 avatar/name/desc 三项——scope 与事件没有任何预填通道
+    // （见 config/scopes.ts 注释），avatar 需公网图床 URL，这里不带。
+    appPreset: {
+      name: 'Codex Bridge',
+      desc: '{user} 的 Codex 助手：群里 @我，就在绑定的项目目录里干活（feishu-codex-bridge）',
+    },
     onQRCodeReady: (info) => {
       console.log('请用飞书 App 扫描以下二维码完成应用创建：\n');
       qrcode.generate(info.url, { small: true });

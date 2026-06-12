@@ -5,6 +5,13 @@ import { isComplete, secretKeyForApp, type AppConfig } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
 import { runRegistrationWizard } from './wizard';
 import { validateAppCredentials } from '../utils/feishu-auth';
+import {
+  diagnoseEventSubscription,
+  pollEventSubscription,
+  summarizeEventDiagnosis,
+  REQUIRED_EVENTS,
+  type EventDiagnosis,
+} from '../utils/event-diagnosis';
 import { buildScopeGrantUrl, buildEventConfigUrl, labelScope } from '../config/scopes';
 import { createBackend } from '../agent';
 import { openUrl } from '../utils/open-url';
@@ -17,6 +24,8 @@ export interface OnboardResult {
   secret: string;
   /** required scopes still ungranted at validation time (undefined = couldn't check). */
   missingScopes?: string[];
+  /** 事件订阅诊断（版本信息 API，三态 + unchecked 降级；undefined = 没跑诊断）。 */
+  events?: EventDiagnosis;
 }
 
 /** Verify the default agent backend (codex CLI) is runnable — needed to run AND
@@ -80,7 +89,7 @@ export async function ensureOnboarded(
   }
   const r = await validateAndReport(cfg);
   if (r === null) return null;
-  return { cfg, secret: r.secret, missingScopes: r.missingScopes };
+  return { cfg, secret: r.secret, missingScopes: r.missingScopes, events: r.events };
 }
 
 /**
@@ -128,16 +137,19 @@ export async function registerNewBot(desiredName?: string): Promise<OnboardResul
   console.log(`✓ 已创建机器人「${name}」  bot: ${v.botName ?? '-'}  appId: ${app.id}`);
   log.info('onboard', 'bot-created', { name, appId: app.id, bot: v.botName ?? null });
   noticeMissingScopes(cfg, v.missingScopes);
+  const events = await diagnoseEventSubscription(app.id, app.secret, app.tenant);
+  noticeEventDiagnosis(cfg, events);
 
   const secret = await resolveAppSecret(cfg);
-  return { cfg, secret, missingScopes: v.missingScopes };
+  return { cfg, secret, missingScopes: v.missingScopes, events };
 }
 
 /** Resolve secret, validate credentials, report result; on missing scopes,
- *  print the non-blocking notice (see {@link noticeMissingScopes}). */
+ *  print the non-blocking notice (see {@link noticeMissingScopes}); then run the
+ *  event-subscription diagnosis and report it too (same notice-only policy). */
 async function validateAndReport(
   cfg: AppConfig,
-): Promise<{ secret: string; missingScopes?: string[] } | null> {
+): Promise<{ secret: string; missingScopes?: string[]; events: EventDiagnosis } | null> {
   const secret = await resolveAppSecret(cfg);
   const v = await validateAppCredentials(cfg.accounts.app.id, secret, cfg.accounts.app.tenant);
   if (!v.ok) {
@@ -148,7 +160,9 @@ async function validateAndReport(
   console.log(`✓ 凭据校验通过  bot: ${v.botName ?? '-'}  appId: ${cfg.accounts.app.id}`);
   log.info('onboard', 'credentials-ok', { appId: cfg.accounts.app.id, bot: v.botName ?? null });
   noticeMissingScopes(cfg, v.missingScopes);
-  return { secret, missingScopes: v.missingScopes };
+  const events = await diagnoseEventSubscription(cfg.accounts.app.id, secret, cfg.accounts.app.tenant);
+  noticeEventDiagnosis(cfg, events);
+  return { secret, missingScopes: v.missingScopes, events };
 }
 
 /**
@@ -156,23 +170,35 @@ async function validateAndReport(
  * scopes are deliberately NOT handled here: {@link validateAndReport} already
  * printed the non-blocking notice during onboarding, and we never block daemon
  * install on scopes (some tenants can't grant on demand; 诊断 grants later). What
- * remains is events & callbacks, which have NO API to verify (not even a read)
- * and no deep-preselect — so we print exact click-paths and trust the operator's
- * Enter. No-op off a TTY (scripted re-install / codex). Always returns true on a
- * TTY now; the boolean is kept for the signature `start` relies on.
+ * remains is events & callbacks, which have NO write API and no deep-preselect —
+ * so we print exact click-paths and trust the operator's Enter. The subscription
+ * *state* is readable though (version-info API): when the diagnosis already says
+ * ok we skip the wall of text and just confirm. No-op off a TTY (scripted
+ * re-install / codex). Always returns true on a TTY now; the boolean is kept for
+ * the signature `start` relies on.
  */
 export async function confirmReadyForDaemon(result: OnboardResult): Promise<boolean> {
   if (!process.stdin.isTTY) return true;
   const { app } = result.cfg.accounts;
 
-  // Events AND callbacks have no API at all (not even a read to verify), and no
-  // deep-preselect — only scopes have those. So this is the one truly-manual,
-  // un-checkable step: print exact click-paths and trust the operator's Enter.
+  // 诊断已确认事件订阅生效 → 不再甩整面墙的手动步骤，只留一条无法检测的回调提醒。
+  if (result.events?.state === 'ok') {
+    console.log(`\n✅ 事件订阅检测：${summarizeEventDiagnosis(result.events)}`);
+    console.log('   （卡片按钮若无反应，去后台「回调配置」标签检查 card.action.trigger——回调没有查询接口，无法自动检测。）');
+    await promptEnter('\n按 Enter 安装后台服务（Ctrl+C 取消）… ');
+    return true;
+  }
+
+  // Events AND callbacks have no *write* API and no deep-preselect — only scopes
+  // have those. So this stays a manual step: print exact click-paths and trust
+  // the operator's Enter. (The diagnosis above tells us subscription state via
+  // the read-only version-info API; callbacks aren't in it, so still spell out:)
   // The classic trap: card.action.trigger is a *callback* (回调配置 tab), NOT an
   // event — searching for it under 「添加事件」 finds nothing. Spell out the tabs.
   const eventUrl = buildEventConfigUrl(app.id, app.tenant);
   const opened = openUrl(eventUrl);
-  console.log('\n最后这几步飞书没有 API/深链可代办（连查询订阅状态的接口都没有），需你手动点：\n');
+  if (result.events) console.log(`\n事件订阅检测：${summarizeEventDiagnosis(result.events)}`);
+  console.log('\n最后这几步飞书没有写入 API/深链可代办（只能查、不能配），需你手动点：\n');
   console.log(`  【1】事件与回调（${opened ? '已自动打开' : '打开下面链接'}）：${eventUrl}`);
   console.log('       这页顶部有三个标签：「事件配置」「回调配置」「加密策略」。');
   console.log('       • 切到「事件配置」标签 → 「订阅方式」改「长连接」→ 点「添加事件」搜并勾选：');
@@ -230,6 +256,71 @@ function noticeMissingScopes(cfg: AppConfig, missingScopes: string[] | undefined
   console.log(`   👉 ${url}`);
   console.log('   不想现在弄也行：之后私聊机器人 →「🩺 诊断」可随时再申请。');
   console.log(`${rule}\n`);
+}
+
+/**
+ * 事件订阅诊断结果只「告知」，绝不阻塞启动、绝不读 stdin（同 noticeMissingScopes
+ * 的既有策略）。这里**不**自动开浏览器——事件页保存「长连接」要求连接在线，开页
+ * 时机交给 {@link announceEventsWhenLive}（run 在 startBridge 之后调）。
+ */
+function noticeEventDiagnosis(cfg: AppConfig, d: EventDiagnosis): void {
+  log.info('onboard', 'event-diagnosis', { state: d.state, ...(d.reason ? { reason: d.reason } : {}), ...(d.missingRequired?.length ? { missingRequired: d.missingRequired } : {}) });
+  if (d.state === 'ok') {
+    console.log(`✓ 事件订阅检测：${summarizeEventDiagnosis(d)}`);
+    if (d.missingOptional?.length) {
+      console.log(`  （可选事件未订阅：${d.missingOptional.join('、')} —— 对应功能静默关闭，需要时去后台「事件配置」添加。）`);
+    }
+    return;
+  }
+  if (d.state === 'unchecked') {
+    // 缺 scope / 网络不通：优雅降级，一行带过，别在每次启动刷屏。
+    console.log(`· 事件订阅检测：${summarizeEventDiagnosis(d)}；若 @我 没反应，请照 README 检查「事件与回调」配置。`);
+    return;
+  }
+  // unpublished / missing：@bot 必然没反应，给精确指引（仍不阻塞）。
+  const url = buildEventConfigUrl(cfg.accounts.app.id, cfg.accounts.app.tenant);
+  const rule = '-'.repeat(64);
+  console.log(`\n${rule}`);
+  console.log(`⚠️  事件订阅检测：${summarizeEventDiagnosis(d)}`);
+  if (d.state === 'unpublished') {
+    console.log('   去「事件与回调 → 事件配置」订阅方式选「长连接」、添加事件');
+    console.log(`   ${REQUIRED_EVENTS.join('、')}，再到「应用发布」创建版本并发布：`);
+  } else {
+    console.log('   去「事件与回调 → 事件配置」添加上面缺的事件，再发布一个新版本：');
+  }
+  console.log(`   👉 ${url}`);
+  console.log('   配置生效后我会在这里播报「事件已生效」。');
+  console.log(`${rule}\n`);
+}
+
+/**
+ * run 专用收尾：bridge 已在线（满足事件页保存「长连接」须在线的硬前置）后，若
+ * 诊断显示事件未生效（unpublished/missing），自动打开「事件与回调」深链（TTY 才
+ * 开浏览器，非 TTY no-op），并轮询版本 API；用户配完 + 发布版本后主动播报
+ * 「事件已生效」。ok / unchecked / 没诊断 → no-op。绝不 throw（fire-and-forget）。
+ */
+export async function announceEventsWhenLive(result: OnboardResult): Promise<void> {
+  const d = result.events;
+  if (!d || d.state === 'ok' || d.state === 'unchecked') return;
+  const { app } = result.cfg.accounts;
+  try {
+    const url = buildEventConfigUrl(app.id, app.tenant);
+    const opened = openUrl(url);
+    console.log(
+      opened
+        ? '🌐 已自动打开「事件与回调」配置页（长连接已在线，可直接保存）；配置好并发布版本后我会播报。'
+        : `· 事件配置页：${url}（长连接已在线，可直接保存；配置好并发布版本后我会播报。）`,
+    );
+    const ok = await pollEventSubscription(app.id, result.secret, app.tenant);
+    if (ok) {
+      console.log(`\n✅ 事件已生效：${summarizeEventDiagnosis(ok)} —— 现在去群里 @我 即可开工。`);
+      log.info('onboard', 'events-live', { appId: app.id, version: ok.version ?? null });
+    } else {
+      log.info('onboard', 'events-poll-timeout', { appId: app.id });
+    }
+  } catch (err) {
+    log.fail('onboard', err, { phase: 'announce-events' });
+  }
 }
 
 export type { BotEntry };

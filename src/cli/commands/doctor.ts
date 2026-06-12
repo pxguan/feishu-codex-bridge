@@ -3,6 +3,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { paths, useBotDir } from '../../config/paths';
 import { ensureRegistry, currentBot } from '../../config/bots';
+import { loadConfig } from '../../config/store';
+import { isComplete } from '../../config/schema';
+import { resolveAppSecret } from '../../config/secret-resolver';
+import { buildEventConfigUrl } from '../../config/scopes';
+import { diagnoseEventSubscription, summarizeEventDiagnosis } from '../../utils/event-diagnosis';
 import { createBackend } from '../../agent';
 import { spawnProcessSync } from '../../platform/spawn';
 
@@ -10,6 +15,8 @@ interface Check {
   name: string;
   ok: boolean;
   detail: string;
+  /** true = 降级告警（⚠️，不计入失败数）——如缺可选 scope 导致事件订阅查不了。 */
+  warn?: boolean;
 }
 
 /**
@@ -69,14 +76,46 @@ export async function runDoctor(): Promise<void> {
     });
   }
 
+  // 事件订阅 — 版本信息 API 三态诊断（从未发布版本 / 缺 im.message.receive_v1 /
+  // 配置齐全）。缺 scope / 网络不通 → warn 降级（⚠️，不计失败、不挡 exit code）。
+  if (cur && existsSync(paths.configFile)) {
+    checks.push(await checkEventSubscription());
+  }
+
   // render
   console.log('\n🩺 feishu-codex-bridge 自检\n');
   for (const c of checks) {
-    console.log(`  ${c.ok ? '✅' : '❌'} ${c.name.padEnd(12)} ${c.detail}`);
+    console.log(`  ${c.ok ? (c.warn ? '⚠️' : '✅') : '❌'} ${c.name.padEnd(12)} ${c.detail}`);
   }
   const failed = checks.filter((c) => !c.ok).length;
   console.log(`\n${failed === 0 ? '全部通过 ✓' : `${failed} 项需处理`}\n`);
   process.exitCode = failed === 0 ? 0 : 1;
+}
+
+/** 当前机器人的事件订阅诊断（useBotDir 已切到该 bot 的配置目录）。 */
+async function checkEventSubscription(): Promise<Check> {
+  const name = '事件订阅';
+  try {
+    const cfg = await loadConfig();
+    if (!isComplete(cfg)) return { name, ok: true, warn: true, detail: '配置缺失，跳过检测' };
+    const { app } = cfg.accounts;
+    const secret = await resolveAppSecret(cfg);
+    const d = await diagnoseEventSubscription(app.id, secret, app.tenant);
+    const summary = summarizeEventDiagnosis(d);
+    switch (d.state) {
+      case 'ok': {
+        const opt = d.missingOptional?.length ? `（可选事件未订阅：${d.missingOptional.join('、')}）` : '';
+        return { name, ok: true, detail: `${summary}${opt}` };
+      }
+      case 'unchecked':
+        // 优雅降级：多半是没开通「获取应用版本信息」scope —— 提示但不算失败。
+        return { name, ok: true, warn: true, detail: `${summary}；开通 application:application.app_version:readonly 后可自动检测` };
+      default:
+        return { name, ok: false, detail: `${summary}；去 ${buildEventConfigUrl(app.id, app.tenant)} 配置后发布版本` };
+    }
+  } catch (err) {
+    return { name, ok: true, warn: true, detail: `未能检测（${err instanceof Error ? err.message : String(err)}）` };
+  }
 }
 
 function tryExec(cmd: string, args: string[]): string | null {

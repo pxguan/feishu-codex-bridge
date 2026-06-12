@@ -89,12 +89,24 @@ export const JOIN_GROUP_SCOPES = [
  */
 export const CONTACT_SCOPES = ['contact:user.base:readonly'] as const;
 
+/**
+ * Optional scope for the event-subscription auto-diagnosis (doctor / 启动自检 /
+ * DM 诊断卡). `GET application/v6/applications/:app_id/app_versions` 的响应含
+ * `events`（已订阅事件列表），凭它可三态诊断「从未发布版本 / 缺
+ * im.message.receive_v1 / 配置齐全」——事件订阅本身没有写入类 API，这是唯一的
+ * 只读检测通道（见 utils/event-diagnosis.ts）。Like the other opt-in groups,
+ * deliberately NOT in {@link REQUIRED_SCOPES}: without it diagnosis degrades to
+ * 「未能自动检测」and everything else still works — never gate startup on it.
+ */
+export const APP_VERSION_SCOPES = ['application:application.app_version:readonly'] as const;
+
 /** Everything the one-click grant URL pre-selects: required + opt-in extras. */
 export const GRANT_SCOPES = [
   ...REQUIRED_SCOPES,
   ...COMMENT_SCOPES,
   ...JOIN_GROUP_SCOPES,
   ...CONTACT_SCOPES,
+  ...APP_VERSION_SCOPES,
 ] as const;
 
 /**
@@ -125,6 +137,7 @@ export const SCOPE_LABELS: Record<string, string> = {
   'docs:document.comment:create': '发表文档评论回复',
   'wiki:wiki:readonly': '读取知识库节点',
   'contact:user.base:readonly': '读取成员姓名（管理员 / 白名单展示）',
+  'application:application.app_version:readonly': '读取应用版本信息（自动诊断事件订阅）',
 };
 
 /** `<中文说明>（<token>）` for a known scope, else the raw token. */
@@ -161,7 +174,9 @@ export function buildScopeGrantUrl(
  * `?q=` pre-select and **no** API to subscribe events/callbacks for a self-built
  * app — both the 事件配置 (im.message.receive_v1, application.bot.menu_v6) and
  * 回调配置 (card.action.trigger / 卡片回传交互) tabs must be filled in by hand.
- * The best we can do is deep-link to the page and auto-open it.
+ * The best we can do is deep-link to the page and auto-open it. The subscription
+ * *state* IS readable though (app-version API, see utils/event-diagnosis.ts), so
+ * run/doctor diagnose precisely and announce once the config takes effect.
  */
 export function buildEventConfigUrl(appId: string, tenant: TenantBrand): string {
   return `https://${HOSTS[tenant]}/app/${encodeURIComponent(appId)}/event`;

@@ -190,3 +190,100 @@ describe('buildDoctorCard — 加入存量群（opt-in scope 提示）', () => {
     expect(collectUrls(card)).toContain(JOIN_GRANT);
   });
 });
+
+describe('buildDoctorCard — 事件订阅诊断（版本信息 API）', () => {
+  const EVT_URL = 'https://open.feishu.cn/app/cli_x/event';
+
+  it('eventDiagnosis 未接线（undefined）→ 整块不渲染，保持旧卡片形状', () => {
+    const json = JSON.stringify(buildDoctorCard(info()));
+    expect(json).not.toContain('事件订阅');
+    // join 块退回人工提醒（未能自动检测）
+    expect(json).toContain('未能自动检测');
+  });
+
+  it('ok → ✅ + 版本号，header 保持蓝，可选缺失单列', () => {
+    const card = buildDoctorCard(
+      info({
+        eventDiagnosis: {
+          state: 'ok',
+          version: '1.0.2',
+          events: ['im.message.receive_v1'],
+          missingRequired: [],
+          missingOptional: ['application.bot.menu_v6'],
+        },
+        eventConfigUrl: EVT_URL,
+      }),
+    );
+    const json = JSON.stringify(card);
+    expect(json).toContain('事件订阅：✅');
+    expect(json).toContain('v1.0.2');
+    expect(json).toContain('可选事件未订阅');
+    expect(json).toContain('application.bot.menu_v6');
+    expect((card as { header: { template: string } }).header.template).toBe('blue');
+  });
+
+  it('missing → orange + 缺的事件名 + 去事件配置页按钮', () => {
+    const card = buildDoctorCard(
+      info({
+        eventDiagnosis: { state: 'missing', version: '1.0.0', events: [], missingRequired: ['im.message.receive_v1'] },
+        eventConfigUrl: EVT_URL,
+      }),
+    );
+    const json = JSON.stringify(card);
+    expect((card as { header: { template: string } }).header.template).toBe('orange');
+    expect(json).toContain('im.message.receive_v1');
+    expect(json).toContain('@我 不会有反应');
+    expect(collectUrls(card)).toContain(EVT_URL);
+  });
+
+  it('unpublished → orange + 从未发布 + 发布指引', () => {
+    const card = buildDoctorCard(info({ eventDiagnosis: { state: 'unpublished' }, eventConfigUrl: EVT_URL }));
+    const json = JSON.stringify(card);
+    expect((card as { header: { template: string } }).header.template).toBe('orange');
+    expect(json).toContain('从未发布');
+    expect(json).toContain('创建版本并发布');
+    expect(collectUrls(card)).toContain(EVT_URL);
+  });
+
+  it('unchecked → 保持蓝（降级非硬故障）+ 提示开通诊断 scope', () => {
+    const card = buildDoctorCard(info({ eventDiagnosis: { state: 'unchecked', reason: 'code=99991672 msg=no permission' } }));
+    const json = JSON.stringify(card);
+    expect((card as { header: { template: string } }).header.template).toBe('blue');
+    expect(json).toContain('无法自动检查');
+    expect(json).toContain('application:application.app_version:readonly');
+  });
+
+  it('诊断状态织进复制给 codex 的提示词', () => {
+    const prompt = codeBlock(
+      buildDoctorCard(info({ eventDiagnosis: { state: 'unpublished' }, eventConfigUrl: EVT_URL })),
+    );
+    expect(prompt).toContain('事件订阅：');
+    expect(prompt).toContain('从未发布');
+  });
+
+  it('join 块在 events 可知时按真实订阅状态渲染', () => {
+    const subscribed = JSON.stringify(
+      buildDoctorCard(
+        info({
+          eventDiagnosis: {
+            state: 'ok',
+            version: '1.0.0',
+            events: ['im.message.receive_v1', 'im.chat.member.bot.added_v1', 'im.chat.member.bot.deleted_v1'],
+            missingRequired: [],
+            missingOptional: [],
+          },
+        }),
+      ),
+    );
+    expect(subscribed).toContain('事件：✅ 已订阅');
+    const missing = JSON.stringify(
+      buildDoctorCard(
+        info({
+          eventDiagnosis: { state: 'ok', version: '1.0.0', events: ['im.message.receive_v1'], missingRequired: [] },
+        }),
+      ),
+    );
+    expect(missing).toContain('还需在后台「事件与回调」订阅');
+    expect(missing).toContain('im.chat.member.bot.added_v1');
+  });
+});

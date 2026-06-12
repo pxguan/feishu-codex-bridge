@@ -11,6 +11,7 @@ import { defaultNoMention, effectiveGuestMode, effectiveMode, type Project } fro
 import type { PermissionMode } from '../agent/types';
 import type { SessionRecord } from '../bot/session-store';
 import { labelScope } from '../config/scopes';
+import { summarizeEventDiagnosis, type EventDiagnosis } from '../utils/event-diagnosis';
 import { actions, button, card, form, hr, input, linkButton, md, note, selectMenu, submitButton, type CardElement, type CardObject, type SelectOption } from './cards';
 import { relativeTime } from './command-cards';
 
@@ -258,6 +259,14 @@ export interface DoctorInfo {
   missingJoinScopes?: string[];
   /** 一键开通页，预选「加入存量群」那两项 scope。 */
   joinScopeGrantUrl: string;
+  /**
+   * 事件订阅诊断（版本信息 API：从未发布版本 / 缺 im.message.receive_v1 / 配置
+   * 齐全，外加 unchecked 降级；见 utils/event-diagnosis.ts）。undefined = 调用方
+   * 未接线 / 没跑诊断 → 卡片不渲染该块（保持旧行为，与 unchecked 严格区分）。
+   */
+  eventDiagnosis?: EventDiagnosis;
+  /** 开发者后台「事件与回调」页深链（无预选参数可用，纯落地页）。 */
+  eventConfigUrl?: string;
 }
 
 /** Friendly label for a long-connection state; unknown states show raw. */
@@ -306,9 +315,46 @@ function scopeDiagnosis(i: DoctorInfo): CardElement[] {
 }
 
 /**
+ * 「事件订阅」诊断块：版本信息 API 的三态 + unchecked 降级。eventDiagnosis 没接线
+ * （undefined）时整块不渲染，保持旧卡片形状——接线只需 handler 多填两个字段。
+ */
+function eventSubscriptionDiagnosis(i: DoctorInfo): CardElement[] {
+  const d = i.eventDiagnosis;
+  if (!d) return [];
+  const goBtn: CardElement[] = i.eventConfigUrl ? [actions([linkButton('⚡ 去事件配置页', i.eventConfigUrl)])] : [];
+  switch (d.state) {
+    case 'ok': {
+      const out: CardElement[] = [md(`- 事件订阅：✅ 版本 v${d.version ?? '?'} 已订阅 \`im.message.receive_v1\``)];
+      if (d.missingOptional?.length) {
+        out.push(note(`可选事件未订阅（对应功能静默关闭）：\n${d.missingOptional.map((e) => `· ${e}`).join('\n')}`));
+      }
+      return out;
+    }
+    case 'missing':
+      return [
+        md(`- 事件订阅：❌ 已发布版本 v${d.version ?? '?'} 缺 ${(d.missingRequired ?? []).map((e) => `\`${e}\``).join('、')} —— @我 不会有反应`),
+        note('去「事件配置」标签添加缺的事件（订阅方式选长连接），再创建版本并发布生效。'),
+        ...goBtn,
+      ];
+    case 'unpublished':
+      return [
+        md('- 事件订阅：❌ 从未发布过版本 —— 事件订阅未生效，@我 不会有反应'),
+        note('去「事件配置」标签订阅 `im.message.receive_v1`（订阅方式选长连接），再到「应用发布」创建版本并发布。'),
+        ...goBtn,
+      ];
+    case 'unchecked':
+      return [
+        md(`- 事件订阅：⚠️ 无法自动检查（${d.reason ?? '未知原因'}）`),
+        note('开通「读取应用版本信息」权限（application:application.app_version:readonly，上方 🔑 一键开通链接已含）后可自动检测。'),
+      ];
+  }
+}
+
+/**
  * 「加入存量群」诊断块：这俩 scope 是 opt-in（不在 REQUIRED_SCOPES 里，所以
- * 启动/凭据校验都不会提示），事件又没法查——存量用户最容易漏。这里把 scope
- * 状态显式渲染出来、缺失时给「去开通」按钮，并恒附一条无法自动检测的事件提醒。
+ * 启动/凭据校验都不会提示），存量用户最容易漏。这里把 scope 状态显式渲染出来、
+ * 缺失时给「去开通」按钮；事件订阅状态有诊断结果（eventDiagnosis.events）时按
+ * 真实状态渲染，否则附一条未能自动检测的提醒。
  */
 function joinFeatureDiagnosis(i: DoctorInfo): CardElement[] {
   const out: CardElement[] = [md('**加入存量群（可选）**')];
@@ -323,12 +369,23 @@ function joinFeatureDiagnosis(i: DoctorInfo): CardElement[] {
       actions([linkButton('🔑 一键开通这两项权限', i.joinScopeGrantUrl)]),
     );
   }
-  out.push(
-    note(
-      '⚠️ 还需在后台「事件与回调」手动订阅 `im.chat.member.bot.added_v1`（被拉进群→推送绑定卡）和 ' +
-        '`im.chat.member.bot.deleted_v1`（被移出群→自动解绑）—— 飞书无查询接口，这里无法自动检测。',
-    ),
-  );
+  const subscribed = i.eventDiagnosis?.events;
+  if (subscribed) {
+    const wanted = ['im.chat.member.bot.added_v1', 'im.chat.member.bot.deleted_v1'];
+    const missing = wanted.filter((e) => !subscribed.includes(e));
+    out.push(
+      missing.length === 0
+        ? note('事件：✅ 已订阅 `im.chat.member.bot.added_v1` / `im.chat.member.bot.deleted_v1`')
+        : note(`⚠️ 还需在后台「事件与回调」订阅：${missing.map((e) => `\`${e}\``).join('、')} —— 缺则该功能静默关闭。`),
+    );
+  } else {
+    out.push(
+      note(
+        '⚠️ 还需在后台「事件与回调」手动订阅 `im.chat.member.bot.added_v1`（被拉进群→推送绑定卡）和 ' +
+          '`im.chat.member.bot.deleted_v1`（被移出群→自动解绑）—— 本次未能自动检测订阅状态（需「读取应用版本信息」权限）。',
+      ),
+    );
+  }
   return out;
 }
 
@@ -353,6 +410,7 @@ function codexDiagnosePrompt(i: DoctorInfo): string {
     `- codex 可用：${i.codexOk ? '是' : '否'}`,
     `- 飞书长连接：${i.conn}`,
     `- 飞书权限：${scopeStatusText(i)}`,
+    ...(i.eventDiagnosis ? [`- 事件订阅：${summarizeEventDiagnosis(i.eventDiagnosis)}`] : []),
     '',
     '【请你做的事】',
     '1. 读取并分析日志，找出最近的报错或异常堆栈：',
@@ -377,8 +435,13 @@ function codexDiagnosePrompt(i: DoctorInfo): string {
  */
 export function buildDoctorCard(i: DoctorInfo): CardObject {
   const prompt = codexDiagnosePrompt(i);
-  // codex 不可用、或明确查到缺权限 → 橙色警示；"没查成"(undefined) 不算硬故障，保持蓝。
-  const hasProblem = !i.codexOk || (i.missingScopes !== undefined && i.missingScopes.length > 0);
+  // codex 不可用、明确查到缺权限、或事件订阅明确未生效 → 橙色警示；
+  // "没查成"(undefined / unchecked) 不算硬故障，保持蓝。
+  const hasProblem =
+    !i.codexOk ||
+    (i.missingScopes !== undefined && i.missingScopes.length > 0) ||
+    i.eventDiagnosis?.state === 'missing' ||
+    i.eventDiagnosis?.state === 'unpublished';
   return card(
     [
       md('**初步诊断**'),
@@ -387,6 +450,7 @@ export function buildDoctorCard(i: DoctorInfo): CardObject {
       ),
       md(`- 飞书长连接：${connLabel(i.conn)}`),
       ...scopeDiagnosis(i),
+      ...eventSubscriptionDiagnosis(i),
       note(`bridge v${i.bridgeVer}　·　Node ${i.node}　·　${i.platform}`),
       hr(),
       ...joinFeatureDiagnosis(i),

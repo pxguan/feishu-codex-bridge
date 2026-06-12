@@ -1,4 +1,4 @@
-import { ensureOnboarded } from '../../bot/onboarding';
+import { ensureOnboarded, announceEventsWhenLive } from '../../bot/onboarding';
 import { startBridge } from '../../bot/bridge';
 import { runSupervisor } from '../../bot/supervisor';
 import { acquireSingleInstanceLock, BridgeAlreadyRunningError } from '../../core/single-instance';
@@ -73,6 +73,9 @@ async function runSingle(botName?: string): Promise<void> {
   console.log('\n正在启动长连接 bot…');
   console.log('私聊我 `/new <名>` 建项目；在项目群里 @我 干活。Ctrl+C 退出。\n');
   const handle = await startBridge({ cfg, appSecret: secret, fallbackCwd });
+  // 长连接已在线（事件页保存的硬前置）→ 事件未订阅时自动开配置深链 + 轮询版本 API，
+  // 配置生效后播报「事件已生效」。fire-and-forget，自身绝不 throw。
+  void announceEventsWhenLive(ready);
 
   let stopping = false;
   const stop = (sig: NodeJS.Signals): void => {
