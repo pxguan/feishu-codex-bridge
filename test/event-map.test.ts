@@ -123,11 +123,60 @@ describe('mapNotification', () => {
     ).toEqual({ type: 'tool_result', itemId: 'cmd-2', output: undefined, exitCode: 1 });
   });
 
+  it('maps fileChange to a titled diff tool (path + add/del counts, fenced diff output)', () => {
+    const changes = [{ path: 'src/foo.ts', kind: 'update', diff: '@@ -1,2 +1,3 @@\n-old\n+new\n+more\n context' }];
+    expect(mapNotification(itemStarted({ type: 'fileChange', id: 'file-1', changes } as unknown as ThreadItem))).toEqual({
+      type: 'tool_use',
+      itemId: 'file-1',
+      title: '编辑 src/foo.ts (+2 −1)',
+    });
+    expect(mapNotification(itemCompleted({ type: 'fileChange', id: 'file-1', changes } as unknown as ThreadItem))).toEqual({
+      type: 'tool_result',
+      itemId: 'file-1',
+      output: '```diff\n@@ -1,2 +1,3 @@\n-old\n+new\n+more\n context\n```',
+    });
+  });
+
+  it('lists the first files + a count for a multi-file fileChange, ignoring ---/+++ headers', () => {
+    const changes = [
+      { path: 'a.ts', kind: 'update', diff: '--- a/a.ts\n+++ b/a.ts\n+x' },
+      { path: 'b.ts', kind: 'update', diff: '+y\n-z' },
+      { path: 'c.ts', kind: 'update', diff: '+w' },
+    ];
+    const evt = mapNotification(itemStarted({ type: 'fileChange', id: 'file-2', changes } as unknown as ThreadItem));
+    expect(evt).toEqual({ type: 'tool_use', itemId: 'file-2', title: '编辑 a.ts、b.ts 等 3 个文件 (+3 −1)' });
+
+    const done = mapNotification(itemCompleted({ type: 'fileChange', id: 'file-2', changes } as unknown as ThreadItem));
+    const output = (done as { output: string }).output;
+    // multi-file: each chunk keyed by a diff-native header, all in ONE ```diff fence
+    expect(output.startsWith('```diff\n')).toBe(true);
+    expect(output).toContain('diff --git a/a.ts b/a.ts');
+    expect(output).toContain('diff --git a/c.ts b/c.ts');
+    expect(output.endsWith('\n```')).toBe(true);
+  });
+
+  it('truncates an oversized fileChange diff but keeps the fence closed', () => {
+    const changes = [{ path: 'big.ts', kind: 'update', diff: `+${'x'.repeat(5000)}` }];
+    const evt = mapNotification(itemCompleted({ type: 'fileChange', id: 'file-3', changes } as unknown as ThreadItem));
+    const output = (evt as { output: string }).output;
+    expect(output.length).toBeLessThan(1400);
+    expect(output).toContain('```diff\n');
+    expect(output).toContain('已截断，完整 diff 5001 字符');
+    // the fence is closed BEFORE the truncation note
+    expect(output).toMatch(/```\n_（已截断/);
+  });
+
   it('maps supported non-command tool items to tool events', () => {
+    // fileChange without changes (defensive) → the old fixed label, no output
     expect(mapNotification(itemStarted({ type: 'fileChange', id: 'file-1' } as ThreadItem))).toEqual({
       type: 'tool_use',
       itemId: 'file-1',
       title: '编辑文件',
+    });
+    expect(mapNotification(itemCompleted({ type: 'fileChange', id: 'file-1' } as ThreadItem))).toEqual({
+      type: 'tool_result',
+      itemId: 'file-1',
+      output: undefined,
     });
     expect(mapNotification(itemStarted({ type: 'webSearch', id: 'search-1' } as ThreadItem))).toEqual({
       type: 'tool_use',

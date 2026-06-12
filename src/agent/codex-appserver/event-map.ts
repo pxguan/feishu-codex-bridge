@@ -1,5 +1,15 @@
 import type { AgentEvent } from '../types';
-import type { ServerNotification, ThreadItem } from './protocol';
+import type { FileUpdateChange, ServerNotification, ThreadItem } from './protocol';
+
+/** Files named in a fileChange title before collapsing to `等 N 个文件`. */
+const TITLE_FILES_MAX = 2;
+/**
+ * Cap on the rendered diff body. Pre-fenced output bypasses the card layer's
+ * OUTPUT_MAX belt (re-truncating would cut the closing fence), so the diff
+ * caps itself here — same budget, and the fenced block stays well under the
+ * card layer's BODY_TOTAL_MAX.
+ */
+const DIFF_MAX = 1200;
 
 /**
  * Map one app-server ServerNotification to a normalized AgentEvent.
@@ -62,7 +72,7 @@ function mapItemStart(item: ThreadItem): AgentEvent | null {
     case 'commandExecution':
       return { type: 'tool_use', itemId: item.id, title: item.command, detail: String(item.cwd) };
     case 'fileChange':
-      return { type: 'tool_use', itemId: item.id, title: '编辑文件' };
+      return { type: 'tool_use', itemId: item.id, title: fileChangeTitle(item.changes) };
     case 'webSearch':
       return { type: 'tool_use', itemId: item.id, title: '联网搜索' };
     case 'mcpToolCall':
@@ -89,6 +99,7 @@ function mapItemComplete(item: ThreadItem): AgentEvent | null {
         exitCode: item.exitCode,
       };
     case 'fileChange':
+      return { type: 'tool_result', itemId: item.id, output: fileChangeDiffMd(item.changes) };
     case 'webSearch':
     case 'mcpToolCall':
     case 'dynamicToolCall':
@@ -96,4 +107,38 @@ function mapItemComplete(item: ThreadItem): AgentEvent | null {
     default:
       return null;
   }
+}
+
+/** `编辑 src/foo.ts (+12 −3)` — multi-file lists the first N paths + a count;
+ * +/− aggregate over every file's diff. Falls back to the old fixed label when
+ * codex sent no changes. */
+function fileChangeTitle(changes: FileUpdateChange[] | undefined): string {
+  if (!changes?.length) return '编辑文件';
+  let adds = 0;
+  let dels = 0;
+  for (const c of changes) {
+    for (const line of c.diff.split('\n')) {
+      if (line.startsWith('+') && !line.startsWith('+++')) adds++;
+      else if (line.startsWith('-') && !line.startsWith('---')) dels++;
+    }
+  }
+  const names = changes.slice(0, TITLE_FILES_MAX).map((c) => c.path).join('、');
+  const files = changes.length > TITLE_FILES_MAX ? `${names} 等 ${changes.length} 个文件` : names;
+  return `编辑 ${files} (+${adds} −${dels})`;
+}
+
+/** The changes as ONE pre-fenced ```diff block (truncated at {@link DIFF_MAX}).
+ * The card layer passes pre-fenced output through as-is, so Feishu's diff
+ * highlighting (red/green lines) survives. Multi-file chunks get a diff-native
+ * `diff --git` header so each file stays identifiable inside the block. */
+function fileChangeDiffMd(changes: FileUpdateChange[] | undefined): string | undefined {
+  if (!changes?.length) return undefined;
+  const joined = changes
+    .map((c) => (changes.length > 1 ? `diff --git a/${c.path} b/${c.path}\n${c.diff}` : c.diff))
+    .join('\n')
+    .replace(/\n+$/, '');
+  const cut = joined.length > DIFF_MAX;
+  const body = cut ? `${joined.slice(0, DIFF_MAX)}…` : joined;
+  const note = cut ? `\n_（已截断，完整 diff ${joined.length} 字符）_` : '';
+  return `\`\`\`diff\n${body}\n\`\`\`${note}`;
 }

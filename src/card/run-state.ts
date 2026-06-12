@@ -33,7 +33,7 @@ export interface ReasoningItem {
   text: string;
 }
 
-export type FooterStatus = 'thinking' | 'tool_running' | 'streaming' | null;
+export type FooterStatus = 'thinking' | 'tool_running' | 'streaming' | 'retrying' | null;
 export type Terminal = 'running' | 'done' | 'interrupted' | 'error' | 'idle_timeout';
 
 export interface RunState {
@@ -183,6 +183,13 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
     // folded into the card — fall through to the no-op default.
 
     case 'error':
+      // willRetry: codex 瞬断后会自己重试 — NOT terminal. Flipping to the error
+      // layout here flashes a fake "失败" (and drops the ⏹ button) that the next
+      // event would revert; surface a retrying footer instead and let the
+      // follow-up deltas overwrite it.
+      if (evt.willRetry) {
+        return { ...state, footer: 'retrying' };
+      }
       return { ...state, terminal: 'error', errorMsg: evt.message, footer: null };
 
     case 'done':
