@@ -22,7 +22,8 @@ process.stdin.on('data', (d) => {
     const msg = JSON.parse(line);
     if (typeof msg.id !== 'number') continue; // notification — ignore
     if (msg.method === 'turn/start') {
-      fs.writeFileSync('turn-start-received', '1'); // cwd = 测试临时目录
+      // 写到脚本所在目录（绝对路径）——进程 cwd 可能是预热池的中性目录，不可依赖
+      fs.writeFileSync(require('path').join(__dirname, 'turn-start-received'), '1');
       const text = msg.params.input?.[0]?.text ?? '';
       if (text === 'fail') {
         send({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: 'bad params' } });

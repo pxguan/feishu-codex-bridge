@@ -21,6 +21,7 @@ import type {
 import { isGoalTerminal } from '../types';
 import { BRIDGE_DEVELOPER_INSTRUCTIONS } from '../bridge-instructions';
 import { AppServerClient } from './app-server-client';
+import { refillWarmPool, takeWarmClient, utilityRequest } from './client-pool';
 import { mapNotification } from './event-map';
 import { codexVersionAsync, resolveCodexBin } from './locate';
 import type { Thread, ThreadItem, Turn } from './protocol';
@@ -100,24 +101,6 @@ const READ_HISTORY_TIMEOUT_MS = 20_000;
 /** Hard ceiling on a manual compaction (an LLM summarization turn) so a wedged
  * codex can't hang the "压缩中" card forever. */
 const COMPACT_TIMEOUT_MS = 120_000;
-
-/** Reject `p` if it hasn't settled within `ms` (the timer never keeps the event
- * loop alive past resolution). */
-function withDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-    p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(t);
-        reject(e);
-      },
-    );
-  });
-}
 
 function toUserInput(input: AgentInput): unknown[] {
   const out: unknown[] = [];
@@ -385,30 +368,24 @@ export class CodexAppServerBackend implements AgentBackend {
 
   async listModels(): Promise<ModelInfo[]> {
     if (this.modelCache) return this.modelCache;
-    const bin = resolveCodexBin();
-    if (!bin) return STATIC_MODELS;
-    const client = new AppServerClient({ bin, cwd: process.cwd(), clientName: 'feishu-codex-bridge-models' });
+    if (!resolveCodexBin()) return STATIC_MODELS;
     try {
-      await client.connect();
-      const res = await client.request<{ data?: RawModel[] }>('model/list', { limit: 50 });
+      // 常驻 utility client（M-2）：原本每次付一套 spawn+initialize，现在共享复用。
+      const res = await utilityRequest<{ data?: RawModel[] }>('model/list', { limit: 50 });
       const models = (res.data ?? []).map(mapModel);
       this.modelCache = models.length ? models : STATIC_MODELS;
       return this.modelCache;
     } catch (err) {
       log.fail('agent', err, { phase: 'model/list' });
       return STATIC_MODELS;
-    } finally {
-      await client.close();
     }
   }
 
   async listThreads(cwd: string, limit = 15): Promise<ThreadSummary[]> {
-    const bin = resolveCodexBin();
-    if (!bin) return [];
-    const client = new AppServerClient({ bin, cwd, clientName: 'feishu-codex-bridge-threads' });
+    if (!resolveCodexBin()) return [];
     try {
-      await client.connect();
-      const res = await client.request<{ data?: RawThread[] }>('thread/list', {
+      // cwd 是 thread/list 的过滤参数，与 utility 进程的 cwd 无关。
+      const res = await utilityRequest<{ data?: RawThread[] }>('thread/list', {
         cwd,
         limit,
         sortKey: 'created_at',
@@ -426,29 +403,24 @@ export class CodexAppServerBackend implements AgentBackend {
     } catch (err) {
       log.fail('agent', err, { phase: 'thread/list' });
       return [];
-    } finally {
-      await client.close();
     }
   }
 
   async readHistory(cwd: string, sessionId: string, maxTurns = 10): Promise<ThreadHistory> {
+    void cwd; // thread/read 按 threadId 寻址，cwd 仅为接口形状保留
     const empty: ThreadHistory = { turns: [], totalTurns: 0 };
-    const bin = resolveCodexBin();
-    if (!bin) return empty;
-    // Short-lived client (same spawn→connect→request→close shape as listThreads).
-    // thread/read does NOT start a turn or load the thread live — it just reads
-    // the rollout, so there's no process to keep and no token cost. The session
-    // is resumed lazily on the topic's first message via resolveThread.
-    const client = new AppServerClient({ bin, cwd, clientName: 'feishu-codex-bridge-history' });
+    if (!resolveCodexBin()) return empty;
+    // 常驻 utility client（M-2）。thread/read does NOT start a turn or load the
+    // thread live — it just reads the rollout, so no token cost; the session is
+    // resumed lazily on the topic's first message via resolveThread. The deadline
+    // keeps the old hang-protection: on timeout utilityRequest discards (SIGKILLs)
+    // the wedged process, so no orphan and the resume card still resolves.
     try {
-      // Bound the whole connect+read: if codex hangs, time out → catch → finally
-      // close() (which SIGKILLs the child), so no orphan and the card resolves.
-      const read = (async () => {
-        await client.connect();
-        return client.request<{ thread: Thread }>('thread/read', { threadId: sessionId, includeTurns: true });
-      })();
-      read.catch(() => undefined); // close() may reject this late; swallow it
-      const res = await withDeadline(read, READ_HISTORY_TIMEOUT_MS, 'thread/read');
+      const res = await utilityRequest<{ thread: Thread }>(
+        'thread/read',
+        { threadId: sessionId, includeTurns: true },
+        { timeoutMs: READ_HISTORY_TIMEOUT_MS },
+      );
       const thread = res.thread;
       const all = (Array.isArray(thread?.turns) ? thread.turns : [])
         .map(mapTurn)
@@ -466,8 +438,6 @@ export class CodexAppServerBackend implements AgentBackend {
     } catch (err) {
       log.fail('agent', err, { phase: 'thread/read', sessionId });
       return empty;
-    } finally {
-      await client.close();
     }
   }
 
@@ -503,6 +473,12 @@ export class CodexAppServerBackend implements AgentBackend {
   private async spawn(cwd: string): Promise<AppServerClient> {
     const bin = resolveCodexBin();
     if (!bin) throw new Error('codex CLI not found (set CODEX_BIN or install @openai/codex)');
+    // 预热池（M-2）：取走（或扑空）都异步补位——下一个会话拿到的就是热进程
+    // （MCP 已启动，thread/start 从 ~2.1s 冷路径降到 ~64ms）。热进程的 spawn
+    // cwd 是中性目录，没关系：thread/start|resume 的 cwd 是 thread 级参数。
+    const warmed = takeWarmClient(bin);
+    void refillWarmPool();
+    if (warmed) return warmed;
     const client = new AppServerClient({ bin, cwd });
     await client.connect();
     return client;

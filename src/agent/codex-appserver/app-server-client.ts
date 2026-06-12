@@ -20,6 +20,11 @@ class AsyncQueue<T> {
     while (this.waiters.length) this.waiters.shift()!({ value: undefined as never, done: true });
   }
 
+  /** Drop everything buffered but not yet consumed (consumers/waiters keep working). */
+  clear(): void {
+    this.items.length = 0;
+  }
+
   async *[Symbol.asyncIterator](): AsyncGenerator<T> {
     while (true) {
       if (this.items.length) {
@@ -49,7 +54,8 @@ export interface AppServerClientOptions {
 /**
  * One `codex app-server --listen stdio://` child process, speaking JSON-RPC 2.0
  * over newline-delimited JSON. One client = one thread/session (per design:
- * a process per session for crash isolation).
+ * a process per session for crash isolation). The one exception is the shared
+ * metadata utility client (client-pool.ts), which hosts no threads at all.
  */
 export class AppServerClient {
   private child: ChildProcessWithoutNullStreams | null = null;
@@ -137,6 +143,14 @@ export class AppServerClient {
   /** async-iterate server notifications (closes when the process exits). */
   stream(): AsyncIterable<ServerNotification> {
     return this.notifications;
+  }
+
+  /** Drop buffered, un-consumed notifications. Used when a prewarmed pool client
+   * is taken for a real session: notifications buffered while it idled in the
+   * pool (MCP startup progress, the ephemeral warmup thread/started, …) belong
+   * to the warmup thread and must never leak into the session's event stream. */
+  clearNotifications(): void {
+    this.notifications.clear();
   }
 
   async close(graceMs = 4000): Promise<void> {

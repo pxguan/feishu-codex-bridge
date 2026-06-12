@@ -11,7 +11,7 @@ import type {
   RateWindow,
 } from '../types';
 import { UsageError } from '../types';
-import { AppServerClient } from './app-server-client';
+import { utilityRequest } from './client-pool';
 import { resolveCodexBin } from './locate';
 
 /**
@@ -23,8 +23,8 @@ import { resolveCodexBin } from './locate';
  *    这与 codex 自家 backend-client 的调用方式逐字一致（client.rs），且不依赖 codex 版本——
  *    app-server 的 `account/usage/read` 要 0.138+ 才有，HTTP 端点对所有版本的登录态都成立。
  *  - bridge **绝不**自己实现 OAuth refresh（auth.openai.com 有 refresh_token 轮换 + reuse 检测，
- *    自己刷而竞态丢失回写会把用户的 CLI 登录打坏）。需要刷新时唯一合法路径是经短命
- *    app-server 调 `account/read {refreshToken:true}`，让 codex 官方代码强刷并回写 auth.json
+ *    自己刷而竞态丢失回写会把用户的 CLI 登录打坏）。需要刷新时唯一合法路径是经
+ *    app-server（常驻 utility client）调 `account/read {refreshToken:true}`，让 codex 官方代码强刷并回写 auth.json
  *    （实测 0.135.0：无条件强刷、persist 正确处理轮换；失败不返回 JSON-RPC error，而是
  *    `result.account === null` 且 auth.json 不变——成败判定以 diff auth.json 为主信号）。
  */
@@ -125,7 +125,9 @@ export async function chatgptBaseUrl(): Promise<string> {
 let refreshInFlight: Promise<CodexAuth | 'permanent-failure' | null> | null = null;
 
 /**
- * 让 codex 官方代码刷新 token：短命 app-server + `account/read {refreshToken:true}`。
+ * 让 codex 官方代码刷新 token：经常驻 utility client（M-2，原短命 app-server 同
+ * 语义）调 `account/read {refreshToken:true}`。utilityRequest 超时/出错会丢弃并
+ * SIGKILL 当前进程（出错即重建），等价旧实现 finally close() 的兜底。
  * 返回新 auth（成功 / 别的进程恰好刷好了）、'permanent-failure'（要重新 codex login）、
  * 或 null（transient：网络/服务波动，token 没变也没有永久失败信号）。
  */
@@ -133,23 +135,18 @@ async function refreshViaAppServer(): Promise<CodexAuth | 'permanent-failure' | 
   if (refreshInFlight) return refreshInFlight;
   refreshInFlight = (async () => {
     const before = await readCodexAuth().catch(() => undefined);
-    const bin = resolveCodexBin();
-    if (!bin) return null;
-    const client = new AppServerClient({ bin, cwd: process.cwd(), clientName: 'feishu-codex-bridge-usage' });
+    if (!resolveCodexBin()) return null;
     let account: unknown = undefined;
     try {
-      await withDeadline(client.connect(), REFRESH_TIMEOUT_MS, 'usage-refresh connect');
-      const res = await withDeadline(
-        client.request<{ account?: unknown }>('account/read', { refreshToken: true }),
-        REFRESH_TIMEOUT_MS,
-        'account/read refresh',
+      const res = await utilityRequest<{ account?: unknown }>(
+        'account/read',
+        { refreshToken: true },
+        { timeoutMs: REFRESH_TIMEOUT_MS },
       );
       account = res?.account;
     } catch (err) {
       log.fail('usage', err, { phase: 'refresh' });
       return null;
-    } finally {
-      await client.close().catch(() => undefined);
     }
     const after = await readCodexAuth().catch(() => undefined);
     if (after && after.accessToken !== before?.accessToken) return after; // 刷成（或别人刷的，都行）
@@ -162,22 +159,6 @@ async function refreshViaAppServer(): Promise<CodexAuth | 'permanent-failure' | 
   } finally {
     refreshInFlight = null;
   }
-}
-
-function withDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-    p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(t);
-        reject(e);
-      },
-    );
-  });
 }
 
 // ── HTTP（带 401 兜底链） ─────────────────────────────────────────────
