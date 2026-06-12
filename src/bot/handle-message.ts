@@ -531,12 +531,18 @@ export function createOrchestrator(
       return;
     }
 
-    // Multi (default): inside a topic → a turn in that session. Only /model is a
-    // command here; /settings + /resume aren't topic-scoped, so they fall through
-    // as a normal turn (告诉 codex 的普通文本).
+    // Multi (default): inside a topic → a turn in that session. /settings +
+    // /resume aren't topic-scoped — redirect to the main area instead of feeding
+    // them to codex as a normal turn (烧一轮还无人能懂).
     if (msg.threadId) {
       if (cmd === 'help') {
         await postHelpCard(msg, 'topic', true, project);
+        return;
+      }
+      if (cmd === 'resume' || cmd === 'settings') {
+        await channel
+          .send(msg.chatId, { markdown: `\`/${cmd}\` 请到主群区使用（话题外发）。` }, { replyTo: msg.messageId, replyInThread: true })
+          .catch(() => undefined);
         return;
       }
       const ts = turnSession(msg.threadId, project, msg.senderId);
@@ -584,6 +590,22 @@ export function createOrchestrator(
     if (goalObjective) {
       void addReaction(msg.messageId, 'OKR');
       startTopicDirectly(msg, goalObjective, project, true);
+      return;
+    }
+    // 拼错/臆想的斜杠命令（/stop /compat…）会直接烧一轮 codex 新开话题 —— 拦下。
+    // 已知命令在上面全部 return 了，走到这里的 /单词 只剩裸 `/goal`（缺目标）和
+    // 未知命令。仅限「整条消息就是一个 /纯字母单词」的形态，以 / 开头的路径、
+    // 带参数的正文（用户真想让 codex 处理的）不受影响。
+    if (/^\/[a-z]+$/i.test(text)) {
+      const name = text.slice(1).toLowerCase();
+      await channel
+        .send(
+          msg.chatId,
+          { markdown: name === 'goal' ? '用法：`/goal <目标>`，例如 `/goal 把所有单测跑绿`。' : `未知命令 \`/${name}\`，可用命令见 \`/help\`。` },
+          { replyTo: msg.messageId },
+        )
+        .catch(() => undefined);
+      log.info('intake', 'unknown-cmd', { name });
       return;
     }
     startTopicDirectly(msg, text, project);

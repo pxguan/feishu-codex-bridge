@@ -191,6 +191,7 @@ export function buildHelpCard(scope: HelpScope, noMention = true, isAdmin = fals
   if (scope === 'single') {
     const lines = [
       talkLine(noMention, '交给我处理'),
+      '· `/goal <目标>` → 自主多轮跑到完成（卡上 ⏹ 终止 / 🎯 结束目标）',
       '· `/model` → 切换模型 / 推理强度',
       '· `/context` → 看上下文占比',
       '· `/compact` → 压缩上下文（释放空间）',
@@ -204,6 +205,7 @@ export function buildHelpCard(scope: HelpScope, noMention = true, isAdmin = fals
       hr(),
       md(
         `${talkLine(noMention, '继续当前会话')}\n` +
+          '· `/goal <目标>` → 自主多轮跑到完成（卡上 ⏹ 终止 / 🎯 结束目标）\n' +
           '· `/model` → 切换模型 / 推理强度\n' +
           '· `/context` → 看上下文占比\n' +
           '· `/compact` → 压缩上下文（释放空间）\n' +
@@ -212,7 +214,10 @@ export function buildHelpCard(scope: HelpScope, noMention = true, isAdmin = fals
       note('开新话题：回到主群区 @我 + 内容。'),
     );
   } else {
-    const lines = ['· **@我 + 内容** → 开一个新话题并开始'];
+    const lines = [
+      '· **@我 + 内容** → 开一个新话题并开始',
+      '· `/goal <目标>` → 自主多轮跑到完成（卡上 ⏹ 终止 / 🎯 结束目标）',
+    ];
     if (isAdmin) lines.push('· `/resume` → 恢复历史会话', '· `/settings` → 群设置（免@ 开关）');
     lines.push('· `/model` → 需要在话题里用', '· `/help` → 这张速查卡');
     elements.push(md('👥 **主群区** — @我开话题，每个话题是独立会话。'), hr(), md(lines.join('\n')));
@@ -237,6 +242,7 @@ export function buildWelcomeCard(kind: 'multi' | 'single', docUrl?: string, noMe
       md('💬 **单会话群**（整群一个会话，上下文连续）'),
       md(
         `${talkLine(noMention, '交给我处理')}\n` +
+          '· `/goal <目标>` → 自主多轮跑到完成（卡上 ⏹ 终止 / 🎯 结束目标）\n' +
           '· `/model` → 切换模型 / 推理强度\n' +
           '· `/settings` → 群设置（免@ 开关）\n' +
           '· `/help` → 命令速查卡',
@@ -247,6 +253,7 @@ export function buildWelcomeCard(kind: 'multi' | 'single', docUrl?: string, noMe
       md('👥 **主群区**'),
       md(
         '· **@我 + 内容** → 开一个新话题并开始（每话题独立会话）\n' +
+          '· `/goal <目标>` → 自主多轮跑到完成（卡上 ⏹ 终止 / 🎯 结束目标）\n' +
           '· `/resume` → 恢复历史会话\n' +
           '· `/settings` → 群设置（免@ 开关）',
       ),

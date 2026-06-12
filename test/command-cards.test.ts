@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildHelpCard, buildResumeCard, type ResumeCardState } from '../src/card/command-cards';
+import { buildHelpCard, buildResumeCard, buildWelcomeCard, type ResumeCardState } from '../src/card/command-cards';
 import type { ThreadSummary } from '../src/agent/types';
 
 function buttons(node: unknown, acc: any[] = []): any[] {
@@ -72,5 +72,18 @@ describe('buildHelpCard 权限过滤', () => {
     expect(JSON.stringify(buildHelpCard('single', true, false))).not.toContain('/settings');
     expect(JSON.stringify(buildHelpCard('single', true, true))).toContain('/settings');
     expect(JSON.stringify(buildHelpCard('single', true, false))).toContain('/model');
+  });
+});
+
+describe('/goal 可发现性', () => {
+  it('三个 scope 的 help 卡都列出 /goal（非管理员也可见）', () => {
+    for (const scope of ['main', 'topic', 'single'] as const) {
+      expect(JSON.stringify(buildHelpCard(scope, true, false))).toContain('/goal');
+    }
+  });
+
+  it('欢迎卡两种群类型都列出 /goal', () => {
+    expect(JSON.stringify(buildWelcomeCard('multi'))).toContain('/goal');
+    expect(JSON.stringify(buildWelcomeCard('single'))).toContain('/goal');
   });
 });
