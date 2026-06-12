@@ -1,0 +1,401 @@
+import { randomUUID } from 'node:crypto';
+import type { ChildProcess } from 'node:child_process';
+import type { Options, Query, SDKMessage, SDKUserMessage, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
+import { spawnProcess } from '../../platform/spawn';
+import { log } from '../../core/logger';
+import type {
+  AgentBackend,
+  AgentCapabilities,
+  AgentEvent,
+  AgentInput,
+  AgentRun,
+  AgentThread,
+  CompactResult,
+  ModelInfo,
+  ResumeThreadOptions,
+  StartThreadOptions,
+  ThreadHistory,
+  ThreadSummary,
+  TurnOptions,
+} from '../types';
+import { BRIDGE_DEVELOPER_INSTRUCTIONS } from '../bridge-instructions';
+import { ClaudeEventMapper, type SdkMessageLike } from './event-map';
+
+/**
+ * Claude Code backend via the official Agent SDK (@anthropic-ai/claude-agent-sdk).
+ *
+ * MINIMAL SLICE (multi-backend step 1, see research/05 + synthesis L-1): only
+ * isAvailable / listModels / startThread / runStreamed / abort are real. Every
+ * codex-only capability is hard-guarded — `capabilities` flags them false AND
+ * the methods throw a clear "not supported" error (never a silent
+ * half-implementation):
+ *   - goal/steer/compact → throw (orchestrator surfaces ❌ / falls back to queue)
+ *   - resume picker (listThreads/readHistory) + resumeThread → throw / empty.
+ *     After a daemon restart resolveThread's catch therefore starts a FRESH
+ *     claude session and re-weaves the topic history (graceful degrade).
+ *     TODO: the SDK natively supports `resume:`/listSessions() — wire them up
+ *     once SessionRecord carries a backend id (M-8) so session-id drift across
+ *     resumes can be persisted.
+ *
+ * Process model mirrors codex: ONE long-lived CLI child per thread (streaming-
+ * input query), so supervisor/watchdog/⏹ semantics stay transparent. The SDK
+ * spawns its bundled binary through OUR cross-spawn wrapper
+ * (`spawnClaudeCodeProcess` option) — same Windows `.cmd`/EINVAL hardening as
+ * every other spawn in this repo (platform/spawn).
+ *
+ * TODO(权限映射): only the 'full' tier is supported (bypassPermissions). The
+ * qa→dontAsk+readonly-allowedTools / write→acceptEdits mapping is future work;
+ * until then qa/write FAIL CLOSED below (never downgrade a confined project to
+ * full access). Note even the future mapping is approval-layer enforcement,
+ * weaker than codex's Seatbelt kernel sandbox — document honestly when built.
+ */
+
+/**
+ * Startup probe window. In stream-json input mode the CLI emits NOTHING until
+ * the first user message (probed 2026-06: no `system/init` before input), so
+ * "did it start ok" is decided by racing the first read against this timer:
+ * startup failures (bad flag / bad binary / instant exit) reject the read
+ * within ~0.5s; silence for the whole window ⇒ the CLI is up awaiting input.
+ */
+const STARTUP_PROBE_MS = 1_500;
+
+const CAPABILITIES: AgentCapabilities = { goal: false, steer: false, compact: false, resume: false };
+
+/** Model aliases the claude CLI resolves itself (`--model sonnet|opus|haiku`).
+ * Claude has no codex-style reasoning-effort axis → supportedEfforts empty;
+ * the 'medium' defaultEffort only satisfies pickDefault and is ignored here. */
+const STATIC_MODELS: ModelInfo[] = [
+  {
+    id: 'sonnet',
+    displayName: 'Claude Sonnet',
+    description: 'Claude Code 默认模型（别名，由 CLI 解析到当前最新 Sonnet）',
+    hidden: false,
+    isDefault: true,
+    supportedEfforts: [],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'opus',
+    displayName: 'Claude Opus',
+    description: '更强推理（订阅用量消耗更快）',
+    hidden: false,
+    isDefault: false,
+    supportedEfforts: [],
+    defaultEffort: 'medium',
+  },
+];
+
+/** Simple async queue (push from callers, async-iterate once) — the SDK's
+ * streaming-input `prompt`. Same shape as app-server-client's AsyncQueue. */
+class AsyncQueue<T> {
+  private items: T[] = [];
+  private waiters: ((v: IteratorResult<T>) => void)[] = [];
+  private closed = false;
+
+  push(item: T): void {
+    if (this.closed) return;
+    const w = this.waiters.shift();
+    if (w) w({ value: item, done: false });
+    else this.items.push(item);
+  }
+
+  close(): void {
+    this.closed = true;
+    while (this.waiters.length) this.waiters.shift()!({ value: undefined as never, done: true });
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<T> {
+    while (true) {
+      if (this.items.length) {
+        yield this.items.shift()!;
+        continue;
+      }
+      if (this.closed) return;
+      const next = await new Promise<IteratorResult<T>>((resolve) => this.waiters.push(resolve));
+      if (next.done) return;
+      yield next.value;
+    }
+  }
+}
+
+function notSupported(what: string): Error {
+  return new Error(`Claude 后端暂不支持${what}（codex 专属能力，已按能力守卫拒绝）`);
+}
+
+class ClaudeSdkThread implements AgentThread {
+  /** Bridge-assigned session UUID, forced onto the CLI via `--session-id` so
+   * the handle exists BEFORE any turn runs (stream-json mode emits no init
+   * until the first input — see STARTUP_PROBE_MS). */
+  private readonly sessionId = randomUUID();
+  private readonly input = new AsyncQueue<SDKUserMessage>();
+  private q!: Query;
+  private iter!: AsyncIterator<SDKMessage>;
+  /** the startup probe's in-flight read — the FIRST message of turn 1 arrives
+   * on this promise; nextMessage() consumes it exactly once. */
+  private pendingNext: Promise<IteratorResult<SDKMessage>> | undefined;
+  private child: ChildProcess | undefined;
+  private childExited = false;
+  private closedByUs = false;
+  private turnSeq = 0;
+  private currentTurnId: string | undefined;
+  /** Turns that ended locally (⏹ / idle watchdog) WITHOUT consuming their
+   * terminal `result` leave it in the shared stream; the next turn must eat
+   * exactly that many stale results (and everything before them) or it would
+   * read a premature `done`. Mirrors the codex compact()-drain rationale. */
+  private staleResults = 0;
+
+  constructor(private readonly opts: StartThreadOptions) {}
+
+  get codexThreadId(): string {
+    return this.sessionId;
+  }
+
+  /** Spawn the CLI (via query()) and probe that it came up. */
+  async connect(): Promise<void> {
+    const { query } = await import('@anthropic-ai/claude-agent-sdk');
+    const options: Options = {
+      cwd: this.opts.cwd,
+      ...(this.opts.model ? { model: this.opts.model } : {}),
+      // Pre-assign the session id (CLI `--session-id`, probed accepted) so the
+      // AgentThread handle is real from t0 without waiting for any message.
+      extraArgs: { 'session-id': this.sessionId },
+      // TODO(权限映射): full 档专用 — see the module doc. qa/write were already
+      // rejected in startThread(); 'full' matches codex's danger-full-access.
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      // token 级增量（SDKPartialAssistantMessage）→ 飞书卡片打字机
+      includePartialMessages: true,
+      // Claude Code 本体行为（工具/代理循环）+ 桥的两条输出约定（与 codex 的
+      // developerInstructions 同一段文案，见 ../bridge-instructions）。
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: BRIDGE_DEVELOPER_INSTRUCTIONS },
+      // 项目级配置（CLAUDE.md / .claude/settings.json）照常生效 —— 与 codex 读
+      // AGENTS.md 的行为对齐；用户/全局配置不读，避免把 owner 个人配置带进群聊。
+      settingSources: ['project'],
+      // 所有子进程统一走 cross-spawn 封装（Windows .cmd shim / EINVAL 修复），
+      // 这是仓库的硬约束（platform/spawn）。child 引用同时喂 isAlive()。
+      spawnClaudeCodeProcess: (spawnOpts) => {
+        const child = spawnProcess(spawnOpts.command, spawnOpts.args, {
+          cwd: spawnOpts.cwd,
+          env: spawnOpts.env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          // forwarded signal: fires AFTER the SDK's graceful stdin-EOF window
+          signal: spawnOpts.signal,
+        });
+        this.child = child;
+        log.info('agent', 'claude-spawn', { pid: child.pid ?? null, cwd: this.opts.cwd });
+        // Drain stderr (an unread pipe would backpressure-block the CLI).
+        child.stderr?.on('data', (d: Buffer) => {
+          const line = d.toString('utf8').trim();
+          if (line) log.warn('agent', 'claude-stderr', { line: line.slice(0, 200) });
+        });
+        child.on('exit', (code, signal) => {
+          this.childExited = true;
+          log.info('agent', 'claude-exit', { pid: child.pid ?? null, code, signal });
+        });
+        child.on('error', () => {
+          this.childExited = true;
+        });
+        // ChildProcess satisfies SpawnedProcess (SDK docs), modulo stdin/stdout
+        // nullability — ours are non-null ('pipe' stdio above).
+        return child as SpawnedProcess;
+      },
+    };
+    this.q = query({ prompt: this.input[Symbol.asyncIterator](), options });
+    this.iter = this.q[Symbol.asyncIterator]();
+
+    // Startup probe: in stream-json input mode the CLI is silent until the
+    // first user message, so a read that REJECTS (or ends) inside the window
+    // means startup failed (bad binary / bad flag / instant exit — probed to
+    // surface within ~0.5s); silence for the whole window means it's up. The
+    // pending read is kept — it will deliver turn 1's first message.
+    const first = this.iter.next();
+    this.pendingNext = first;
+    const verdict = await Promise.race([
+      first.then(
+        (step) => (step.done ? 'exited' : 'message'),
+        () => 'failed',
+      ),
+      new Promise<'silent'>((resolve) => {
+        const t = setTimeout(() => resolve('silent'), STARTUP_PROBE_MS);
+        first.then(
+          () => clearTimeout(t),
+          () => clearTimeout(t),
+        );
+      }),
+    ]);
+    if (verdict === 'failed' || verdict === 'exited') {
+      const reason = await first.then(
+        () => 'Claude CLI 启动后立即退出',
+        (e: unknown) => (e instanceof Error ? e.message : String(e)),
+      );
+      await this.close().catch(() => undefined);
+      throw new Error(`Claude 后端启动失败：${reason}（请检查 claude 登录态 / ANTHROPIC_API_KEY）`);
+    }
+    // 'silent'（正常等待输入）或 'message'（已有消息，留给第一轮消费）都算成功。
+  }
+
+  /** Read the next SDK message, consuming the startup probe's pending read first. */
+  private nextMessage(): Promise<IteratorResult<SDKMessage>> {
+    const p = this.pendingNext ?? this.iter.next();
+    this.pendingNext = undefined;
+    return p;
+  }
+
+  runStreamed(input: AgentInput, _turn?: TurnOptions): AgentRun {
+    // TODO: per-turn model/effort overrides are ignored — the /model picker
+    // still lists codex models only; honoring a codex model id here would 400.
+    // Model is fixed at thread start until the picker is backend-aware.
+    const self = this;
+    let lastActivityAt = Date.now();
+    const turnId = `claude-turn-${++this.turnSeq}-${randomUUID().slice(0, 8)}`;
+    const mapper = new ClaudeEventMapper(turnId);
+    this.currentTurnId = turnId;
+    // Push the prompt NOW (runStreamed call time, not first next()) so model
+    // inference overlaps the caller's card setup — codex's eager-start parity.
+    this.pushUser(input);
+    async function* gen(): AsyncGenerator<AgentEvent> {
+      yield { type: 'turn_started', turnId };
+      let sawTerminal = false;
+      try {
+        while (true) {
+          let step: IteratorResult<SDKMessage>;
+          try {
+            step = await self.nextMessage();
+          } catch (err) {
+            // the SDK surfaces a died child as a rejected read — normalize to a
+            // fatal stream event（与 codex 的 AsyncQueue close→done 行为对齐）.
+            const m = err instanceof Error ? err.message : String(err);
+            yield { type: 'error', message: `Claude 进程异常：${m}`, willRetry: false };
+            sawTerminal = true;
+            return;
+          }
+          if (step.done) {
+            yield { type: 'error', message: 'Claude 进程已退出（崩溃或被关闭）', willRetry: false };
+            sawTerminal = true;
+            return;
+          }
+          lastActivityAt = Date.now();
+          const raw = step.value as unknown as SdkMessageLike;
+          // Eat a prior locally-terminated turn's leftovers up to its result.
+          if (self.staleResults > 0) {
+            if (raw.type === 'result') self.staleResults--;
+            continue;
+          }
+          for (const ev of mapper.map(raw)) {
+            yield ev;
+            if (ev.type === 'done' || (ev.type === 'error' && !ev.willRetry)) {
+              sawTerminal = true;
+              return;
+            }
+          }
+        }
+      } finally {
+        // Loop ended without this turn's terminal (⏹ stopSignal / watchdog /
+        // consumer break): its result is still coming — mark it stale.
+        if (!sawTerminal && self.isAlive()) self.staleResults++;
+      }
+    }
+    return { events: gen(), turnId: () => self.currentTurnId, lastActivity: () => lastActivityAt };
+  }
+
+  private pushUser(input: AgentInput): void {
+    let text = input.text ?? '';
+    // 入站图片已被桥落盘为本地文件；Claude Code 的 Read 工具可直接读图，把路径
+    // 织进文本即可“看图”。TODO: 改为 base64 image content block（原生视觉输入）。
+    if (input.images?.length) {
+      const lines = input.images.map((p) => `- ${p}`).join('\n');
+      text = `${text}\n\n[用户随消息发来 ${input.images.length} 张图片，已保存为本地文件，请用 Read 工具查看：]\n${lines}`;
+    }
+    this.input.push({
+      type: 'user',
+      message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+      session_id: this.sessionId,
+    });
+  }
+
+  runGoal(_objective: string): AgentRun {
+    throw notSupported(' /goal 自治目标');
+  }
+
+  async clearGoal(): Promise<void> {
+    // claude 没有 goal 概念 —— “没有目标可清”本身就是正确的完整实现（调用方
+    // 全部 best-effort .catch，此处空操作避免共享清理路径上的噪音异常）。
+  }
+
+  async steer(_input: AgentInput, _expectedTurnId: string): Promise<void> {
+    // orchestrator 的 steer 失败路径会自动落回排队（handle-message try/catch）。
+    throw notSupported('运行中引导（steer），消息将排队为下一轮');
+  }
+
+  async abort(_turnId: string): Promise<void> {
+    // Query.interrupt() 是一等控制方法（streaming 模式），不必杀进程。
+    await this.q.interrupt();
+  }
+
+  async compact(): Promise<CompactResult> {
+    throw notSupported(' /compact 手动压缩（Claude Code 会自行 auto-compact）');
+  }
+
+  isAlive(): boolean {
+    return !this.childExited && !this.closedByUs;
+  }
+
+  async close(): Promise<void> {
+    this.closedByUs = true;
+    this.input.close(); // stdin EOF → CLI 的优雅退出窗口
+    try {
+      this.q.close(); // 兜底强杀（SDK 内部 kill child）
+    } catch {
+      // already dead
+    }
+  }
+}
+
+export class ClaudeSdkBackend implements AgentBackend {
+  readonly id = 'claude-sdk';
+  readonly displayName = 'Claude Code (Agent SDK)';
+  readonly capabilities = CAPABILITIES;
+
+  async isAvailable(): Promise<boolean> {
+    // SDK 自带平台二进制（optionalDependency）——能 import 即可跑；不真探活
+    // （登录态/网络问题在 startThread 的 init 截止时间处报清晰错误）。
+    try {
+      await import('@anthropic-ai/claude-agent-sdk');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async listModels(): Promise<ModelInfo[]> {
+    return STATIC_MODELS;
+  }
+
+  async listThreads(_cwd: string, _limit?: number): Promise<ThreadSummary[]> {
+    throw notSupported(' /resume 历史会话');
+  }
+
+  async readHistory(_cwd: string, _codexThreadId: string, _maxTurns?: number): Promise<ThreadHistory> {
+    // 接口契约：never throws（resume 卡兜底）。能力守卫下这里不可达，仍按契约返回空。
+    return { turns: [], totalTurns: 0 };
+  }
+
+  async startThread(opts: StartThreadOptions): Promise<AgentThread> {
+    // fail-closed（contract: StartThreadOptions.mode）：在权限映射做出来之前，
+    // qa/write 档绝不降级为完全访问 —— 直接拒绝启动并说明原因。
+    if ((opts.mode ?? 'full') !== 'full') {
+      throw new Error(
+        'Claude 后端目前仅支持「完全访问」权限档：qa/write 档到 Claude 权限模式的映射尚未实现，已拒绝启动（绝不静默降级）。请把项目权限档切回「完全访问」或改用 codex 后端。',
+      );
+    }
+    const thread = new ClaudeSdkThread(opts);
+    await thread.connect();
+    return thread;
+  }
+
+  async resumeThread(_opts: ResumeThreadOptions): Promise<AgentThread> {
+    // 能力守卫：见模块注释。resolveThread 的 catch 会落回“新线程 + 全量话题回织”。
+    throw notSupported('恢复历史会话（resume）');
+  }
+}

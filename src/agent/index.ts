@@ -1,5 +1,6 @@
 import type { AgentBackend } from './types';
 import { CodexAppServerBackend } from './codex-appserver/backend';
+import { ClaudeSdkBackend } from './claude-sdk/backend';
 
 /** The backend used when a project doesn't pick one (`Project.backend` unset) —
  * the historical codex app-server path, which must stay behavior-identical. */
@@ -11,6 +12,10 @@ export const DEFAULT_BACKEND_ID = 'codex-appserver';
  */
 const REGISTRY = new Map<string, () => AgentBackend>([
   ['codex-appserver', () => new CodexAppServerBackend()],
+  // Claude Code via the official Agent SDK — minimal slice (capability-guarded:
+  // goal/steer/compact/resume off). The SDK itself loads lazily inside the
+  // backend, so registering it here costs nothing for codex-only deployments.
+  ['claude-sdk', () => new ClaudeSdkBackend()],
 ]);
 
 /** Registered backend ids (for config validation / error messages). */
