@@ -864,7 +864,14 @@ export function createOrchestrator(
     perm?: { mode?: PermissionMode; network?: boolean; autoCompact?: boolean },
   ): Promise<{ thread: AgentThread | undefined; recreated: boolean }> {
     const live = sessions.get(threadId);
-    if (live) return { thread: live, recreated: false };
+    if (live) {
+      if (live.isAlive()) return { thread: live, recreated: false };
+      // app-server 子进程已死（崩溃/被 kill）：死线程留在缓存只会反复失败，
+      // 清掉让它落入下面既有的 resume-or-recreate 兜底（持久化的 codexThreadId
+      // 还在，话题自愈而不是僵死到重启）。
+      sessions.delete(threadId);
+      log.info('agent', 'dead-thread-evict', { threadId });
+    }
     const rec = await getSession(threadId);
     if (!rec) return { thread: undefined, recreated: false };
     try {
@@ -2201,7 +2208,11 @@ export function createOrchestrator(
         // cleanly (no orphaned reader stealing the next turn's events) and frees
         // the turn. The topic resumes from the persisted thread on its next
         // message (resolveThread), so the session survives the kill.
-        if (killed) {
+        // 进程级死亡（app-server 中途崩溃 → error 卡 / 轮间死 → 空卡，killed=false）
+        // 同走回收：立即清出缓存，下一条消息直接经 resolveThread 的 resume 兜底
+        // 自愈（快路径的 isAlive 守卫是兜底的兜底）。
+        const procDead = !killed && !opts.thread.isAlive();
+        if (killed || procDead) {
           void opts.thread.close().catch(() => undefined);
           if (topicThreadId) sessions.delete(topicThreadId);
         }
@@ -2261,9 +2272,9 @@ export function createOrchestrator(
         replyInThread = !opts.flat; // stay in the topic for queued turns (single: stay flat)
         log.info('card', 'final', { terminal: render.terminal() });
 
-        // A kill (⏹ / watchdog) stops the whole run — drop any queued follow-ups
-        // (they'd run on the recycled, now-closed thread).
-        if (killed) break;
+        // A kill (⏹ / watchdog) or a dead process stops the whole run — drop any
+        // queued follow-ups (they'd run on the recycled, now-closed thread).
+        if (killed || procDead) break;
         if (state.queue.length === 0) break;
         turnInput = state.queue.shift()!;
       }

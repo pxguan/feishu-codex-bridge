@@ -351,6 +351,10 @@ class CodexThread implements AgentThread {
     return { compacted, usage };
   }
 
+  isAlive(): boolean {
+    return !this.client.exited;
+  }
+
   async close(): Promise<void> {
     await this.client.close();
   }

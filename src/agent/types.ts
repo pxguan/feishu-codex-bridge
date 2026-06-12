@@ -190,6 +190,10 @@ export interface AgentThread {
    * resolve only once it actually finishes — compaction runs as a background
    * turn, so this drains the event stream to turn/completed. */
   compact(): Promise<CompactResult>;
+  /** false once the underlying agent process has died (crash / kill / close) —
+   * the thread is unusable and must be evicted from the live cache so
+   * resolveThread's resume fallback can take over. */
+  isAlive(): boolean;
   /** terminate the underlying app-server process */
   close(): Promise<void>;
 }

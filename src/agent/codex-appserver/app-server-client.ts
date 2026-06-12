@@ -58,11 +58,20 @@ export class AppServerClient {
   private readonly pending = new Map<number, Pending>();
   private readonly notifications = new AsyncQueue<ServerNotification>();
   private closed = false;
+  private hasExited = false;
 
   constructor(private readonly opts: AppServerClientOptions) {}
 
   get pid(): number | undefined {
     return this.child?.pid;
+  }
+
+  /** true once the child process has exited (crash or close) — the client is
+   * dead and every further request would just EPIPE. Callers (CodexThread.
+   * isAlive) use this to evict the thread so resolveThread's resume fallback
+   * can take over instead of reusing a corpse. */
+  get exited(): boolean {
+    return this.hasExited;
   }
 
   /** spawn + initialize handshake. Throws if spawn/handshake fails. */
@@ -85,6 +94,10 @@ export class AppServerClient {
     });
     child.on('exit', (code, signal) => {
       log.info('agent', 'exit', { pid: child.pid ?? null, code, signal });
+      // Mark the client dead so later request()/notify() reject fast instead of
+      // writing into a broken pipe (and isAlive() reports the truth).
+      this.hasExited = true;
+      this.closed = true;
       this.failAllPending(new Error(`app-server exited (code=${code} signal=${signal})`));
       this.notifications.close();
     });
