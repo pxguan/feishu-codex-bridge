@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { paths, useBotDir } from '../../config/paths';
 import { ensureRegistry, currentBot } from '../../config/bots';
-import { resolveCodexBin, codexVersion } from '../../agent/codex-appserver/locate';
+import { createBackend } from '../../agent';
 import { spawnProcessSync } from '../../platform/spawn';
 
 interface Check {
@@ -20,16 +20,15 @@ interface Check {
 export async function runDoctor(): Promise<void> {
   const checks: Check[] = [];
 
-  // codex CLI
-  const codexBin = resolveCodexBin();
-  if (codexBin) {
-    const v = codexVersion(codexBin) ?? 'unknown';
-    checks.push({ name: 'codex CLI', ok: true, detail: `${v} (${codexBin})` });
+  // codex CLI — 经默认后端的 doctor() 探测（M-8：不再深 import codex 探测）
+  const probe = await createBackend().doctor();
+  if (probe.ok) {
+    checks.push({ name: 'codex CLI', ok: true, detail: `${probe.version ?? 'unknown'} (${probe.location ?? '?'})` });
   } else {
     checks.push({
       name: 'codex CLI',
       ok: false,
-      detail: '未找到。设置 CODEX_BIN，或安装 @openai/codex，或装 Codex.app',
+      detail: probe.hint ?? '未找到。设置 CODEX_BIN，或安装 @openai/codex，或装 Codex.app',
     });
   }
 

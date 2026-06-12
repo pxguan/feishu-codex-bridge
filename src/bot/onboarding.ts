@@ -6,7 +6,7 @@ import { resolveAppSecret } from '../config/secret-resolver';
 import { runRegistrationWizard } from './wizard';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import { buildScopeGrantUrl, buildEventConfigUrl, labelScope } from '../config/scopes';
-import { resolveCodexBin } from '../agent/codex-appserver/locate';
+import { createBackend } from '../agent';
 import { openUrl } from '../utils/open-url';
 import { log } from '../core/logger';
 import { useBotDir } from '../config/paths';
@@ -19,9 +19,11 @@ export interface OnboardResult {
   missingScopes?: string[];
 }
 
-/** Verify codex CLI is present (needed to run AND to spawn the per-session app-server). */
-export function ensureCodex(): boolean {
-  if (resolveCodexBin()) return true;
+/** Verify the default agent backend (codex CLI) is runnable — needed to run AND
+ * to spawn the per-session app-server. Probes via AgentBackend.doctor()（M-8：
+ * 不再深 import codex 探测）。 */
+export async function ensureCodex(): Promise<boolean> {
+  if ((await createBackend().doctor()).ok) return true;
   console.error(
     '✗ 未找到 codex CLI。请先安装 Codex 并登录：\n' +
       '    • 安装：npm i -g @openai/codex（或安装 Codex.app，或用 CODEX_BIN 指向已有二进制）\n' +
@@ -52,7 +54,7 @@ export function ensureCodex(): boolean {
 export async function ensureOnboarded(
   opts: { allowCreate?: boolean; bot?: string } = {},
 ): Promise<OnboardResult | null> {
-  if (!ensureCodex()) return null;
+  if (!(await ensureCodex())) return null;
 
   const reg = await ensureRegistry();
   const entry = opts.bot ? findBot(reg, opts.bot) : currentBot(reg);

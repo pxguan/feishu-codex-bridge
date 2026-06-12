@@ -10,6 +10,7 @@ import type {
   AgentInput,
   AgentRun,
   AgentThread,
+  BackendProbe,
   CompactResult,
   ModelInfo,
   ResumeThreadOptions,
@@ -62,7 +63,15 @@ const STARTUP_PROBE_MS = 1_500;
 
 // `resume: false` 守卫的是 /resume 选择卡（listThreads/readHistory 未实现）；
 // resumeThread 本身已实现 —— 重启恢复路径（resolveThread）不经此能力位。
-const CAPABILITIES: AgentCapabilities = { goal: false, steer: false, compact: false, resume: false };
+// `approvals: false`：审批转发（canUseTool → approval_request）是后续切片，
+// 当前 bypassPermissions 下不会发审批。
+const CAPABILITIES: AgentCapabilities = {
+  goal: false,
+  steer: false,
+  compact: false,
+  resume: false,
+  approvals: false,
+};
 
 /** Model aliases the claude CLI resolves itself (`--model sonnet|opus|haiku`).
  * Claude has no codex-style reasoning-effort axis → supportedEfforts empty;
@@ -387,13 +396,17 @@ export class ClaudeSdkBackend implements AgentBackend {
   readonly capabilities = CAPABILITIES;
 
   async isAvailable(): Promise<boolean> {
-    // SDK 自带平台二进制（optionalDependency）——能 import 即可跑；不真探活
-    // （登录态/网络问题在 startThread 的 init 截止时间处报清晰错误）。
+    return (await this.doctor()).ok;
+  }
+
+  async doctor(): Promise<BackendProbe> {
+    // SDK 自带平台二进制——能 import 即可跑；不真探活（登录态/网络问题在
+    // startThread 的启动探针处报清晰错误）。无版本可探（SDK 不导出），留 null。
     try {
       await import('@anthropic-ai/claude-agent-sdk');
-      return true;
+      return { ok: true, version: null, location: '@anthropic-ai/claude-agent-sdk' };
     } catch {
-      return false;
+      return { ok: false, version: null, hint: '未安装 @anthropic-ai/claude-agent-sdk（在 bridge 目录 npm i 后重试）' };
     }
   }
 

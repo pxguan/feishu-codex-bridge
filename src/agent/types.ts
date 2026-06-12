@@ -127,6 +127,12 @@ export type AgentEvent =
       timeUsedSeconds: number;
       tokenBudget: number | null;
     }
+  // A backend tool call awaits user approval —— 占位（L-1 审批转发切片）：
+  // claude-sdk 的 canUseTool 将挂起工具调用并 emit 这个事件，由 orchestrator
+  // 渲染飞书审批卡（先响应再延迟更新），用 requestId 把批/拒回执关联回去。
+  // codex 后端在 approvalPolicy 'never' 下永不 emit；run-state 的 reduce 对
+  // 未知事件走 default no-op，所以提前声明是安全的。
+  | { type: 'approval_request'; requestId: string; title: string; detail?: string }
   | { type: 'error'; message: string; willRetry: boolean };
 
 /**
@@ -231,6 +237,102 @@ export interface ResumeThreadOptions extends StartThreadOptions {
   sessionId: string;
 }
 
+// ── 账号用量（归一化）──────────────────────────────────────────────────
+// /usage 卡的数据形状。目前只有 codex（ChatGPT 登录）后端有这份数据（实现在
+// codex-appserver/usage，经 src/agent/usage 出口），但类型是后端中立的归一化
+// 形状 —— 卡片层只 import 这里，绝不碰后端协议类型。
+
+export type UsageErrorKind =
+  /** 没有登录态（codex：无 auth.json）—— 本机未登录 */
+  | 'no-auth'
+  /** 登录模式没有用量数据（codex：API-key 模式无 profile/限额） */
+  | 'api-key-mode'
+  /** 登录态被服务端永久拒绝 → 需要重新登录 */
+  | 'need-relogin'
+  /** 网络/服务波动 → 稍后重试 */
+  | 'transient';
+
+export class UsageError extends Error {
+  constructor(
+    readonly kind: UsageErrorKind,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'UsageError';
+  }
+}
+
+export interface RateWindow {
+  /** 已用百分比（整数 0-100） */
+  usedPercent: number;
+  /** 窗口长度（秒）：5h=18000，7d=604800 */
+  windowSeconds?: number;
+  /** 重置时刻（Unix epoch 秒） */
+  resetAt?: number;
+}
+
+export interface RateBucket {
+  /** 附加限额的名字（如 GPT-5.3-Codex-Spark）；主限额为 undefined */
+  name?: string;
+  primary?: RateWindow;
+  secondary?: RateWindow;
+}
+
+export interface AccountUsageSnapshot {
+  planType?: string;
+  /** 主限额（5h + 7d 双窗口） */
+  main: RateBucket;
+  /** 按 feature 的附加限额（独立 5h/7d 双窗口） */
+  extras: RateBucket[];
+  /** 拉取时刻（ms） */
+  fetchedAt: number;
+}
+
+export interface DailyBucket {
+  /** YYYY-MM-DD（服务端口径，疑似 UTC 日界；只含有用量的日期，热力图自己补 0） */
+  date: string;
+  tokens: number;
+}
+
+export interface AccountProfileStats {
+  displayName?: string;
+  lifetimeTokens?: number;
+  peakDailyTokens?: number;
+  currentStreakDays?: number;
+  longestStreakDays?: number;
+  /** 最长单任务时长（秒） */
+  longestTurnSec?: number;
+  totalThreads?: number;
+  fastModePct?: number;
+  /** 技能调用总次数 */
+  totalSkillsUsed?: number;
+  /** 用过的不同技能数 */
+  uniqueSkillsUsed?: number;
+  mostUsedEffort?: string;
+  mostUsedEffortPct?: number;
+  /** top 调用的插件/skill（名字 + 次数 + 类型），最多 5 条 */
+  topInvocations: { name: string; count: number; kind: 'plugin' | 'skill' }[];
+  dailyBuckets: DailyBucket[];
+  statsAsOf?: string;
+}
+
+export interface AccountUsageBundle {
+  profile: AccountProfileStats;
+  usage: AccountUsageSnapshot;
+}
+
+/** A backend's environment probe（doctor / onboarding / DM 体检卡共用）。 */
+export interface BackendProbe {
+  /** the backend runtime is present and runnable */
+  ok: boolean;
+  /** human-readable version when detectable */
+  version: string | null;
+  /** where the runtime was found (binary path / package name) */
+  location?: string;
+  /** actionable install/login pointer when !ok */
+  hint?: string;
+}
+
 /**
  * Feature flags a backend declares so the orchestrator can guard codex-only
  * affordances instead of calling into methods a backend can't honor. Undefined
@@ -249,6 +351,9 @@ export interface AgentCapabilities {
   /** /resume 历史会话选择卡（listThreads/readHistory）。注意 resumeThread 本身
    * 不在此能力位之下 —— 重启恢复路径（resolveThread）对所有后端直接调用它。 */
   resume: boolean;
+  /** 后端可能 emit approval_request（工具审批转发到飞书卡片）。codex 在
+   * approvalPolicy 'never' 下从不发（undefined ⇒ true 无害——事件是被动的）。 */
+  approvals: boolean;
 }
 
 export interface AgentBackend {
@@ -257,6 +362,11 @@ export interface AgentBackend {
   /** undefined ⇒ all true (codex 的完整能力面)；见 {@link AgentCapabilities}。 */
   readonly capabilities?: AgentCapabilities;
   isAvailable(): Promise<boolean>;
+  /** Probe the backend runtime（版本/路径/装法提示）—— doctor CLI、onboarding、
+   * DM 体检卡共用，替代散落的硬编码探测。`force` 绕过探测缓存（体检要看
+   * 「现在」的状态）。绝不抛错，必须全程异步（卡片回调里 spawnSync 会冻住
+   * 事件循环——见 DM.doctor）。 */
+  doctor(opts?: { force?: boolean }): Promise<BackendProbe>;
   listModels(): Promise<ModelInfo[]>;
   /** recent codex threads under `cwd`, newest first (for resume picker) */
   listThreads(cwd: string, limit?: number): Promise<ThreadSummary[]>;

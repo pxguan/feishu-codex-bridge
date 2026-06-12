@@ -2,6 +2,15 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { log } from '../../core/logger';
+import type {
+  AccountProfileStats,
+  AccountUsageBundle,
+  AccountUsageSnapshot,
+  DailyBucket,
+  RateBucket,
+  RateWindow,
+} from '../types';
+import { UsageError } from '../types';
 import { AppServerClient } from './app-server-client';
 import { resolveCodexBin } from './locate';
 
@@ -31,27 +40,8 @@ const PROFILE_CACHE_MS = 5 * 60_000;
 /** usage（限额）缓存 30s：防连点击穿，刷新按钮可 force 绕过。 */
 const USAGE_CACHE_MS = 30_000;
 
-// ── 错误模型 ──────────────────────────────────────────────────────────
-
-export type UsageErrorKind =
-  /** 没有 auth.json / 反复读不出来 —— 本机未 codex login */
-  | 'no-auth'
-  /** auth_mode 不是 chatgpt（API-key 登录没有 profile/限额数据） */
-  | 'api-key-mode'
-  /** 刷新被服务端永久拒绝（refresh_token expired/reused/invalidated）→ 要重新 codex login */
-  | 'need-relogin'
-  /** 网络/服务波动（刷新 transient 失败、HTTP 5xx、超时等）→ 稍后重试 */
-  | 'transient';
-
-export class UsageError extends Error {
-  constructor(
-    readonly kind: UsageErrorKind,
-    message: string,
-  ) {
-    super(message);
-    this.name = 'UsageError';
-  }
-}
+// 错误模型（UsageError/UsageErrorKind）与对外数据形状（AccountUsageBundle 等）
+// 已归一化上提到 ../types —— 本模块只保留 codex 专属的取数与映射实现。
 
 // ── auth.json ─────────────────────────────────────────────────────────
 
@@ -290,30 +280,6 @@ interface RawUsageResponse {
   additional_rate_limits?: { limit_name?: string; rate_limit?: RawRateLimit | null }[] | null;
 }
 
-export interface RateWindow {
-  /** 已用百分比（整数 0-100，服务端就是 i32） */
-  usedPercent: number;
-  /** 窗口长度（秒）：5h=18000，7d=604800 */
-  windowSeconds?: number;
-  /** 重置时刻（Unix epoch 秒） */
-  resetAt?: number;
-}
-export interface RateBucket {
-  /** 附加限额的名字（如 GPT-5.3-Codex-Spark）；主限额为 undefined */
-  name?: string;
-  primary?: RateWindow;
-  secondary?: RateWindow;
-}
-export interface CodexUsageSnapshot {
-  planType?: string;
-  /** 主限额（5h + 7d 双窗口） */
-  main: RateBucket;
-  /** 按 feature 的附加限额（独立 5h/7d 双窗口） */
-  extras: RateBucket[];
-  /** 拉取时刻（ms） */
-  fetchedAt: number;
-}
-
 function mapWindow(w: RawWindow | null | undefined): RateWindow | undefined {
   if (!w || typeof w.used_percent !== 'number') return undefined;
   return {
@@ -323,7 +289,7 @@ function mapWindow(w: RawWindow | null | undefined): RateWindow | undefined {
   };
 }
 
-export function mapUsageResponse(raw: RawUsageResponse, fetchedAt: number): CodexUsageSnapshot {
+export function mapUsageResponse(raw: RawUsageResponse, fetchedAt: number): AccountUsageSnapshot {
   const mapBucket = (rl: RawRateLimit | null | undefined, name?: string): RateBucket => ({
     ...(name ? { name } : {}),
     primary: mapWindow(rl?.primary_window),
@@ -366,34 +332,7 @@ interface RawProfileResponse {
   metadata?: { stats_as_of?: string };
 }
 
-export interface DailyBucket {
-  /** YYYY-MM-DD（服务端口径，疑似 UTC 日界；只含有用量的日期，热力图自己补 0） */
-  date: string;
-  tokens: number;
-}
-export interface CodexProfileStats {
-  displayName?: string;
-  lifetimeTokens?: number;
-  peakDailyTokens?: number;
-  currentStreakDays?: number;
-  longestStreakDays?: number;
-  /** 最长单任务时长（秒） */
-  longestTurnSec?: number;
-  totalThreads?: number;
-  fastModePct?: number;
-  /** 技能调用总次数 */
-  totalSkillsUsed?: number;
-  /** 用过的不同技能数 */
-  uniqueSkillsUsed?: number;
-  mostUsedEffort?: string;
-  mostUsedEffortPct?: number;
-  /** top 调用的插件/skill（名字 + 次数 + 类型），最多 5 条 */
-  topInvocations: { name: string; count: number; kind: 'plugin' | 'skill' }[];
-  dailyBuckets: DailyBucket[];
-  statsAsOf?: string;
-}
-
-export function mapProfileResponse(raw: RawProfileResponse): CodexProfileStats {
+export function mapProfileResponse(raw: RawProfileResponse): AccountProfileStats {
   const s = raw.stats ?? {};
   return {
     // 只用 display_name，绝不兜底 username——后者是邮箱 local part，会随可转发的
@@ -426,10 +365,10 @@ export function mapProfileResponse(raw: RawProfileResponse): CodexProfileStats {
 
 // ── 拉数（带缓存）──────────────────────────────────────────────────────
 
-let profileCache: { at: number; data: CodexProfileStats } | null = null;
-let usageCache: { at: number; data: CodexUsageSnapshot } | null = null;
+let profileCache: { at: number; data: AccountProfileStats } | null = null;
+let usageCache: { at: number; data: AccountUsageSnapshot } | null = null;
 
-export async function fetchProfileStats(force = false): Promise<CodexProfileStats> {
+export async function fetchProfileStats(force = false): Promise<AccountProfileStats> {
   if (!force && profileCache && Date.now() - profileCache.at < PROFILE_CACHE_MS) return profileCache.data;
   const raw = await whamGet<RawProfileResponse>('/wham/profiles/me');
   const data = mapProfileResponse(raw);
@@ -437,7 +376,7 @@ export async function fetchProfileStats(force = false): Promise<CodexProfileStat
   return data;
 }
 
-export async function fetchUsageSnapshot(force = false): Promise<CodexUsageSnapshot> {
+export async function fetchUsageSnapshot(force = false): Promise<AccountUsageSnapshot> {
   if (!force && usageCache && Date.now() - usageCache.at < USAGE_CACHE_MS) return usageCache.data;
   const raw = await whamGet<RawUsageResponse>('/wham/usage');
   const data = mapUsageResponse(raw, Date.now());
@@ -445,13 +384,8 @@ export async function fetchUsageSnapshot(force = false): Promise<CodexUsageSnaps
   return data;
 }
 
-export interface CodexUsageBundle {
-  profile: CodexProfileStats;
-  usage: CodexUsageSnapshot;
-}
-
 /** 一次拉齐两端点（并行）。任一失败抛 UsageError，调用方按 kind 渲染错误卡。 */
-export async function fetchUsageBundle(force = false): Promise<CodexUsageBundle> {
+export async function fetchUsageBundle(force = false): Promise<AccountUsageBundle> {
   const [profile, usage] = await Promise.all([fetchProfileStats(force), fetchUsageSnapshot(force)]);
   return { profile, usage };
 }

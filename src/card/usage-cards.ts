@@ -1,11 +1,11 @@
 import type {
-  CodexProfileStats,
-  CodexUsageBundle,
+  AccountProfileStats,
+  AccountUsageBundle,
   DailyBucket,
   RateBucket,
   RateWindow,
   UsageErrorKind,
-} from '../agent/codex-appserver/usage';
+} from '../agent/types';
 import { actions, button, card, hr, md, note, noteMd, submitButton, type CardElement, type CardObject } from './cards';
 import { DM } from './dm-cards';
 
@@ -288,7 +288,7 @@ function statColumns(items: { value: string; label: string }[]): CardElement {
 }
 
 /** 五格统计，标签对齐官方中文资料页口径。 */
-function profileStatItems(p: CodexProfileStats): { value: string; label: string }[] {
+function profileStatItems(p: AccountProfileStats): { value: string; label: string }[] {
   return [
     { value: formatTokensZh(p.lifetimeTokens), label: '累计 Token 数' },
     { value: formatTokensZh(p.peakDailyTokens), label: '峰值 Token 数' },
@@ -299,7 +299,7 @@ function profileStatItems(p: CodexProfileStats): { value: string; label: string 
 }
 
 /** 热力图区块（标题 + chart）。 */
-function heatmapElements(p: CodexProfileStats, today?: string): CardElement[] {
+function heatmapElements(p: AccountProfileStats, today?: string): CardElement[] {
   return [md('📈 **每日 Token 用量**'), heatmapChartEl(p.dailyBuckets, today)];
 }
 
@@ -313,7 +313,7 @@ export function effortLabel(effort: string): string {
  * 活动洞察双栏（对齐官方资料页「Activity insights / Most used plugins」）：
  * 左栏关键指标、右栏 top 插件/技能（@=插件、$=技能）。字段全部可缺省，空栏不渲染。
  */
-function insightsElements(p: CodexProfileStats): CardElement[] {
+function insightsElements(p: AccountProfileStats): CardElement[] {
   const left: string[] = [];
   if (p.fastModePct !== undefined) left.push(`Fast Mode　**${Math.round(p.fastModePct)}%**`);
   if (p.mostUsedEffort) {
@@ -357,7 +357,7 @@ function joinWithHr(blocks: CardElement[][]): CardElement[] {
 export type UsageCardState =
   | { phase: 'loading' }
   | { phase: 'error'; kind: UsageErrorKind; message: string }
-  | { phase: 'ready'; data: CodexUsageBundle; now?: number; today?: string };
+  | { phase: 'ready'; data: AccountUsageBundle; now?: number; today?: string };
 
 const usageButtons = (): CardElement =>
   actions([
@@ -490,7 +490,7 @@ export function buildShareConfigCard(done = false): CardObject {
  * 区块按 sections 取舍，joinWithHr 动态排版——缺席的区块连分隔线一起消失。
  */
 export function buildUsageShareCard(
-  data: CodexUsageBundle,
+  data: AccountUsageBundle,
   opts: { now?: number; today?: string; sections?: Set<ShareSectionKey> } = {},
 ): CardObject {
   const { profile, usage } = data;

@@ -8,7 +8,7 @@ import { checkboxSelect } from '../checkbox';
 
 /** `bot init [name]` — register an additional feishu app via scan-QR + authorize. */
 export async function runBotInit(name?: string): Promise<void> {
-  if (!ensureCodex()) {
+  if (!(await ensureCodex())) {
     process.exitCode = 1;
     return;
   }

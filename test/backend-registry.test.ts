@@ -36,7 +36,20 @@ describe('claude-sdk backend：能力守卫（无半实现）', () => {
   it('注册表解析到 ClaudeSdkBackend，capabilities 全 false', () => {
     expect(be).toBeInstanceOf(ClaudeSdkBackend);
     expect(be.id).toBe('claude-sdk');
-    expect(be.capabilities).toEqual({ goal: false, steer: false, compact: false, resume: false });
+    expect(be.capabilities).toEqual({
+      goal: false,
+      steer: false,
+      compact: false,
+      resume: false,
+      approvals: false,
+    });
+  });
+
+  it('doctor() 返回探测结构（SDK 随包安装 → ok），与 isAvailable 一致', async () => {
+    const probe = await be.doctor();
+    expect(probe.ok).toBe(true);
+    expect(probe.location).toContain('claude-agent-sdk');
+    expect(probe.ok).toBe(await be.isAvailable());
   });
 
   it('listThreads（/resume 选择卡）抛明确的「暂不支持」错误', async () => {

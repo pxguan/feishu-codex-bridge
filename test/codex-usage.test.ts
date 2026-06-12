@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { UsageError } from '../src/agent/types';
 import {
   chatgptBaseUrl,
   jwtExpMs,
@@ -9,7 +10,6 @@ import {
   mapUsageResponse,
   readCodexAuth,
   resolveCodexHome,
-  UsageError,
 } from '../src/agent/codex-appserver/usage';
 
 // ── fixtures：来自 wham 端点的真机捕获结构（数值脱敏）──────────────────

@@ -1,7 +1,7 @@
 import type { BotAddedEvent, CardActionEvent, CommentEvent, LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { DEFAULT_BACKEND_ID, createBackend } from '../agent';
 import type { AgentBackend, AgentInput, AgentRun, AgentThread, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
-import { isGoalTerminal } from '../agent/types';
+import { isGoalTerminal, UsageError } from '../agent/types';
 import {
   getMaxConcurrentRuns,
   getPendingPolicy,
@@ -83,8 +83,7 @@ import {
   latestVersion,
   restartDaemon,
 } from '../service/update';
-import { resolveCodexBin, codexVersionAsync } from '../agent/codex-appserver/locate';
-import { fetchUsageBundle, UsageError } from '../agent/codex-appserver/usage';
+import { fetchUsageBundle } from '../agent/usage';
 import {
   buildShareConfigCard,
   buildUsageCard,
@@ -1672,12 +1671,10 @@ export function createOrchestrator(
     })
     .on(DM.doctor, async ({ evt }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
-      // 体检要看「现在」的状态：force 绕过 locate 模块缓存重新探测。版本走异步
-      // spawn——卡片回调里**绝不能** spawnSync（见 DM.update），同步 codex
-      // --version（~320ms×2）会把所有话题的流式 pump 一起冻住。下方 isAvailable
-      // 复用这里刚刷进缓存的版本号，不再二次 spawn。
-      const codexBin = resolveCodexBin({ force: true });
-      const codexVer = codexBin ? await codexVersionAsync(codexBin, { force: true }) : null;
+      // 体检要看「现在」的状态：backend.doctor({force}) 绕过探测缓存重新探测。
+      // 探测全程异步——卡片回调里**绝不能** spawnSync（见 DM.update），同步 codex
+      // --version（~320ms×2）会把所有话题的流式 pump 一起冻住。
+      const codexProbe = await backend.doctor({ force: true });
       // 飞书权限自检：读 keystore 里的 App Secret → 换 tenant_access_token → 查已开通
       // scope（application/v6/scopes 的 grant_status，含 im:message.group_msg 等事件订阅
       // 类）。任一步失败时 missingScopes 留 undefined，卡片显示「无法自动检查」而非误报
@@ -1690,8 +1687,8 @@ export function createOrchestrator(
       const missingScopes = scopeCheck?.missingScopes;
       const missingJoinScopes = scopeCheck?.missingJoinScopes;
       const info: DoctorInfo = {
-        codexOk: await backend.isAvailable().catch(() => false),
-        codexVer,
+        codexOk: codexProbe.ok,
+        codexVer: codexProbe.version,
         conn: channel.getConnectionStatus?.()?.state ?? 'unknown',
         bridgeVer: bridgeVersion(),
         node: process.version,

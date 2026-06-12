@@ -5,6 +5,7 @@ import type {
   AgentInput,
   AgentRun,
   AgentThread,
+  BackendProbe,
   CompactResult,
   HistoryTool,
   HistoryTurn,
@@ -360,9 +361,26 @@ export class CodexAppServerBackend implements AgentBackend {
   private modelCache: ModelInfo[] | null = null;
 
   async isAvailable(): Promise<boolean> {
+    return (await this.doctor()).ok;
+  }
+
+  async doctor(opts?: { force?: boolean }): Promise<BackendProbe> {
     // async 版本探测：DM 体检等卡片回调会 await 这里，同步 spawn 会冻结事件循环。
-    const bin = resolveCodexBin();
-    return bin !== null && (await codexVersionAsync(bin)) !== null;
+    // force 绕过 locate 模块缓存重新探测（体检要看「现在」的状态）。
+    const probe = opts?.force ? { force: true as const } : undefined;
+    const bin = resolveCodexBin(probe);
+    if (!bin) {
+      return {
+        ok: false,
+        version: null,
+        hint: '未找到。设置 CODEX_BIN，或安装 @openai/codex，或装 Codex.app',
+      };
+    }
+    const version = await codexVersionAsync(bin, probe);
+    if (!version) {
+      return { ok: false, version: null, location: bin, hint: `codex --version 执行失败（${bin}）` };
+    }
+    return { ok: true, version, location: bin };
   }
 
   async listModels(): Promise<ModelInfo[]> {
