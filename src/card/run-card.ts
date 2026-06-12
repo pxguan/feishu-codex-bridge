@@ -288,6 +288,46 @@ export function buildRunCardPlain(rc: RunCardState): CardObject {
   return buildRunCard({ ...rc, cardKey: undefined });
 }
 
+/** Render inputs for the queue placeholder card (M-3 排队可见可取消). */
+export interface QueuedCardState {
+  /** 1-based position in the global run queue (waiting layout only). */
+  position?: number;
+  /** routes the ⏹ 取消 button (the card's own messageId); unset → no button
+   * (the first frame, before the messageId exists). */
+  cardKey?: string;
+  /** ⏹ tapped while waiting — terminal「已取消排队」layout. */
+  cancelled?: boolean;
+  /** follow-up messages queued behind the cancelled run (told, not swallowed). */
+  dropped?: number;
+  /** goal runs only: slot granted — the goal's own (lazily created) run cards
+   * take over, this entity is repainted into a short started note. */
+  started?: boolean;
+}
+
+/**
+ * Queue placeholder card — posted BEFORE the global semaphore acquire when the
+ * run pool is full, so a queued run is visible and cancellable. The ⏹ 取消
+ * button reuses the run card's {@link RC.stop} action: while waiting,
+ * `state.interrupt` resolves to「移除 waiter + 释放预订」(see acquireRunSlot).
+ * Once the slot is granted the SAME CardKit entity is repainted in place into
+ * the first run card (launchRun) or a started note (goal) — no
+ * delete-and-recreate flicker.
+ */
+export function buildQueuedCard(qc: QueuedCardState): CardObject {
+  if (qc.cancelled) {
+    const els: CardElement[] = [noteMd('_⏹ 已取消排队_')];
+    if (qc.dropped) els.push(noteMd(`_⚠️ ${qc.dropped} 条排队消息已丢弃，请重发。_`));
+    return card(els, { summary: '已取消排队' });
+  }
+  if (qc.started) return card([noteMd('_🎯 排队结束，目标已开始执行_')], { summary: '已开始执行' });
+  const els: CardElement[] = [
+    md(`⏳ 排队中（第 **${qc.position ?? 1}** 位）`),
+    noteMd('全局并发池已满（所有群/话题共享），轮到后自动开始。'),
+  ];
+  if (qc.cardKey) els.push(actions([button('⏹ 取消', { a: RC.stop, m: qc.cardKey }, 'danger')]));
+  return card(els, { summary: '排队中' });
+}
+
 interface ToolGroup {
   kind: 'tools';
   tools: ToolEntry[];

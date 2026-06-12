@@ -38,7 +38,7 @@ import {
   type ResumeCardState,
 } from '../card/command-cards';
 import { buildHistoryCard, type HistoryCardState } from '../card/history-card';
-import { ANSWER_EID, buildRunCard, buildRunCardPlain, RC, type RunCardState } from '../card/run-card';
+import { ANSWER_EID, buildQueuedCard, buildRunCard, buildRunCardPlain, RC, type RunCardState } from '../card/run-card';
 import { buildGoalDoneCard } from '../card/goal-card';
 import { RunCardStream } from '../card/run-card-stream';
 import { buildCleanCard, extractCardFences } from '../card/markdown-render';
@@ -345,6 +345,36 @@ export class RecentIdCache {
   }
 }
 
+// ── M-3 空闲进程 reaper 参数 ─────────────────────────────────────────
+/** 超过这个时长没有任何轮次的 LIVE 会话进程被回收（close + 驱逐缓存）。持久化
+ * 记录保留，下一条消息经 resolveThread 的 resume 兜底自愈（~250ms–1.6s），对话
+ * 无感衔接。synthesis 给的区间 30–60min，取中值。 */
+const SESSION_REAP_IDLE_MS = 45 * 60_000;
+/** reaper 清扫周期。 */
+const SESSION_REAP_SWEEP_MS = 5 * 60_000;
+
+/**
+ * M-3 空闲进程 reaper 的纯决策：从 LIVE 会话 key 里挑出可回收的 —— 跳过 busy
+ * 的（运行/排队中的 active、评论串行链的 docLocks）与最近 idleMs 内有过轮次
+ * （touchedAt 打点）的；没有打点的 key 不回收（调用方先补记，下一轮再评估）。
+ */
+export function pickIdleSessions(
+  keys: Iterable<string>,
+  touchedAt: ReadonlyMap<string, number>,
+  isBusy: (key: string) => boolean,
+  idleMs: number,
+  now: number,
+): string[] {
+  const out: string[] = [];
+  for (const key of keys) {
+    if (isBusy(key)) continue;
+    const at = touchedAt.get(key);
+    if (at === undefined || now - at < idleMs) continue;
+    out.push(key);
+  }
+  return out;
+}
+
 export function createOrchestrator(
   channel: LarkChannel,
   cfg: AppConfig,
@@ -367,6 +397,18 @@ export function createOrchestrator(
    * using it directly — identical to the pre-registry behavior. */
   const backend = backendFor();
   const sessions = new Map<string, AgentThread>();
+  /** M-3 空闲 reaper 的轮次时钟：每次进 LIVE 缓存（trackSession）/ 每轮收尾
+   * （touchSession）打点；空闲时长 = now − 最后打点。 */
+  const sessionTouchedAt = new Map<string, number>();
+  /** sessions.set + 打点 —— 所有放进 LIVE 缓存的会话一律走这里。 */
+  function trackSession(key: string, thread: AgentThread): void {
+    sessions.set(key, thread);
+    sessionTouchedAt.set(key, Date.now());
+  }
+  /** 轮次收尾打点：刷新会话的空闲时钟（不在 LIVE 缓存则忽略）。 */
+  function touchSession(key: string): void {
+    if (sessions.has(key)) sessionTouchedAt.set(key, Date.now());
+  }
   const active = new Map<string, ActiveState>();
   /** Per-doc serialization for comment runs (see {@link withDocLock}). */
   const docLocks = new Map<string, Promise<void>>();
@@ -934,7 +976,7 @@ export function createOrchestrator(
           const cwd = project?.cwd ?? fallbackCwd;
           const be = backendFor(project?.backend);
           thread = await be.startThread({ cwd, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
-          sessions.set(sessionKey, thread);
+          trackSession(sessionKey, thread);
           await upsertSession({
             threadId: sessionKey,
             chatId: msg.chatId,
@@ -1045,7 +1087,7 @@ export function createOrchestrator(
         network: perm?.network,
         autoCompact: perm?.autoCompact,
       });
-      sessions.set(threadId, resumed);
+      trackSession(threadId, resumed);
       return { thread: resumed, recreated: false };
     } catch (err) {
       log.fail('agent', err, { phase: 'resume-on-turn', threadId });
@@ -1058,7 +1100,7 @@ export function createOrchestrator(
         network: perm?.network ?? project?.network,
         autoCompact: perm?.autoCompact ?? project?.autoCompact,
       });
-      sessions.set(threadId, fresh);
+      trackSession(threadId, fresh);
       // The resumed codex thread is gone — repoint the persisted record at the
       // new thread id so a later restart doesn't keep resuming the dead one.
       await patchSession(threadId, { sessionId: fresh.sessionId }).catch(() => undefined);
@@ -2280,14 +2322,78 @@ export function createOrchestrator(
     timing?: { tResolve: number; tWeave: number };
   }
 
+  /** The queue placeholder card's CardKit entity, handed to the run for in-place
+   * reuse (占位卡→run 卡同一实体翻面，防闪烁). */
+  interface QueuedCardHandle {
+    stream: RunCardStream;
+    msgId: string;
+  }
+
+  /**
+   * M-3 排队可见可取消：拿全局并发槽。池有空位 → 直接 acquire（与旧行为一致，
+   * 无卡）。池满 → 先发「⏳ 排队中（第 N 位）+ ⏹ 取消」占位卡再进 FIFO 队列：
+   * 位置变化原地刷新；等待期 ⏹（走既有 RC.stop 回调 → state.interrupt）解析为
+   * 「移除 waiter + 释放预订」（active/sessions/进程全回收，占位卡翻「已取消」
+   * 终态）。返回 null = 等待期被取消；否则带回 release 与占位卡实体 ——
+   * launchRun 的首轮 run 卡复用同一张 CardKit 实体原地翻面（不闪烁），goal 则
+   * 把它翻成「已开始执行」短报（goal 的 run 卡按 turn 懒建，不能钉死在一张上）。
+   */
+  async function acquireRunSlot(
+    opts: LaunchOpts,
+    state: ActiveState,
+    activeKey: string,
+    reaction?: RunReaction,
+  ): Promise<{ release: () => void; queuedCard?: QueuedCardHandle } | null> {
+    if (sema.hasFree()) return { release: await sema.acquire() };
+    const stream = new RunCardStream();
+    let msgId: string | undefined;
+    const q = sema.enqueue((pos) => {
+      // 前面有人拿到槽/取消 → 原地刷新位置。走合并泵（非阻塞、合并、限频）。
+      if (msgId) stream.streamCoalesced(channel, buildQueuedCard({ position: pos, cardKey: msgId }), null);
+    });
+    try {
+      msgId = await stream.create(channel, opts.chatId, buildQueuedCard({ position: q.position() }), {
+        replyTo: opts.replyTo,
+        replyInThread: opts.flat ? false : (opts.replyInThread ?? Boolean(opts.knownThreadId)),
+      });
+      // 自指按钮（m = 自己的 messageId）只能在拿到 messageId 后补上。建卡 RTT 里
+      // 槽可能已到手（position()=0）——那就不补按钮，run 卡马上原地接管。
+      const pos = q.position();
+      if (pos > 0) await stream.updateCard(channel, buildQueuedCard({ position: pos, cardKey: msgId }));
+      runsByCard.set(msgId, state);
+      runStreams.set(msgId, stream);
+    } catch (err) {
+      // 占位卡失败不阻断排队：没有卡只是不可见/不可取消，run 照常等槽。
+      log.fail('card', err, { phase: 'queued-card' });
+    }
+    log.info('intake', 'run-queued', { position: q.position(), key: activeKey });
+    // 等待期 ⏹ = 移除 waiter + 释放预订。槽已到手的瞬间 cancel() 返回 false →
+    // 让位给运行期 interrupt（launchRun 每轮重装）。
+    state.interrupt = () => {
+      if (!q.cancel()) return;
+      active.delete(activeKey);
+      if (opts.knownThreadId) sessions.delete(opts.knownThreadId);
+      // 还没跑过任何 turn：直接回收进程。持久化记录保留，重发消息经 resume 兜底。
+      void opts.thread.close().catch(() => undefined);
+      if (msgId) {
+        runsByCard.delete(msgId);
+        runStreams.delete(msgId);
+        void stream.updateCard(channel, buildQueuedCard({ cancelled: true, dropped: state.queue.length }));
+      }
+      reaction?.done();
+      log.info('card', 'action', { actionId: 'run.stop', queuedCancel: true });
+    };
+    const release = await q.acquired;
+    state.interrupt = undefined;
+    if (!release) return null; // 已取消：占位卡已翻终态，预订已释放
+    return { release, queuedCard: msgId ? { stream, msgId } : undefined };
+  }
+
   async function launchRun(
     opts: LaunchOpts,
     reaction?: RunReaction,
     onTopicCreated?: () => void,
   ): Promise<void> {
-    const release = await sema.acquire();
-    reaction?.started(); // slot acquired → flip OneSecond → Typing
-    let firstCardSent = false;
     let activeKey = opts.knownThreadId ?? `pending:${opts.replyTo}`;
     let topicThreadId = opts.knownThreadId;
     // Reuse the reservation handleTurn made for this session (so messages
@@ -2296,7 +2402,15 @@ export function createOrchestrator(
     state.thread = opts.thread;
     if (opts.requesterOpenId) state.requesterOpenId = opts.requesterOpenId;
     active.set(activeKey, state);
-    if (opts.knownThreadId) sessions.set(opts.knownThreadId, opts.thread);
+    if (opts.knownThreadId) trackSession(opts.knownThreadId, opts.thread);
+
+    // M-3: 池满先排队（占位卡可见可取消）；null = 等待期被 ⏹ 取消，预订已释放。
+    const slot = await acquireRunSlot(opts, state, activeKey, reaction);
+    if (!slot) return;
+    const { release } = slot;
+    let queuedCard = slot.queuedCard;
+    reaction?.started(); // slot acquired → flip OneSecond → Typing
+    let firstCardSent = false;
 
     const persist = async (threadId: string): Promise<void> => {
       await upsertSession({
@@ -2370,7 +2484,7 @@ export function createOrchestrator(
               const key = opts.roleSuffix ? `${tid}#${opts.roleSuffix}` : tid;
               active.delete(activeKey);
               active.set(key, state);
-              sessions.set(key, opts.thread);
+              trackSession(key, opts.thread);
               activeKey = key;
               topicThreadId = key;
               rc.threadId = key;
@@ -2384,10 +2498,20 @@ export function createOrchestrator(
 
         // CardKit streaming entity: body streams with the native typewriter,
         // ⏹/⚙️ ride whole-card updates — both on one card_id (see RunCardStream).
-        const stream = new RunCardStream();
+        const stream = queuedCard?.stream ?? new RunCardStream();
         const tCreate = Date.now();
         try {
-          cardMsgId = await stream.create(channel, opts.chatId, buildRunCard(rc), { replyTo, replyInThread });
+          if (queuedCard) {
+            // 占位卡→run 卡：同一 CardKit 实体 whole-card update 原地翻面（不闪
+            // 烁、不留垃圾卡）。update 的 card JSON 带 streaming_mode=true；若该
+            // 设置未随 update 生效，首次元素推送的 300309 自愈路径会重开
+            // streaming 并重推（见 RunCardStream.streamElement）。
+            cardMsgId = queuedCard.msgId;
+            queuedCard = undefined; // 只复用一次；排队续轮照常新建卡
+            await stream.updateCard(channel, buildRunCard(rc));
+          } else {
+            cardMsgId = await stream.create(channel, opts.chatId, buildRunCard(rc), { replyTo, replyInThread });
+          }
         } catch (err) {
           // turn/start 已提前发出：建卡失败时模型已在跑，必须中断并回收进程——
           // 无人消费的通知流会污染该 thread 的下一轮。turnId 此时多半还没到手
@@ -2559,7 +2683,10 @@ export function createOrchestrator(
             log.fail('card', err, { phase: 'clean-card' });
           }
         }
-        if (topicThreadId) await patchSession(topicThreadId, { updatedAt: Date.now() });
+        if (topicThreadId) {
+          touchSession(topicThreadId); // 轮次收尾打点（M-3 reaper 的空闲时钟）
+          await patchSession(topicThreadId, { updatedAt: Date.now() });
+        }
         replyTo = finalMsgId;
         replyInThread = !opts.flat; // stay in the topic for queued turns (single: stay flat)
         log.info('card', 'final', { terminal: render.terminal() });
@@ -2611,7 +2738,6 @@ export function createOrchestrator(
    */
   async function launchGoalRun(opts: LaunchOpts): Promise<void> {
     const objective = opts.firstText;
-    const release = await sema.acquire();
     let activeKey = opts.knownThreadId ?? `pending:${opts.replyTo}`;
     let topicThreadId = opts.knownThreadId;
     const state: ActiveState = active.get(activeKey) ?? { queue: [], requesterOpenId: opts.requesterOpenId };
@@ -2619,7 +2745,20 @@ export function createOrchestrator(
     state.isGoal = true; // messages during the goal get a prompt, never queue (handleTurn)
     if (opts.requesterOpenId) state.requesterOpenId = opts.requesterOpenId;
     active.set(activeKey, state);
-    if (opts.knownThreadId) sessions.set(opts.knownThreadId, opts.thread);
+    if (opts.knownThreadId) trackSession(opts.knownThreadId, opts.thread);
+
+    // M-3: 池满先排队（占位卡可见可取消）；null = 等待期被 ⏹ 取消，预订已释放。
+    const slot = await acquireRunSlot(opts, state, activeKey);
+    if (!slot) return;
+    const { release } = slot;
+    if (slot.queuedCard) {
+      // goal 的 run 卡按 turn 懒建（首个有内容的 turn 才出卡），不把占位实体钉成
+      // 某一轮的卡 —— 否则规划-only 的 goal 会让它永远停在「排队中」。原地翻成
+      // 「已开始执行」短报（同一实体 update，不闪烁），后续 run 卡照常另出。
+      runsByCard.delete(slot.queuedCard.msgId);
+      runStreams.delete(slot.queuedCard.msgId);
+      void slot.queuedCard.stream.updateCard(channel, buildQueuedCard({ started: true }));
+    }
 
     const persist = async (threadId: string): Promise<void> => {
       await upsertSession({
@@ -2959,6 +3098,7 @@ export function createOrchestrator(
               void thread.close().catch(() => undefined);
               sessions.delete(sessionKey);
             } else {
+              touchSession(sessionKey); // 轮次收尾打点（M-3 reaper 的空闲时钟）
               await patchSession(sessionKey, { updatedAt: Date.now() });
             }
 
@@ -3019,7 +3159,7 @@ export function createOrchestrator(
           model: rec.model,
           effort: rec.effort,
         });
-        sessions.set(sessionKey, resumed);
+        trackSession(sessionKey, resumed);
         return resumed;
       } catch (err) {
         log.fail('agent', err, { phase: 'comment-resume', sessionKey });
@@ -3027,7 +3167,7 @@ export function createOrchestrator(
     }
     const { model, effort } = pickDefault(await listModels());
     const fresh = await backend.startThread({ cwd: fallbackCwd, model, effort });
-    sessions.set(sessionKey, fresh);
+    trackSession(sessionKey, fresh);
     await upsertSession({
       threadId: sessionKey,
       chatId: sessionKey,
@@ -3112,7 +3252,38 @@ export function createOrchestrator(
     }
   }
 
+  // ── M-3 空闲进程 reaper ──────────────────────────────────────────
+  // sessions 只增不减：数周 daemon 会积累几十上百个常驻 agent 进程（每个 ~172MB
+  // 子树）。周期清扫超过 SESSION_REAP_IDLE_MS 无轮次的 LIVE 会话：close()
+  // （SIGKILL 子进程）+ 驱逐缓存。持久化记录不动 —— 下一条消息经 resolveThread
+  // 的 resume 兜底自愈，对话无感衔接。active（运行/排队中）与 docLocks（评论
+  // 串行链）持有的会话跳过；goal 话题本就每轮收尾回收，不受影响。与 watchdog
+  // 的假死超时语义不冲突：那是单轮内的事件静默，这里是轮与轮之间的空闲。
+  const reaper = setInterval(() => {
+    const now = Date.now();
+    // 没打点的 key 先补记（理论不可达——所有入缓存都走 trackSession），下轮评估；
+    // 已驱逐会话的残留打点顺手清掉，时钟表不随历史会话无限增长。
+    for (const key of sessions.keys()) if (!sessionTouchedAt.has(key)) sessionTouchedAt.set(key, now);
+    for (const key of [...sessionTouchedAt.keys()]) if (!sessions.has(key)) sessionTouchedAt.delete(key);
+    const idle = pickIdleSessions(
+      sessions.keys(),
+      sessionTouchedAt,
+      (k) => active.has(k) || docLocks.has(k),
+      SESSION_REAP_IDLE_MS,
+      now,
+    );
+    for (const key of idle) {
+      const thread = sessions.get(key);
+      sessions.delete(key);
+      sessionTouchedAt.delete(key);
+      if (thread) void thread.close().catch(() => undefined);
+    }
+    if (idle.length > 0) log.info('agent', 'idle-reap', { reaped: idle.length, live: sessions.size });
+  }, SESSION_REAP_SWEEP_MS);
+  reaper.unref(); // 不挡进程退出（CLI/测试里 orchestrator 可能不走 shutdown）
+
   async function shutdown(): Promise<void> {
+    clearInterval(reaper);
     const live = [...sessions.values()];
     sessions.clear();
     // close() SIGKILLs each app-server child; settle all so one hang/throw

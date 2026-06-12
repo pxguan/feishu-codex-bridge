@@ -217,3 +217,79 @@ describe('Semaphore.hasFree', () => {
     expect(sem.hasFree()).toBe(true);
   });
 });
+
+// M-3: 排队可见（位置）+ 可取消（tryCancel waiter）。
+describe('Semaphore.enqueue', () => {
+  it('grants immediately (position 0) when a slot is free', async () => {
+    const sem = new Semaphore(1);
+    const q = sem.enqueue();
+    expect(q.position()).toBe(0);
+    const release = await q.acquired;
+    expect(release).toBeTypeOf('function');
+    release!();
+  });
+
+  it('exposes 1-based queue positions that advance as slots free up', async () => {
+    const sem = new Semaphore(1);
+    const r1 = await sem.acquire();
+    const q2 = sem.enqueue();
+    const q3 = sem.enqueue();
+    expect(q2.position()).toBe(1);
+    expect(q3.position()).toBe(2);
+
+    r1();
+    const r2 = await q2.acquired;
+    expect(q2.position()).toBe(0); // granted
+    expect(q3.position()).toBe(1); // moved up
+
+    r2!();
+    const r3 = await q3.acquired;
+    expect(r3).toBeTypeOf('function');
+    r3!();
+  });
+
+  it('cancel removes the waiter: acquired resolves null and the slot skips it (FIFO preserved)', async () => {
+    const sem = new Semaphore(1);
+    const r1 = await sem.acquire();
+    const q2 = sem.enqueue();
+    const q3 = sem.enqueue();
+
+    expect(q2.cancel()).toBe(true);
+    await expect(q2.acquired).resolves.toBeNull();
+    expect(q2.cancel()).toBe(false); // already cancelled
+    expect(q3.position()).toBe(1); // moved up past the cancelled waiter
+
+    r1();
+    const r3 = await q3.acquired;
+    expect(r3).toBeTypeOf('function');
+    r3!();
+    expect(sem.hasFree()).toBe(true);
+  });
+
+  it('cancel after the slot was granted returns false (caller owns a normal release)', async () => {
+    const sem = new Semaphore(1);
+    const q1 = sem.enqueue();
+    const release = await q1.acquired;
+    expect(q1.cancel()).toBe(false);
+    release!();
+    expect(sem.hasFree()).toBe(true);
+  });
+
+  it('onAdvance fires with the new position when an earlier waiter is granted or cancelled', async () => {
+    const sem = new Semaphore(1);
+    const r1 = await sem.acquire();
+    const pos2: number[] = [];
+    const pos3: number[] = [];
+    const q2 = sem.enqueue((p) => pos2.push(p));
+    const q3 = sem.enqueue((p) => pos3.push(p));
+
+    q2.cancel(); // 前面的人取消 → q3 升到第 1 位
+    expect(pos3).toEqual([1]);
+
+    r1(); // 槽空出 → q3 直接拿到（不再有 onAdvance — 它已不在队列里）
+    const r3 = await q3.acquired;
+    expect(pos3).toEqual([1]);
+    expect(pos2).toEqual([]); // 取消者自己不收通知
+    r3!();
+  });
+});

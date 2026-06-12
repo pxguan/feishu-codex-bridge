@@ -678,6 +678,7 @@ export function buildSettingsCard(cfg: AppConfig): CardObject {
         { label: '10', value: '10' },
         { label: '20', value: '20' },
       ]),
+      note('⚡ 并发池为**所有群/话题全局共享**：满了新任务按先来后到排队（排队卡可见、可 ⏹ 取消）。'),
       note('⚠️ 并发上限 改后需**重启**生效；其余设置（含假死超时）即时生效，所有群立即套用。'),
       hr(),
       actions([button('👮 管理员', { a: DM.admins }), button('⬅️ 菜单', { a: DM.menu })]),

@@ -61,10 +61,26 @@ export async function* withIdleTimeout<T>(
   }
 }
 
+/** A queued slot request from {@link Semaphore.enqueue} (M-3 排队可见可取消). */
+export interface QueuedAcquire {
+  /** Resolves with the release fn once a slot is granted — or `null` if the
+   * waiter was cancelled while still queued. */
+  acquired: Promise<(() => void) | null>;
+  /** 1-based position in the wait queue; 0 once granted (or cancelled). */
+  position(): number;
+  /** Remove the waiter before its slot is granted (排队取消). True if removed
+   * (`acquired` resolves `null`, the reservation is gone); false if the slot
+   * was already granted / already cancelled — the caller then owns a normal
+   * release and must route the cancel to the running turn instead. */
+  cancel(): boolean;
+}
+
+type Waiter = { grant: () => void; onAdvance?: (pos: number) => void };
+
 /** Minimal FIFO semaphore for the global concurrent-run cap. */
 export class Semaphore {
   private active = 0;
-  private waiters: (() => void)[] = [];
+  private waiters: Waiter[] = [];
   constructor(private readonly max: number) {}
 
   /** True if acquire() would grant a slot without queueing. */
@@ -73,17 +89,61 @@ export class Semaphore {
   }
 
   async acquire(): Promise<() => void> {
-    if (this.active >= this.max) {
-      await new Promise<void>((res) => this.waiters.push(res));
-    }
-    this.active++;
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this.active--;
-      const next = this.waiters.shift();
-      if (next) next();
+    // acquire() exposes no cancel handle, so `acquired` always grants.
+    return (await this.enqueue().acquired) as () => void;
+  }
+
+  /**
+   * Acquire with queue visibility + cancellation: when the pool is full the
+   * returned handle exposes the waiter's live 1-based queue position
+   * (`onAdvance` fires on every change) and `cancel()` to leave the queue —
+   * the entry ahead-of/behind semantics stay strictly FIFO.
+   */
+  enqueue(onAdvance?: (pos: number) => void): QueuedAcquire {
+    let settle!: (r: (() => void) | null) => void;
+    const acquired = new Promise<(() => void) | null>((res) => {
+      settle = res;
+    });
+    let settled = false; // granted or cancelled — guards double-settling
+    const grant = (): void => {
+      settled = true;
+      this.active++;
+      let released = false;
+      settle(() => {
+        if (released) return;
+        released = true;
+        this.active--;
+        const next = this.waiters.shift();
+        if (next) {
+          next.grant();
+          this.notifyAdvance();
+        }
+      });
     };
+    const entry: Waiter = { grant, onAdvance };
+    if (this.active < this.max) grant();
+    else this.waiters.push(entry);
+    return {
+      acquired,
+      position: (): number => {
+        const i = this.waiters.indexOf(entry);
+        return i >= 0 ? i + 1 : 0;
+      },
+      cancel: (): boolean => {
+        if (settled) return false;
+        const i = this.waiters.indexOf(entry);
+        if (i < 0) return false;
+        this.waiters.splice(i, 1);
+        settled = true;
+        settle(null);
+        this.notifyAdvance(i);
+        return true;
+      },
+    };
+  }
+
+  /** Tell every waiter at/after `fromIndex` its new 1-based position. */
+  private notifyAdvance(fromIndex = 0): void {
+    for (let i = fromIndex; i < this.waiters.length; i++) this.waiters[i]?.onAdvance?.(i + 1);
   }
 }
