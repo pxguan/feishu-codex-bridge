@@ -8,7 +8,7 @@ import {
   type AppConfig,
 } from '../config/schema';
 import { defaultNoMention, effectiveGuestMode, effectiveMode, type Project } from '../project/registry';
-import type { PermissionMode } from '../agent/types';
+import { DEFAULT_BACKEND_ID, type PermissionMode } from '../agent/types';
 import type { SessionRecord } from '../bot/session-store';
 import { labelScope } from '../config/scopes';
 import { summarizeEventDiagnosis, type EventDiagnosis } from '../utils/event-diagnosis';
@@ -72,6 +72,9 @@ export const DM = {
   // 🔐 权限：codex 沙箱档位（管理员档 + 普通用户档）+ 联网，做成下拉表单（选+提交）
   permission: 'dm.proj.perm',
   permissionSubmit: 'dm.proj.perm.submit',
+  // 🧠 后端：项目级 agent 后端选择（注册表动态列出），下拉+提交（同 🔐 权限模式）
+  backend: 'dm.proj.backend',
+  backendSubmit: 'dm.proj.backend.submit',
 } as const;
 
 /** Action ids for the in-group settings card (@bot /settings). */
@@ -830,8 +833,9 @@ const MODE_OPTS: { value: PermissionMode; label: string; desc: string }[] = [
   { value: 'full', label: '⚠️ 完全访问', desc: '能读写整台电脑上的任何文件' },
 ];
 
-/** Short label for a tier (falls back to the raw value). */
-function tierLabel(m: PermissionMode): string {
+/** Short label for a tier (falls back to the raw value). Exported for the
+ * backend-switch validation's rejection message (handle-message). */
+export function tierLabel(m: PermissionMode): string {
   return MODE_OPTS.find((o) => o.value === m)?.label ?? m;
 }
 
@@ -892,15 +896,49 @@ export function buildPermissionCard(p: Pick<Project, 'name' | 'mode' | 'guestMod
 }
 
 /**
+ * 🧠 后端选择卡（DM「项目设置 → 🧠 后端」）。下拉+提交，复用 🔐 权限的表单模式
+ * （selectMenu 表单收值、提交时才读、不锁卡；提交后 card_id 锁定，结果发新卡留痕）。
+ * `backends` 由调用方从注册表动态取（id + displayName）——绝不硬编码后端列表。
+ * 切换只影响**新话题**：已有话题会话按 SessionRecord.backend 仍走原后端（既有
+ * 语义，见 resolveThread 的按记录路由），所以提交 handler 不驱逐活跃会话。
+ */
+export function buildBackendCard(
+  p: Pick<Project, 'name' | 'backend'>,
+  backends: { id: string; name: string }[],
+  error?: string,
+): CardObject {
+  const current = p.backend ?? DEFAULT_BACKEND_ID;
+  const options: SelectOption[] = backends.map((b) => ({
+    label: `${b.name}${b.id === DEFAULT_BACKEND_ID ? '（默认）' : ''}`,
+    value: b.id,
+  }));
+  const elements: CardElement[] = [];
+  if (error) elements.push(md(`❌ **切换失败**：${error}`));
+  elements.push(
+    md(`**🧠 后端** · ${p.name}`),
+    note('本项目用哪个 agent 后端跑。**切换只对新话题生效；已有话题会话仍走原后端**（按会话记录路由）。'),
+    form('backend', [
+      selectMenu({ name: 'backend', placeholder: '选择后端', options, initial: current }),
+      actions([submitButton('✅ 切换后端', { a: DM.backendSubmit, n: p.name }, 'primary', 'submit_backend')]),
+    ]),
+    note('提交时会先体检目标后端（未安装 / 不可用会拒绝）；部分后端仅支持特定权限档，不满足会拒绝并说明原因。'),
+    actions([button('⬅️ 返回设置', { a: DM.projectSettings, n: p.name })]),
+  );
+  return card(elements, { header: { title: '🧠 后端', template: 'blue' } });
+}
+
+/**
  * 项目设置卡（DM「📁 项目列表 / 建项目完成卡 → ⚙️ 设置」）。可扩展容器：当前放
- * 🔐 权限 + 免@ 开关 + 响应白名单入口，以后的项目级设置项往这里加。纯按钮（不锁卡）。
- * 各按钮携带项目名 n（DM 里点，不能靠 evt.chatId 取项目）。
+ * 🔐 权限 + 🧠 后端 + 免@ 开关 + 响应白名单入口，以后的项目级设置项往这里加。
+ * 纯按钮（不锁卡）。各按钮携带项目名 n（DM 里点，不能靠 evt.chatId 取项目）。
+ * `backendName` = 当前后端的展示名（调用方从注册表解析）；缺省回退到原始 id。
  */
 export function buildProjectSettingsCard(
   project: Pick<
     Project,
-    'name' | 'kind' | 'noMention' | 'origin' | 'cwd' | 'mode' | 'guestMode' | 'network' | 'autoCompact'
+    'name' | 'kind' | 'noMention' | 'origin' | 'cwd' | 'mode' | 'guestMode' | 'network' | 'autoCompact' | 'backend'
   >,
+  backendName?: string,
 ): CardObject {
   const kind = project.kind ?? 'multi';
   const noMention = project.noMention ?? defaultNoMention(project);
@@ -912,6 +950,11 @@ export function buildProjectSettingsCard(
       hr(),
       actions([button('🔐 权限', { a: DM.permission, n: project.name }, 'primary')]),
       note(`当前 ${permissionSummary(project)}　·　codex 沙箱可访问的范围（管理员 / 普通用户可分设）。`),
+      hr(),
+      actions([button('🧠 后端', { a: DM.backend, n: project.name }, 'primary')]),
+      note(
+        `当前 ${backendName ?? project.backend ?? DEFAULT_BACKEND_ID}　·　本项目新话题用的 agent 后端；已有话题会话仍走原后端。`,
+      ),
       hr(),
       md('✋ 免@（不用 @ 也回复）'),
       actions([

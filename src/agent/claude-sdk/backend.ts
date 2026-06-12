@@ -394,6 +394,9 @@ export class ClaudeSdkBackend implements AgentBackend {
   readonly id = 'claude-sdk';
   readonly displayName = 'Claude Code (Agent SDK)';
   readonly capabilities = CAPABILITIES;
+  /** 权限映射未实现（见模块注释 TODO）：仅「完全访问」档。声明给后端切换 UI 提前
+   * 拦截；硬守卫仍是 {@link assertFullMode}（startThread/resumeThread，fail-closed）。 */
+  readonly supportedModes = ['full'] as const;
 
   async isAvailable(): Promise<boolean> {
     return (await this.doctor()).ok;

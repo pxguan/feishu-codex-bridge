@@ -361,6 +361,10 @@ export interface AgentBackend {
   readonly displayName: string;
   /** undefined ⇒ all true (codex 的完整能力面)；见 {@link AgentCapabilities}。 */
   readonly capabilities?: AgentCapabilities;
+  /** 本后端支持的权限档。undefined ⇒ 全档支持（codex）。声明了的后端 MUST 同时在
+   * startThread/resumeThread 里对档外 mode fail-closed（声明只是给切换 UI 提前
+   * 拦截用的，硬守卫永远在启动路径——绝不静默降级）。 */
+  readonly supportedModes?: readonly PermissionMode[];
   isAvailable(): Promise<boolean>;
   /** Probe the backend runtime（版本/路径/装法提示）—— doctor CLI、onboarding、
    * DM 体检卡共用，替代散落的硬编码探测。`force` 绕过探测缓存（体检要看

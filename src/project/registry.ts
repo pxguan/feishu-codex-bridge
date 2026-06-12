@@ -53,8 +53,9 @@ export interface Project {
   /** agent backend id for this project (see src/agent/index.ts registry).
    * Omitted on old/normal data → the codex default (DEFAULT_BACKEND_ID — historical path,
    * zero behavior change). Routed per project in createOrchestrator's
-   * backendFor(). No picker UI yet — set by editing projects.json (TODO: DM
-   * 项目卡加后端选择). */
+   * backendFor(). Set via the DM 项目设置卡的「🧠 后端」picker（校验见
+   * validateBackendSwitch）；只影响新话题——已有话题会话按 SessionRecord.backend
+   * 仍走原后端. */
   backend?: string;
 }
 

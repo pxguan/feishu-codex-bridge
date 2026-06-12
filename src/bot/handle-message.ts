@@ -6,8 +6,8 @@ import type {
   NormalizedMessage,
   ReactionEvent,
 } from '@larksuiteoapi/node-sdk';
-import { DEFAULT_BACKEND_ID, createBackend } from '../agent';
-import type { AgentBackend, AgentInput, AgentRun, AgentThread, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
+import { DEFAULT_BACKEND_ID, backendIds, createBackend } from '../agent';
+import type { AgentBackend, AgentInput, AgentRun, AgentThread, BackendProbe, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
 import { isGoalTerminal, UsageError } from '../agent/types';
 import {
   getMaxConcurrentRuns,
@@ -71,6 +71,7 @@ import {
   buildAddAllowedCard,
   buildAdminsCard,
   buildAllowlistCard,
+  buildBackendCard,
   buildDmMenuCard,
   buildDoctorCard,
   buildGroupSettingsCard,
@@ -85,6 +86,7 @@ import {
   buildSettingsCard,
   buildUpdateCard,
   buildWatchdogCustomCard,
+  tierLabel,
   DM,
   GS,
   type DoctorInfo,
@@ -114,6 +116,8 @@ import { buildScopeGrantUrl, JOIN_GROUP_SCOPES } from '../config/scopes';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import {
   defaultNoMention,
+  effectiveGuestMode,
+  effectiveMode,
   getProjectByChatId,
   getProjectByName,
   listProjects,
@@ -245,6 +249,46 @@ function selectValue(formValue: Record<string, unknown> | undefined, name: strin
 /** Narrow an arbitrary string to a PermissionMode, else undefined. */
 function asTier(v: string | undefined): PermissionMode | undefined {
   return v === 'qa' || v === 'write' || v === 'full' ? v : undefined;
+}
+
+/**
+ * 项目后端切换的纯校验（exported for tests）：① 目标 id 在注册表里；② 目标后端
+ * doctor() 探测通过（未装 CLI / SDK 不可用要在这里拦住，而不是切过去后每条消息
+ * 报错）；③ 项目两档权限（管理员档 + 普通用户档）都在目标后端声明的支持面内
+ * （如 claude-sdk 仅「完全访问」——其 startThread 的 fail-closed 硬守卫不变，这里
+ * 只是把拒绝提前到切换时并讲清原因）。返回首个不满足的原因（中文，直接上卡）；
+ * 全过返回 null。切换本身不驱逐活跃会话：SessionRecord.backend 让已有话题会话
+ * 仍走原后端，新话题才用新值（resolveThread 按记录路由的既有语义）。
+ */
+export function validateBackendSwitch(opts: {
+  /** 目标后端 id（下拉提交值） */
+  target: string;
+  /** 注册表内全部后端 id（backendIds()） */
+  registered: readonly string[];
+  /** 项目当前权限档（两档都要被目标后端支持） */
+  project: Pick<Project, 'mode' | 'guestMode'>;
+  /** 目标后端声明的权限档支持面（AgentBackend.supportedModes；undefined ⇒ 全支持） */
+  supportedModes?: readonly PermissionMode[];
+  /** 目标后端 doctor() 探测结果；undefined = 探测没跑成，按不可用拒绝 */
+  probe?: BackendProbe;
+}): string | null {
+  if (!opts.registered.includes(opts.target)) {
+    return `未知后端「${opts.target}」（可用：${opts.registered.join('、')}）`;
+  }
+  if (!opts.probe?.ok) {
+    return `后端「${opts.target}」当前不可用：${opts.probe?.hint ?? '环境探测失败（未安装或未登录）'}`;
+  }
+  if (opts.supportedModes) {
+    const tiers = [...new Set([effectiveMode(opts.project), effectiveGuestMode(opts.project)])];
+    const unsupported = tiers.filter((t) => !opts.supportedModes!.includes(t));
+    if (unsupported.length > 0) {
+      return (
+        `该后端仅支持 ${opts.supportedModes.map(tierLabel).join(' / ')} 权限档，` +
+        `本项目当前为 ${tiers.map(tierLabel).join(' / ')} —— 请先在「🔐 权限」把两档都调整到支持的档位再切换。`
+      );
+    }
+  }
+  return null;
 }
 
 interface ActiveState {
@@ -449,6 +493,17 @@ export function createOrchestrator(
    * routed yet (status card, /usage, models prewarm, resume-picker pick) keep
    * using it directly — identical to the pre-registry behavior. */
   const backend = backendFor();
+  /** 注册表内全部后端（id + 展示名）—— 🧠 后端选择卡的动态选项源，绝不硬编码。 */
+  const backendChoices = (): { id: string; name: string }[] =>
+    backendIds().map((id) => ({ id, name: backendFor(id).displayName }));
+  /** 后端 id → 展示名（项目设置卡）。手编 projects.json 写了未知 id 时原样显示。 */
+  const backendDisplayName = (id?: string): string => {
+    try {
+      return backendFor(id).displayName;
+    } catch {
+      return id ?? DEFAULT_BACKEND_ID;
+    }
+  };
   const sessions = new Map<string, AgentThread>();
   /** M-3 空闲 reaper 的轮次时钟：每次进 LIVE 缓存（trackSession）/ 每轮收尾
    * （touchSession）打点；空闲时长 = now − 最后打点。 */
@@ -2270,7 +2325,7 @@ export function createOrchestrator(
       const name = typeof value.n === 'string' ? value.n : '';
       patch(evt, async () => {
         const p = await getProjectByName(name);
-        return p ? buildProjectSettingsCard(p) : buildDmMenuCard();
+        return p ? buildProjectSettingsCard(p, backendDisplayName(p.backend)) : buildDmMenuCard();
       });
     })
     .on(DM.projectTopics, ({ evt, value }) => {
@@ -2291,7 +2346,7 @@ export function createOrchestrator(
         const p = await getProjectByName(name);
         if (!p) return buildDmMenuCard();
         await updateProject(name, { noMention: on });
-        return buildProjectSettingsCard({ ...p, noMention: on });
+        return buildProjectSettingsCard({ ...p, noMention: on }, backendDisplayName(p.backend));
       });
     })
     .on(DM.setAutoCompactDm, ({ evt, value }) => {
@@ -2306,7 +2361,7 @@ export function createOrchestrator(
         // to rebind under the new setting on the next message (mirrors 群设置).
         await evictLiveSessionsForChat(p.chatId);
         log.info('console', 'project-autocompact', { project: name, on });
-        return buildProjectSettingsCard({ ...p, autoCompact: on });
+        return buildProjectSettingsCard({ ...p, autoCompact: on }, backendDisplayName(p.backend));
       });
     })
     // 🔐 权限：打开下拉表单子卡（管理员档 + 普通用户档 + 联网，选完提交）。
@@ -2335,9 +2390,63 @@ export function createOrchestrator(
         log.info('console', 'permission', { project: name, mode, guestMode, network });
         const fresh = await getProjectByName(name); // 写后回读，卡片与盘上一致
         if (!fresh) return;
-        await sendManagedCard(channel, evt.chatId, buildProjectSettingsCard(fresh)).catch((e) =>
+        await sendManagedCard(channel, evt.chatId, buildProjectSettingsCard(fresh, backendDisplayName(fresh.backend))).catch((e) =>
           log.fail('console', e, { phase: 'permission-result' }),
         );
+      })();
+    })
+    // 🧠 后端：打开选择卡（注册表动态列出，下拉+提交，复用 🔐 权限的表单模式）。
+    .on(DM.backend, ({ evt, value }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const name = typeof value.n === 'string' ? value.n : '';
+      patch(evt, async () => {
+        const p = await getProjectByName(name);
+        return p ? buildBackendCard(p, backendChoices()) : buildDmMenuCard();
+      });
+    })
+    // 提交后端切换：校验（注册表 → doctor 探活 → 权限档支持面，见
+    // validateBackendSwitch）通过才写 Project.backend。**不驱逐活跃会话**：
+    // SessionRecord.backend 让已有话题会话仍走原后端，新话题才用新值（resolveThread
+    // 按记录路由的既有语义，卡上已注明）。表单卡提交后锁 card_id，结果（项目设置卡
+    // / 带原因的拒绝卡）发**新卡**，旧表单留痕——同 🔐 权限的提交模式。
+    .on(DM.backendSubmit, ({ evt, value, formValue }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const name = typeof value.n === 'string' ? value.n : '';
+      const target = selectValue(formValue, 'backend');
+      void (async () => {
+        const p = await getProjectByName(name);
+        if (!p || !target) return;
+        const registered = backendIds();
+        // doctor({force}) 看「现在」的状态：未装 CLI / SDK 不可用的后端在这里拦住，
+        // 而不是切过去之后每条消息报错。全程异步（卡片回调里绝不能 spawnSync）。
+        const probe = registered.includes(target)
+          ? await backendFor(target)
+              .doctor({ force: true })
+              .catch(() => undefined)
+          : undefined;
+        const reason = validateBackendSwitch({
+          target,
+          registered,
+          project: p,
+          supportedModes: registered.includes(target) ? backendFor(target).supportedModes : undefined,
+          probe,
+        });
+        if (reason) {
+          log.info('console', 'backend-denied', { project: name, target, reason });
+          await sendManagedCard(channel, evt.chatId, buildBackendCard(p, backendChoices(), reason)).catch((e) =>
+            log.fail('console', e, { phase: 'backend-denied' }),
+          );
+          return;
+        }
+        await updateProject(name, { backend: target });
+        log.info('console', 'backend', { project: name, backend: target });
+        const fresh = await getProjectByName(name); // 写后回读，卡片与盘上一致
+        if (!fresh) return;
+        await sendManagedCard(
+          channel,
+          evt.chatId,
+          buildProjectSettingsCard(fresh, backendDisplayName(fresh.backend)),
+        ).catch((e) => log.fail('console', e, { phase: 'backend-result' }));
       })();
     });
 
