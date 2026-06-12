@@ -15,14 +15,21 @@ export function toolHeaderText(tool: ToolEntry): string {
   return `${icon} **${escapeInline(truncate(tool.title, HEADER_TITLE_MAX))}**`;
 }
 
-/** Panel body: the command's output as a code block (Error on non-zero exit). */
+/**
+ * Panel body: the command's output as a ```bash block (Error on non-zero exit)
+ * — the language tag buys Feishu's shell highlighting for free. Pre-fenced
+ * output (the fileChange mapping ships a ready, self-truncated ```diff block)
+ * passes through untouched so its highlighting and closing fence survive.
+ */
 export function toolBodyMd(tool: ToolEntry): string {
   if (!tool.output) {
     return tool.status === 'running' ? '_运行中…_' : '';
   }
-  const out = truncate(tool.output, OUTPUT_MAX);
   const label = tool.status === 'error' ? 'Error' : 'Output';
-  const body = `**${label}**\n\`\`\`\n${out}\n\`\`\``;
+  const block = tool.output.startsWith('```')
+    ? tool.output
+    : `\`\`\`bash\n${truncate(tool.output, OUTPUT_MAX)}\n\`\`\``;
+  const body = `**${label}**\n${block}`;
   if (body.length <= BODY_TOTAL_MAX) return body;
   return `${body.slice(0, BODY_TOTAL_MAX)}…\n\n_（已截断，完整内容见日志）_`;
 }
