@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Semaphore, withIdleTimeout } from '../src/bot/watchdog';
+import {
+  createGracefulInterrupt,
+  INTERRUPT_DRAIN_TIMEOUT_MS,
+  Semaphore,
+  withIdleTimeout,
+} from '../src/bot/watchdog';
 
 async function* delayedValues<T>(values: Array<{ delayMs: number; value: T }>): AsyncGenerator<T> {
   for (const { delayMs, value } of values) {
@@ -204,6 +209,126 @@ describe('withIdleTimeout', () => {
 
     expect(out).toEqual(['a', 'b']);
     expect(onTimeout).not.toHaveBeenCalled();
+  });
+});
+
+// QW-15 ⏹ 优雅中断：interrupt → turn/interrupt → 等事件流自然 done（0.139+
+// turn/completed(status:"interrupted") 干净收尾）→ 线程与进程留用；turnId 缺失
+// 或超时没收尾才强停（forced → 调用方按旧样杀进程回收）。
+describe('createGracefulInterrupt（QW-15 ⏹ 后进程留用）', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('interrupt 发 abort（带 turnId），done 及时到达（dispose 先于超时）→ 不强停、不 forced（线程留用）', async () => {
+    vi.useFakeTimers();
+    const abort = vi.fn();
+    const forceStop = vi.fn();
+    const stopper = createGracefulInterrupt({ turnId: () => 'turn_1', abort, forceStop });
+
+    stopper.interrupt();
+    expect(abort).toHaveBeenCalledWith('turn_1');
+    expect(stopper.interrupted()).toBe(true);
+
+    // 事件流在兜底窗口内自然收尾（消费循环结束后调 dispose）
+    await vi.advanceTimersByTimeAsync(100);
+    stopper.dispose();
+    await vi.advanceTimersByTimeAsync(INTERRUPT_DRAIN_TIMEOUT_MS);
+
+    expect(forceStop).not.toHaveBeenCalled();
+    expect(stopper.forced()).toBe(false); // killed=false → sessions 保留、不 close
+  });
+
+  it('超时没收尾（旧版 codex / 挂死）→ 5s 强停本地循环，forced=true（杀进程恢复锤）', async () => {
+    vi.useFakeTimers();
+    const abort = vi.fn();
+    const forceStop = vi.fn();
+    const stopper = createGracefulInterrupt({ turnId: () => 'turn_1', abort, forceStop });
+
+    stopper.interrupt();
+    expect(forceStop).not.toHaveBeenCalled(); // 先给自然收尾留窗口
+    await vi.advanceTimersByTimeAsync(INTERRUPT_DRAIN_TIMEOUT_MS);
+
+    expect(forceStop).toHaveBeenCalledTimes(1);
+    expect(stopper.forced()).toBe(true); // killed=true → close()+sessions.delete
+  });
+
+  it('turnId 未到手（极早期点击）→ 立即强停（没法定向 interrupt，按旧路径杀进程）', () => {
+    const abort = vi.fn();
+    const forceStop = vi.fn();
+    const stopper = createGracefulInterrupt({ turnId: () => undefined, abort, forceStop });
+
+    stopper.interrupt();
+    expect(abort).not.toHaveBeenCalled();
+    expect(forceStop).toHaveBeenCalledTimes(1);
+    expect(stopper.forced()).toBe(true);
+  });
+
+  it('幂等：连点 ⏹ 只发一次 abort', () => {
+    const abort = vi.fn();
+    const stopper = createGracefulInterrupt({ turnId: () => 'turn_1', abort, forceStop: vi.fn(), timeoutMs: 50 });
+    stopper.interrupt();
+    stopper.interrupt();
+    expect(abort).toHaveBeenCalledTimes(1);
+    stopper.dispose();
+  });
+
+  // 与 withIdleTimeout 的接线（launchRun 的真实组合）：abort 触发后端干净收尾 →
+  // 消费循环吃到 done 自然结束，stop 信号全程未触发。
+  it('integration: interrupt 后 done 及时到达 → 循环自然收尾（不经 stop 信号，线程留用）', async () => {
+    let resolveStop!: () => void;
+    const stopSignal = new Promise<void>((res) => {
+      resolveStop = res;
+    });
+    let endSource!: () => void;
+    const sourceEnd = new Promise<void>((res) => {
+      endSource = res;
+    });
+    async function* source(): AsyncGenerator<string> {
+      yield 'delta';
+      await sourceEnd; // turn/interrupt → codex 发 turn/completed(interrupted)
+      yield 'done';
+    }
+    const stopper = createGracefulInterrupt({
+      turnId: () => 'turn_1',
+      abort: () => endSource(), // 模拟 abort 让后端干净收尾
+      forceStop: resolveStop,
+    });
+    const out: string[] = [];
+    for await (const v of withIdleTimeout(source(), 0, () => {}, stopSignal)) {
+      out.push(v);
+      if (v === 'delta') stopper.interrupt();
+    }
+    stopper.dispose();
+    expect(out).toEqual(['delta', 'done']); // done 正常流到渲染层
+    expect(stopper.forced()).toBe(false);
+  });
+
+  it('integration: 流挂死 → 5s 后经 stop 信号强停循环（forced → 杀进程）', async () => {
+    vi.useFakeTimers();
+    let resolveStop!: () => void;
+    const stopSignal = new Promise<void>((res) => {
+      resolveStop = res;
+    });
+    async function* hung(): AsyncGenerator<string> {
+      yield 'delta';
+      await new Promise<never>(() => {}); // 旧版行为：interrupt 后流不收尾
+    }
+    const abort = vi.fn();
+    const stopper = createGracefulInterrupt({ turnId: () => 'turn_1', abort, forceStop: () => resolveStop() });
+    const out: string[] = [];
+    const consume = (async () => {
+      for await (const v of withIdleTimeout(hung(), 0, () => {}, stopSignal)) {
+        out.push(v);
+        stopper.interrupt();
+      }
+    })();
+    await vi.advanceTimersByTimeAsync(INTERRUPT_DRAIN_TIMEOUT_MS);
+    await consume;
+    stopper.dispose();
+    expect(abort).toHaveBeenCalledWith('turn_1');
+    expect(out).toEqual(['delta']);
+    expect(stopper.forced()).toBe(true);
   });
 });
 

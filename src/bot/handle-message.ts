@@ -157,7 +157,7 @@ import {
   stripMarkdown,
   SUPPORTED_FILE_TYPES,
 } from './comments';
-import { Semaphore, withIdleTimeout } from './watchdog';
+import { createGracefulInterrupt, Semaphore, withIdleTimeout } from './watchdog';
 
 /**
  * open_id → 姓名 的批量解析（管理员 / 白名单卡展示用）。需 contact:user.base:readonly
@@ -299,11 +299,13 @@ interface ActiveState {
   queue: AgentInput[];
   /** who started this run — gates destructive ⏹ (design §5) */
   requesterOpenId?: string;
-  /** ⏹ 终止: abort the codex turn AND end the local consume loop. Set per-turn
-   * while a run is in flight; codex emits no mappable terminal on interrupt, so
-   * the loop must be stopped locally rather than waiting on the backend. For a
-   * goal run this also clears the goal first (so it won't reactivate on resume)
-   * and suppresses the goal summary card. */
+  /** ⏹ 终止: interrupt the in-flight codex turn. Set per-turn while a run is in
+   * flight. codex 0.139+ 在 turn/interrupt 后以 turn/completed(status:
+   * "interrupted") 干净收尾（08b 探针实测；旧版「no mappable terminal」行为已
+   * 证伪），所以正常路径发 interrupt 后等事件流自然 done、线程与进程留用；只有
+   * turnId 未到手或 5s 没收尾才强停本地循环 + 杀进程（createGracefulInterrupt）。
+   * For a goal run this instead clears the goal first (so it won't reactivate on
+   * resume)、按既有设计每轮回收进程, and suppresses the goal summary card. */
   interrupt?: () => void;
   /** 🎯 结束目标 (goal runs only): clear the goal so codex stops auto-continuing,
    * but let the in-flight turn finish streaming; the loop then ends after that
@@ -1753,9 +1755,10 @@ export function createOrchestrator(
     })();
   };
 
-  // run card buttons (design §3.3). ⏹ aborts the codex turn AND ends the local
-  // consume loop (st.interrupt) — codex emits no mappable terminal on
-  // turn/interrupt, so waiting on the backend would hang the card forever.
+  // run card buttons (design §3.3). ⏹ (st.interrupt) sends turn/interrupt and
+  // waits for the stream's own terminal — codex 0.139+ ends it with
+  // turn/completed(status:"interrupted")（08b 探针实测，旧版「no mappable
+  // terminal」已证伪），线程与进程留用；5s 没收尾才强停 + 杀进程（launchRun）。
   dispatcher
     .on(RC.stop, ({ evt, value }) => {
       const key = typeof value.m === 'string' ? value.m : evt.messageId;
@@ -2779,22 +2782,25 @@ export function createOrchestrator(
           }
         }
 
-        // ⏹ 终止 / watchdog: end the consume loop locally. codex emits no
-        // mappable terminal on turn/interrupt — the event stream just hangs (see
-        // log 08:48: a stopped card never finalized) — so we must not wait on the
-        // backend. `stopSignal` ends the loop instantly (card flips to 已中断);
-        // the dead turn's process is then recycled below.
+        // ⏹ 终止（QW-15）：发 turn/interrupt 后等事件流**自然 done** —— codex
+        // 0.139+ 实测 interrupt 4ms 返回、turn/completed(status:"interrupted")
+        // 干净收尾（.plans/auto-optimize/research/08b-interrupt-probe.md；旧注释
+        // 「no mappable terminal — the stream just hangs」是旧版行为，已证伪），
+        // event-map 把 turn/completed 映射为 done，消费循环自然终止 → 线程与
+        // 进程留用，下一条消息免 resume 冷启。turnId 未到手或 5s 内没收尾
+        // （版本旧 / 挂死）才经 stopSignal 强停本地循环，按原样走杀进程恢复锤。
+        // watchdog 超时（timedOut）不变，恒走杀进程。
         let timedOut = false;
-        let interrupted = false;
         let resolveStop!: () => void;
         const stopSignal = new Promise<void>((res) => {
           resolveStop = res;
         });
-        state.interrupt = () => {
-          if (interrupted) return;
-          interrupted = true;
-          resolveStop();
-        };
+        const stopper = createGracefulInterrupt({
+          turnId: () => run.turnId(),
+          abort: (tid) => void opts.thread.abort(tid).catch(() => undefined),
+          forceStop: resolveStop,
+        });
+        state.interrupt = stopper.interrupt;
         const idleMs = currentIdleMs();
         const guarded = withIdleTimeout(
           run.events,
@@ -2844,19 +2850,28 @@ export function createOrchestrator(
           stream.streamCoalesced(channel, buildRunCard(rc), ANSWER_EID);
         }
         const doneAt = Date.now(); // codex stopped emitting / loop ended
+        stopper.dispose(); // 事件流已收尾：撤掉 ⏹ 的 5s 强停兜底定时器
         await stream.drain(); // flush the last coalesced frame before terminal
         state.interrupt = undefined; // turn done; nothing left to interrupt
-        const killed = interrupted || timedOut;
-        if (timedOut) render.timeout(Math.round(idleMs / 1000));
-        else if (interrupted) render.interrupt();
+        const interrupted = stopper.interrupted();
+        // 杀进程恢复锤只留给「真出事」：watchdog 超时，或 ⏹ 后没等到干净收尾
+        // （forced）。优雅 ⏹（done 及时到达）不算 killed —— 线程与进程留用。
+        const killed = timedOut || (interrupted && stopper.forced());
+        if (interrupted) render.interrupt();
+        else if (timedOut) render.timeout(Math.round(idleMs / 1000));
         else render.finalize();
         rc.rs = render.snapshot();
+        if (interrupted) log.info('agent', 'interrupt', { graceful: !stopper.forced(), threadId: topicThreadId ?? null });
 
-        // A killed turn leaves codex mid-turn with a notification stream that
-        // never terminates. Recycle the process: closing it ends the stream
-        // cleanly (no orphaned reader stealing the next turn's events) and frees
-        // the turn. The topic resumes from the persisted thread on its next
-        // message (resolveThread), so the session survives the kill.
+        // A killed turn (watchdog / forced ⏹) leaves codex mid-turn with a
+        // notification stream that never terminates. Recycle the process:
+        // closing it ends the stream cleanly (no orphaned reader stealing the
+        // next turn's events) and frees the turn. The topic resumes from the
+        // persisted thread on its next message (resolveThread), so the session
+        // survives the kill.
+        // 优雅 ⏹（killed=false）不回收：turn/completed(status:"interrupted") 已
+        // 干净收尾，同进程同 thread 可继续复用（08b 探针已证）——sessions 保留、
+        // 不 close，下一条消息走 LIVE 快路径。
         // 进程级死亡（app-server 中途崩溃 → error 卡 / 轮间死 → 空卡，killed=false）
         // 同走回收：立即清出缓存，下一条消息直接经 resolveThread 的 resume 兜底
         // 自愈（快路径的 isAlive 守卫是兜底的兜底）。
@@ -2929,10 +2944,11 @@ export function createOrchestrator(
         replyInThread = !opts.flat; // stay in the topic for queued turns (single: stay flat)
         log.info('card', 'final', { terminal: render.terminal() });
 
-        // A kill (⏹ / watchdog) or a dead process stops the whole run — drop any
-        // queued follow-ups (they'd run on the recycled, now-closed thread), but
-        // tell the user instead of swallowing them.
-        if (killed || procDead) {
+        // A stop (⏹ graceful or forced / watchdog) or a dead process ends the
+        // whole run — drop any queued follow-ups, but tell the user instead of
+        // swallowing them. 优雅 ⏹ 虽然线程留用，但用户按了停就是要停：排队消息
+        // 同样丢弃（语义与杀进程路径一致，只是进程不回收）。
+        if (killed || procDead || interrupted) {
           if (state.queue.length > 0) {
             void channel
               .send(
@@ -2941,7 +2957,7 @@ export function createOrchestrator(
                 { replyTo: finalMsgId, replyInThread: !opts.flat },
               )
               .catch(() => undefined);
-            log.info('intake', 'queue-dropped', { depth: state.queue.length, killed, procDead });
+            log.info('intake', 'queue-dropped', { depth: state.queue.length, killed, procDead, interrupted });
           }
           break;
         }
