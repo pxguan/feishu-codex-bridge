@@ -195,11 +195,14 @@ export function collapsiblePanelEl(opts: {
 /**
  * A row of interactive controls (buttons / selects). Schema 2.0 has no
  * `tag:'action'` container — multiple controls share a row via a flow
- * `column_set`, one control per auto-width column.
+ * `column_set`, one control per auto-width column. An optional stable
+ * `elementId` makes the row addressable by element-level cardkit APIs
+ * (e.g. deleting just the controls off an orphaned run card).
  */
-export function actions(items: CardElement[]): CardElement {
+export function actions(items: CardElement[], elementId?: string): CardElement {
   return {
     tag: 'column_set',
+    ...(elementId ? { element_id: elementId } : {}),
     flex_mode: 'flow',
     horizontal_spacing: 'small',
     columns: items.map((it) => ({ tag: 'column', width: 'auto', elements: [it] })),

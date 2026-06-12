@@ -38,7 +38,15 @@ import {
   type ResumeCardState,
 } from '../card/command-cards';
 import { buildHistoryCard, type HistoryCardState } from '../card/history-card';
-import { ANSWER_EID, buildQueuedCard, buildRunCard, buildRunCardPlain, RC, type RunCardState } from '../card/run-card';
+import {
+  ANSWER_EID,
+  buildQueuedCard,
+  buildRunCard,
+  buildRunCardPlain,
+  CONTROLS_EID,
+  RC,
+  type RunCardState,
+} from '../card/run-card';
 import { buildGoalDoneCard } from '../card/goal-card';
 import { RunCardStream } from '../card/run-card-stream';
 import { buildCleanCard, extractCardFences } from '../card/markdown-render';
@@ -342,6 +350,21 @@ export class RecentIdCache {
       if (oldest !== undefined) this.entries.delete(oldest);
     }
     return false;
+  }
+}
+
+/**
+ * card_id of a CardKit-entity message (a run card's carrier message body is
+ * `{"type":"card","data":{"card_id":…}}`), or undefined for any other shape.
+ * Used to heal a post-restart orphan run card whose in-process entity mapping
+ * is gone (M-4 ⏹ 静默失败反馈).
+ */
+export function cardIdFromMessageContent(content: string): string | undefined {
+  try {
+    const parsed = JSON.parse(content) as { type?: string; data?: { card_id?: string } };
+    return parsed?.type === 'card' && typeof parsed.data?.card_id === 'string' ? parsed.data.card_id : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -1581,14 +1604,74 @@ export function createOrchestrator(
     return op === ownerOpenId || isAdmin(cfg, op);
   };
 
+  // ⏹/🎯 被拒点击分类反馈（M-4 / audit-03 ②）：原来三类点击全部静默吞掉，
+  // 「点了毫无反应」。SDK 的 normalized cardAction 链路丢弃 handler 返回值，
+  // 没有 toast 通道——用「回贴一条小注」做等价反馈，按 卡片(+操作者) 去重防
+  // 连点刷屏。终态间隙（interrupt 刚卸下、runsByCard 还没清）窗口极小，保持
+  // 忽略（audit-03 结论）。
+  const runControlNotes = new RecentIdCache(512, 60_000);
+  /** 非发起人/非管理员点 ⏹/🎯：明确告知规则。 */
+  const denyRunControl = (evt: CardActionEvent, key: string, actionId: string, verb: string): void => {
+    if (!runControlNotes.seen(`deny:${key}:${evt.operator?.openId ?? ''}`)) {
+      void channel
+        .send(evt.chatId, { markdown: `⚠️ 仅发起人或管理员可${verb}。` }, { replyTo: evt.messageId })
+        .catch(() => undefined);
+    }
+    log.info('card', 'action', { actionId, denied: true });
+  };
+  /** run 已结束 / daemon 重启后的 orphan 卡：告知点击者 + 自愈成无按钮版。
+   * 同进程内（终局帧被 429 风暴吞掉等）rc+stream 还在 → 重推真正的无按钮终态卡
+   * （updateCard 自带终局退避）；重启后实体映射全丢 → 从载体消息反查 card_id，
+   * 只删 {@link CONTROLS_EID} 控件行（其余内容无从重建；实体 seq 也丢了，用
+   * epoch 秒——必大于按帧自增的运行期计数）。改版前的旧卡没有该 element_id，
+   * 删除失败仅记日志（告知已发出）。卡片改动等 CARD_SETTLE_MS，避开点击互动窗。 */
+  const healDeadRunCard = (evt: CardActionEvent, key: string, actionId: string): void => {
+    if (runControlNotes.seen(`dead:${key}`)) return; // 已答复过 / 自愈在路上
+    void channel
+      .send(evt.chatId, { markdown: 'ℹ️ 该任务已结束，按钮已失效。' }, { replyTo: evt.messageId })
+      .catch(() => undefined);
+    const rc = runCards.get(key);
+    const stream = runStreams.get(key);
+    log.info('card', 'action', { actionId, orphan: true, inProcess: Boolean(rc && stream) });
+    void (async () => {
+      try {
+        await new Promise((r) => setTimeout(r, CARD_SETTLE_MS));
+        if (rc && stream) {
+          await stream.updateCard(channel, buildRunCardPlain(rc));
+          return;
+        }
+        const res = await channel.rawClient.im.v1.message.get({ path: { message_id: key } });
+        const content = (res.data as { items?: Array<{ body?: { content?: string } }> } | undefined)?.items?.[0]
+          ?.body?.content;
+        const cardId = content ? cardIdFromMessageContent(content) : undefined;
+        if (!cardId) return;
+        const seq = Math.floor(Date.now() / 1000);
+        await channel.rawClient.cardkit.v1.cardElement.delete({
+          path: { card_id: cardId, element_id: CONTROLS_EID },
+          data: { sequence: seq, uuid: `h_${cardId}_${seq}` },
+        });
+      } catch (err) {
+        log.fail('card', err, { phase: 'run-card-heal', key });
+      }
+    })();
+  };
+
   // run card buttons (design §3.3). ⏹ aborts the codex turn AND ends the local
   // consume loop (st.interrupt) — codex emits no mappable terminal on
   // turn/interrupt, so waiting on the backend would hang the card forever.
   dispatcher
     .on(RC.stop, ({ evt, value }) => {
       const key = typeof value.m === 'string' ? value.m : evt.messageId;
+      if (!runAllowed(evt)) return;
       const st = runsByCard.get(key);
-      if (!st || !runOwnerOrAdmin(evt, st.requesterOpenId)) return;
+      if (!st) {
+        healDeadRunCard(evt, key, RC.stop);
+        return;
+      }
+      if (!runOwnerOrAdmin(evt, st.requesterOpenId)) {
+        denyRunControl(evt, key, RC.stop, '终止');
+        return;
+      }
       st.interrupt?.();
       log.info('card', 'action', { actionId: 'run.stop', stopped: Boolean(st.interrupt) });
     })
@@ -1596,8 +1679,16 @@ export function createOrchestrator(
     // stop — no auto-continue. Owner-or-admin gated like ⏹.
     .on(RC.endGoal, ({ evt, value }) => {
       const key = typeof value.m === 'string' ? value.m : evt.messageId;
+      if (!runAllowed(evt)) return;
       const st = runsByCard.get(key);
-      if (!st || !runOwnerOrAdmin(evt, st.requesterOpenId)) return;
+      if (!st) {
+        healDeadRunCard(evt, key, RC.endGoal);
+        return;
+      }
+      if (!runOwnerOrAdmin(evt, st.requesterOpenId)) {
+        denyRunControl(evt, key, RC.endGoal, '结束目标');
+        return;
+      }
       st.endGoal?.();
       log.info('card', 'action', { actionId: 'goal.end', ended: Boolean(st.endGoal) });
     });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RunCardStream } from '../src/card/run-card-stream';
 import { card, mdStream } from '../src/card/cards';
 
@@ -9,22 +9,29 @@ function frame(answer: string) {
 
 /**
  * Minimal fake LarkChannel.rawClient for the streaming pump: records every
- * cardElement.content / card.settings call; `contentErrs` are thrown (once
- * each, in order) by the first content pushes.
+ * cardElement.content / card.update / card.settings call; `contentErrs` /
+ * `updateErrs` are thrown (once each, in order) by the first pushes.
  */
-function fakeChannel(contentErrs: unknown[]) {
+function fakeChannel(contentErrs: unknown[] = [], updateErrs: unknown[] = []) {
   const contents: Array<{ content: string; sequence: number }> = [];
   const settings: Array<{ settings: string; sequence: number }> = [];
+  const updates: Array<{ data: string; sequence: number; at: number }> = [];
   let errIdx = 0;
+  let updErrIdx = 0;
   return {
     contents,
     settings,
+    updates,
     rawClient: {
       cardkit: {
         v1: {
           card: {
             create: async () => ({ data: { card_id: 'c_1' } }),
-            update: async () => ({}),
+            update: async (p: { data: { card: { data: string }; sequence: number } }) => {
+              if (updErrIdx < updateErrs.length) throw updateErrs[updErrIdx++];
+              updates.push({ data: p.data.card.data, sequence: p.data.sequence, at: Date.now() });
+              return {};
+            },
             settings: async (p: { data: { settings: string; sequence: number } }) => {
               settings.push(p.data);
               return {};
@@ -84,5 +91,105 @@ describe('RunCardStream.streamElement — streaming_mode recovery', () => {
 
     expect(ch.settings).toHaveLength(0);
     expect(ch.contents).toHaveLength(0);
+  });
+});
+
+// M-4: 终局帧保障 —— 429/99991400 指数退避重试，直到终态卡落地。
+describe('RunCardStream.updateCard — 终局帧保障（M-4）', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('retries a rate-limited terminal update with exponential backoff until it lands', async () => {
+    vi.useFakeTimers();
+    // 两种限频形态都识别：HTTP 429（axios status）与业务码 99991400。
+    const ch = fakeChannel([], [{ response: { status: 429 } }, { code: 99991400 }]);
+    const s = new RunCardStream();
+    await s.create(ch, 'oc_m4_rl', frame('hi'), {});
+    const done = s.updateCard(ch, frame('terminal'));
+    await vi.runAllTimersAsync();
+    await done;
+
+    expect(ch.updates).toHaveLength(1);
+    expect(ch.updates[0].data).toContain('terminal');
+  });
+
+  it('keeps the single 200810-window retry for non-rate-limit errors, then gives up without throwing', async () => {
+    vi.useFakeTimers();
+    const ch = fakeChannel([], [{ code: 200810 }, { code: 200810 }, { code: 200810 }]);
+    const s = new RunCardStream();
+    await s.create(ch, 'oc_m4_810', frame('hi'), {});
+    const done = s.updateCard(ch, frame('terminal'));
+    await vi.runAllTimersAsync();
+    await done; // 初次 + 1 次重试均失败 → 放弃（吞错，不抛）
+
+    expect(ch.updates).toHaveLength(0);
+  });
+});
+
+// M-4: 失败帧不推进基线 —— 丢掉的整卡帧由下一帧整卡重发自愈。
+describe('pump — 失败帧不推进基线（M-4）', () => {
+  it('re-routes the next frame as a whole-card update after a failed push', async () => {
+    const ch = fakeChannel([], [{ code: 500 }]); // 第一笔真实整卡推送失败（非限频）
+    const s = new RunCardStream();
+    await s.create(ch, 'oc_m4_base', frame('hello'), {});
+    s.streamCoalesced(ch, frame('hello'), 'answer'); // 与建卡内容相同 → 去重视为已上卡，基线建立
+    await s.drain();
+
+    // 非前缀变化 → 整卡路由；推送失败 → 基线不前进
+    s.streamCoalesced(ch, frame('rewritten'), 'answer');
+    await s.drain();
+    expect(ch.updates).toHaveLength(0);
+
+    // 下一帧仍走整卡重发（基线未前进），成功后基线推进
+    s.streamCoalesced(ch, frame('rewritten!'), 'answer');
+    await s.drain();
+    expect(ch.updates).toHaveLength(1);
+    expect(ch.updates[0].data).toContain('rewritten!');
+
+    // 此后纯增长 → 元素打字机路由
+    s.streamCoalesced(ch, frame('rewritten!!'), 'answer');
+    await s.drain();
+    expect(ch.contents).toHaveLength(1);
+    expect(ch.contents[0].content).toBe('rewritten!!');
+  });
+});
+
+// M-4: per-chat 令牌桶 —— 同 chat 的多个流式卡共享推送间隔（飞书同群 ~5 QPS）。
+describe('per-chat 推送共享限速（M-4）', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('two streams in one chat space their pushes at least CHAT_MIN_GAP_MS apart', async () => {
+    vi.useFakeTimers();
+    const ch = fakeChannel();
+    const s1 = new RunCardStream();
+    const s2 = new RunCardStream();
+    await s1.create(ch, 'oc_m4_shared', frame('a'), {});
+    await s2.create(ch, 'oc_m4_shared', frame('b'), {});
+    s1.streamCoalesced(ch, frame('a grew'), 'answer');
+    s2.streamCoalesced(ch, frame('b grew'), 'answer');
+    const d1 = s1.drain();
+    const d2 = s2.drain();
+    await vi.runAllTimersAsync();
+    await Promise.all([d1, d2]);
+
+    expect(ch.updates).toHaveLength(2);
+    expect(ch.updates[1].at - ch.updates[0].at).toBeGreaterThanOrEqual(250);
+  });
+
+  it('streams in different chats do not block each other', async () => {
+    vi.useFakeTimers();
+    const ch = fakeChannel();
+    const s1 = new RunCardStream();
+    const s2 = new RunCardStream();
+    await s1.create(ch, 'oc_m4_iso_a', frame('a'), {});
+    await s2.create(ch, 'oc_m4_iso_b', frame('b'), {});
+    s1.streamCoalesced(ch, frame('a grew'), 'answer');
+    s2.streamCoalesced(ch, frame('b grew'), 'answer');
+    const d1 = s1.drain();
+    const d2 = s2.drain();
+    await vi.runAllTimersAsync();
+    await Promise.all([d1, d2]);
+
+    expect(ch.updates).toHaveLength(2);
+    expect(ch.updates[1].at - ch.updates[0].at).toBe(0); // 各自的桶，互不排队
   });
 });

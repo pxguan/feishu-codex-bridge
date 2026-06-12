@@ -42,6 +42,15 @@ export const RC = {
  */
 export const ANSWER_EID = 'answer';
 
+/**
+ * Stable element_id of the run/queued card's control row (⏹ / 🎯 / 取消). Lets
+ * a post-restart orphan card self-heal on click: the in-process maps are gone
+ * by then, so the handler can only recover the entity's card_id from the
+ * carrier message and delete THIS element — the rest of the card is
+ * unreconstructable (see healDeadRunCard in ../bot/handle-message).
+ */
+export const CONTROLS_EID = 'controls';
+
 const REASONING_MAX = 1500;
 /** Collapse N tool calls into one summary panel at/above this count. */
 const COLLAPSE_TOOL_THRESHOLD = 3;
@@ -137,19 +146,22 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
     if (rc.goalEnding) {
       // 结束目标 已触发:目标已解除,本轮输出完即停。仅留 ⏹ 终止(可再点掐断)。
       elements.push(noteMd('_🎯 目标已解除，本轮输出完成后停止_'));
-      elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')]));
+      elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')], CONTROLS_EID));
     } else {
       // Goal: 终止 = clear goal + cut output now; 结束目标 = clear goal, let this
       // turn finish, then stop (no auto-continue). Both routed by the card's msgId.
       elements.push(
-        actions([
-          button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger'),
-          button('🎯 结束目标', { a: RC.endGoal, m: rc.cardKey }, 'default'),
-        ]),
+        actions(
+          [
+            button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger'),
+            button('🎯 结束目标', { a: RC.endGoal, m: rc.cardKey }, 'default'),
+          ],
+          CONTROLS_EID,
+        ),
       );
     }
   } else if (rc.cardKey && !rc.hideStop) {
-    elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')]));
+    elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')], CONTROLS_EID));
   }
   // Context-usage gauge rides at the very bottom as a footnote (only at/above
   // the warn tier) so it never pushes the answer down.
@@ -324,7 +336,7 @@ export function buildQueuedCard(qc: QueuedCardState): CardObject {
     md(`⏳ 排队中（第 **${qc.position ?? 1}** 位）`),
     noteMd('全局并发池已满（所有群/话题共享），轮到后自动开始。'),
   ];
-  if (qc.cardKey) els.push(actions([button('⏹ 取消', { a: RC.stop, m: qc.cardKey }, 'danger')]));
+  if (qc.cardKey) els.push(actions([button('⏹ 取消', { a: RC.stop, m: qc.cardKey }, 'danger')], CONTROLS_EID));
   return card(els, { summary: '排队中' });
 }
 
