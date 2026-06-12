@@ -166,30 +166,36 @@ class CodexThread implements AgentThread {
     // below (even ones mapNotification drops, like command output deltas), so a
     // long-running shell command doesn't read as "wedged".
     let lastActivityAt = Date.now();
-    async function* gen(): AsyncGenerator<AgentEvent> {
-      const params: Record<string, unknown> = {
-        threadId: self.codexThreadId,
-        input: toUserInput(input),
-      };
-      if (self.model) params.model = self.model;
-      if (self.effort) params.effort = self.effort;
+    const params: Record<string, unknown> = {
+      threadId: self.codexThreadId,
+      input: toUserInput(input),
+    };
+    if (self.model) params.model = self.model;
+    if (self.effort) params.effort = self.effort;
 
-      // turn/start stays in flight for the whole turn (events arrive via
-      // notifications), so we can't await it up front. But if it *rejects* —
-      // bad params, thread gone, auth failure — codex emits no notification
-      // that maps to done/error, so the stream loop below would block until the
-      // idle watchdog fires and the user sees a bogus "已超时" instead of the
-      // real cause. Race the rejection against the stream and surface it. (A
-      // clean child exit closes the stream on its own, ending the loop.)
-      let startError: Error | undefined;
-      const startFailed: Promise<'start-failed'> = new Promise((resolve) => {
-        self.client.request('turn/start', params).then(undefined, (err: unknown) => {
-          startError = err instanceof Error ? err : new Error(String(err));
-          log.fail('agent', startError, { phase: 'turn/start' });
-          resolve('start-failed');
-        });
+    // Fire turn/start NOW — at runStreamed() call time, NOT lazily on the first
+    // next() — so model inference runs in parallel with the caller's card setup
+    // (stream.create + adoptThreadId cost 2-3 RTTs before the for-await begins).
+    // Early notifications buffer in the client's AsyncQueue, so nothing is lost.
+    // The caller owns the new failure mode (card setup throws after the turn
+    // started): launchRun aborts+closes the thread on that path.
+    //
+    // turn/start stays in flight for the whole turn (events arrive via
+    // notifications), so we can't await it up front. But if it *rejects* —
+    // bad params, thread gone, auth failure — codex emits no notification
+    // that maps to done/error, so the stream loop below would block until the
+    // idle watchdog fires and the user sees a bogus "已超时" instead of the
+    // real cause. Race the rejection against the stream and surface it. (A
+    // clean child exit closes the stream on its own, ending the loop.)
+    let startError: Error | undefined;
+    const startFailed: Promise<'start-failed'> = new Promise((resolve) => {
+      self.client.request('turn/start', params).then(undefined, (err: unknown) => {
+        startError = err instanceof Error ? err : new Error(String(err));
+        log.fail('agent', startError, { phase: 'turn/start' });
+        resolve('start-failed');
       });
-
+    });
+    async function* gen(): AsyncGenerator<AgentEvent> {
       const stream = self.client.stream()[Symbol.asyncIterator]();
       while (true) {
         const step = await Promise.race([stream.next(), startFailed]);

@@ -2216,6 +2216,7 @@ export function createOrchestrator(
         const turnModel = rec?.model ?? opts.model;
         const turnEffort = rec?.effort ?? opts.effort;
         const run = opts.thread.runStreamed(turnInput, { model: turnModel, effort: turnEffort });
+        const turnStartAt = Date.now(); // turn/start 已在 runStreamed() 内发出（与下面的建卡并行）
         state.run = run;
         const render = new RunRender();
         render.showTools = getShowToolCalls(cfg);
@@ -2252,7 +2253,19 @@ export function createOrchestrator(
         // CardKit streaming entity: body streams with the native typewriter,
         // ⏹/⚙️ ride whole-card updates — both on one card_id (see RunCardStream).
         const stream = new RunCardStream();
-        cardMsgId = await stream.create(channel, opts.chatId, buildRunCard(rc), { replyTo, replyInThread });
+        try {
+          cardMsgId = await stream.create(channel, opts.chatId, buildRunCard(rc), { replyTo, replyInThread });
+        } catch (err) {
+          // turn/start 已提前发出：建卡失败时模型已在跑，必须中断并回收进程——
+          // 无人消费的通知流会污染该 thread 的下一轮。turnId 此时多半还没到手
+          // （事件尚未消费），abort 仅尽力而为；close() SIGKILL 子进程兜底终结
+          // 这轮。下一条消息经 resolveThread 的 resume 兜底自愈。
+          const tid = run.turnId();
+          if (tid) void opts.thread.abort(tid).catch(() => undefined);
+          void opts.thread.close().catch(() => undefined);
+          if (topicThreadId) sessions.delete(topicThreadId);
+          throw err; // 外层 catch 把错误回给用户
+        }
         curCardKey = cardMsgId;
         rc.cardKey = cardMsgId;
         runsByCard.set(cardMsgId, state);
@@ -2382,6 +2395,7 @@ export function createOrchestrator(
           const terminalAt = Date.now();
           const st = stream.stats();
           log.info('stream', 'timing', {
+            tTurnStart: turnStartAt - tStart, // 负数 = turn/start 抢在流循环前多少 ms（QW-1 并行收益）
             firstEv: firstEvAt ? firstEvAt - tStart : -1,
             firstText: firstTextAt ? firstTextAt - tStart : -1,
             lastEv: lastEvAt - tStart,
