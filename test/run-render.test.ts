@@ -95,6 +95,49 @@ describe('reduce', () => {
     expect(s.terminal).toBe('error');
     expect(s.errorMsg).toBe('boom');
   });
+
+  it('does NOT terminalize on error(willRetry=true) — retrying footer, later deltas keep streaming', () => {
+    const s = run([
+      { type: 'text_delta', itemId: 'a', delta: 'partial' },
+      { type: 'error', message: 'stream disconnected', willRetry: true },
+    ]);
+    expect(s.terminal).toBe('running');
+    expect(s.footer).toBe('retrying');
+    // the running layout survives: ⏹ stays, the retrying notice shows
+    const json = JSON.stringify(buildRunCard({ rs: s, cardKey: 'm1' }));
+    expect(json).toContain('自动重试中');
+    expect(json).toContain('⏹ 终止');
+    expect(json).not.toContain('agent 失败');
+    // the retry succeeded → deltas overwrite the retrying footer
+    const resumed = reduce(s, { type: 'text_delta', itemId: 'a', delta: ' again' });
+    expect(resumed.terminal).toBe('running');
+    expect(resumed.footer).toBe('streaming');
+  });
+});
+
+describe('buildRunCard — fatal error advice', () => {
+  const fatal = (message: string): RunState => run([{ type: 'error', message, willRetry: false }]);
+
+  it('suggests re-login on auth-shaped errors', () => {
+    const json = JSON.stringify(buildRunCard({ rs: fatal('401 Unauthorized: token expired') }));
+    expect(json).toContain('agent 失败');
+    expect(json).toContain('codex login');
+  });
+
+  it('points at /usage on quota-shaped errors', () => {
+    expect(JSON.stringify(buildRunCard({ rs: fatal('usage limit reached') }))).toContain('/usage');
+  });
+
+  it('suggests a resend on network-shaped errors', () => {
+    expect(JSON.stringify(buildRunCard({ rs: fatal('fetch failed: ETIMEDOUT') }))).toContain('重发本条消息');
+  });
+
+  it('keeps the bare message when no pattern matches', () => {
+    const json = JSON.stringify(buildRunCard({ rs: fatal('boom') }));
+    expect(json).toContain('agent 失败：boom');
+    expect(json).not.toContain('codex login');
+    expect(json).not.toContain('/usage');
+  });
 });
 
 describe('buildRunCard', () => {

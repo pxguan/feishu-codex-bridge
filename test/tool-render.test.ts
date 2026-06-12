@@ -25,11 +25,14 @@ describe('toolBodyMd', () => {
     expect(toolBodyMd(tool({ output: diff }))).toBe(`**Output**\n${diff}`);
   });
 
-  it('truncates oversized raw output inside the fence (fence stays closed)', () => {
+  it('truncates oversized raw output inside the fence, noting the full size (not "see the log")', () => {
     const body = toolBodyMd(tool({ output: 'y'.repeat(5000) }));
     expect(body.length).toBeLessThan(1400);
     expect(body.startsWith('**Output**\n```bash\n')).toBe(true);
-    expect(body).toMatch(/```\s*$/);
+    expect(body).toContain('已截断，完整输出 5000 字符');
+    expect(body).not.toContain('见日志');
+    // the fence is closed BEFORE the truncation note
+    expect(body).toMatch(/```\n_（已截断/);
   });
 
   it('renders the running/empty placeholders without output', () => {

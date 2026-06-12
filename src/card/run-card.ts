@@ -203,6 +203,8 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
     elements.push(noteMd(`_⏱ ${idleLabel}无响应，已自动终止_`));
   } else if (state.terminal === 'error' && state.errorMsg) {
     elements.push(noteMd(`⚠️ agent 失败：${state.errorMsg}`));
+    const advice = errorAdvice(state.errorMsg);
+    if (advice) elements.push(noteMd(advice));
   } else if (state.terminal === 'done' && !answer) {
     elements.push(noteMd('_（未返回内容）_'));
   }
@@ -212,6 +214,24 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
   if (gauge) elements.push(gauge);
 
   return elements;
+}
+
+/**
+ * One next-step suggestion for a fatal error, by message pattern (登录 / 用量 /
+ * 网络重试). Pure copy classification — NEVER fires a request (the codex 401
+ * chain stays codex's own business); unmatched messages get no advice line.
+ */
+function errorAdvice(msg: string): string | null {
+  if (/401|unauthor|not.?logged.?in|login|credential|token.*(expired|invalid)/i.test(msg)) {
+    return '🔑 凭证可能已失效：请在部署机上运行 `codex login` 重新登录后重试';
+  }
+  if (/usage.?limit|quota|rate.?limit|429|too many requests/i.test(msg)) {
+    return '📊 可能触达用量上限：发送 /usage 查看用量，稍后再试';
+  }
+  if (/network|timed?.?out|econn|epipe|enotfound|eai_again|socket|fetch failed|disconnect/i.test(msg)) {
+    return '🌐 网络波动：重发本条消息即可重试';
+  }
+  return null;
 }
 
 /** Index of the last non-empty text block (the final answer), or -1 if none. */
@@ -345,7 +365,14 @@ function collapsedToolSummary(tools: ToolEntry[], finalized: boolean): CardEleme
 }
 
 function footerStatus(status: Exclude<FooterStatus, null>): CardElement {
-  const text = status === 'thinking' ? '🧠 正在思考' : status === 'tool_running' ? '🧰 正在调用工具' : '✍️ 正在输出';
+  const text =
+    status === 'thinking'
+      ? '🧠 正在思考'
+      : status === 'tool_running'
+        ? '🧰 正在调用工具'
+        : status === 'retrying'
+          ? '⚠️ 瞬断，自动重试中…'
+          : '✍️ 正在输出';
   return noteMd(text);
 }
 
@@ -356,6 +383,7 @@ function summaryText(state: RunState): string {
   if (state.terminal === 'done') return '已完成';
   if (state.footer === 'tool_running') return '正在调用工具';
   if (state.footer === 'streaming') return '正在输出';
+  if (state.footer === 'retrying') return '自动重试中';
   return '思考中';
 }
 
