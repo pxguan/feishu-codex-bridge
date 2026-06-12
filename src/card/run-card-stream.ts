@@ -4,23 +4,32 @@ import type { CardObject } from './cards';
 import { isCardIdNotReady } from './managed';
 
 /**
- * Min gap between throttled whole-card stream updates. Finer = smoother chunked
- * growth (each push shows the full text so far). Feishu caps a single card at
- * ~10 ops/sec; 150ms ≈ 6.6/sec keeps headroom (streaming_mode's QPS exemption no
- * longer applies now that it's off — see {@link ../card/cards}).
+ * Min gap between throttled stream pushes. Finer = smoother chunked growth
+ * (each push shows the full text so far). Live cards run with
+ * streaming_mode=true (see {@link ../card/cards}), which per Feishu's docs
+ * exempts ALL card/element APIs from the per-card QPS cap while streaming —
+ * this floor just keeps us friendly to the app-level 1000/min·50/s budget
+ * (push RTT of hundreds of ms dominates the cadence anyway).
  */
 const STREAM_THROTTLE_MS = 150;
 
+/** streaming_mode auto-disabled (Feishu turns it off 10 minutes after it was
+ * last enabled) — {@link RunCardStream.streamElement} re-enables and resends. */
+const ERR_STREAMING_OFF = 300309;
+/** sequence out-of-order — retried once with a fresh (higher) sequence. */
+const ERR_SEQ_OUT_OF_ORDER = 300317;
+
 /**
  * A run card backed by a single CardKit 2.0 entity. The whole card is
- * re-rendered from {@link RunState} each tick and pushed via
- * cardkit.v1.card.update; each push instantly renders the current full text
- * (streaming_mode is off — its client typewriter only applies to the
- * element-level content API, not whole-card updates, and ran far behind token
- * arrival). Throttled to STREAM_THROTTLE_MS so growth tracks the model in
- * chunks with zero trailing, and collapsible panels (reasoning / tools)
- * re-render cleanly. All updates share one strictly-increasing `seq` — Feishu
- * rejects out-of-order updates.
+ * re-rendered from {@link RunState} each tick; the pump routes each frame
+ * either to the element-level typewriter (answer-only growth, via
+ * cardkit.v1.cardElement.content — the ONLY API streaming_config's typewriter
+ * applies to; needs the card's streaming_mode on) or to a whole-card
+ * cardkit.v1.card.update (structure changed — full replace, no typewriter).
+ * Throttled to STREAM_THROTTLE_MS so growth tracks the model in chunks with
+ * zero trailing, and collapsible panels (reasoning / tools) re-render cleanly.
+ * All updates share one strictly-increasing `seq` — Feishu rejects
+ * out-of-order updates.
  *
  * Unlike im.v1.message.patch (unconditional, reverts a card touched during a
  * click's callback window), this is the correct surface for a card that both
@@ -123,15 +132,42 @@ export class RunCardStream {
 
   /** Element-level streaming push (cardkit.v1.cardElement.content): the answer
    * element's accumulated full text. Feishu diffs the prefix and types the delta
-   * per the card's streaming_config. Needs streaming_mode on the card. */
+   * per the card's streaming_config. Needs streaming_mode on the card — which
+   * Feishu auto-disables 10 minutes after it was last enabled, so a long turn
+   * would silently freeze this channel; on 300309 we re-enable it (settings
+   * PATCH) and resend the frame. Recovery runs inside the pump coroutine, so
+   * event consumption never blocks on it. */
   private async streamElement(channel: LarkChannel, elementId: string, content: string): Promise<void> {
     if (!this.cardId) return;
-    const t0 = Date.now();
-    try {
-      await channel.rawClient.cardkit.v1.cardElement.content({
+    const push = (): Promise<unknown> =>
+      channel.rawClient.cardkit.v1.cardElement.content({
         path: { card_id: this.cardId, element_id: elementId },
         data: { content, sequence: ++this.seq, uuid: `e_${this.cardId}_${this.seq}` },
       });
+    const t0 = Date.now();
+    try {
+      try {
+        await push();
+      } catch (err) {
+        const code = cardkitErrCode(err);
+        if (code === ERR_STREAMING_OFF) {
+          log.fail('card', err, { phase: 'run-stream-el', cardId: this.cardId, seq: this.seq, reopenStreaming: true });
+          await channel.rawClient.cardkit.v1.card.settings({
+            path: { card_id: this.cardId },
+            data: {
+              settings: JSON.stringify({ config: { streaming_mode: true } }),
+              sequence: ++this.seq,
+              uuid: `o_${this.cardId}_${this.seq}`,
+            },
+          });
+          await push();
+        } else if (code === ERR_SEQ_OUT_OF_ORDER) {
+          log.fail('card', err, { phase: 'run-stream-el', cardId: this.cardId, seq: this.seq, retry: true });
+          await push();
+        } else {
+          throw err;
+        }
+      }
       const rtt = Date.now() - t0;
       this.pushCount++;
       this.elPushes++;
@@ -257,6 +293,14 @@ export class RunCardStream {
 }
 
 type CardBody = { body?: { elements?: Array<Record<string, unknown>> } };
+
+/** Cardkit business error code off a thrown SDK error — HTTP 4xx carries it in
+ * response.data.code (axios shape, same as {@link isCardIdNotReady}); some
+ * transports surface it at the top level. */
+function cardkitErrCode(err: unknown): number | undefined {
+  const e = err as { code?: number; response?: { data?: { code?: number } } };
+  return e?.response?.data?.code ?? e?.code;
+}
 
 /** Content of the streamed answer element (element_id === eid), or null if the
  * card has no such element yet (top-level in body.elements). */
