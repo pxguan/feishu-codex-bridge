@@ -83,7 +83,7 @@ import {
   latestVersion,
   restartDaemon,
 } from '../service/update';
-import { resolveCodexBin, codexVersion } from '../agent/codex-appserver/locate';
+import { resolveCodexBin, codexVersionAsync } from '../agent/codex-appserver/locate';
 import { fetchUsageBundle, UsageError } from '../agent/codex-appserver/usage';
 import {
   buildShareConfigCard,
@@ -1630,7 +1630,12 @@ export function createOrchestrator(
     })
     .on(DM.doctor, async ({ evt }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
-      const codexBin = resolveCodexBin();
+      // 体检要看「现在」的状态：force 绕过 locate 模块缓存重新探测。版本走异步
+      // spawn——卡片回调里**绝不能** spawnSync（见 DM.update），同步 codex
+      // --version（~320ms×2）会把所有话题的流式 pump 一起冻住。下方 isAvailable
+      // 复用这里刚刷进缓存的版本号，不再二次 spawn。
+      const codexBin = resolveCodexBin({ force: true });
+      const codexVer = codexBin ? await codexVersionAsync(codexBin, { force: true }) : null;
       // 飞书权限自检：读 keystore 里的 App Secret → 换 tenant_access_token → 查已开通
       // scope（application/v6/scopes 的 grant_status，含 im:message.group_msg 等事件订阅
       // 类）。任一步失败时 missingScopes 留 undefined，卡片显示「无法自动检查」而非误报
@@ -1644,7 +1649,7 @@ export function createOrchestrator(
       const missingJoinScopes = scopeCheck?.missingJoinScopes;
       const info: DoctorInfo = {
         codexOk: await backend.isAvailable().catch(() => false),
-        codexVer: codexBin ? codexVersion(codexBin) : null,
+        codexVer,
         conn: channel.getConnectionStatus?.()?.state ?? 'unknown',
         bridgeVer: bridgeVersion(),
         node: process.version,

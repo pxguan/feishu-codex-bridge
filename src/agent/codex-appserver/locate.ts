@@ -1,9 +1,16 @@
 import { existsSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { paths } from '../../config/paths';
-import { spawnProcessSync } from '../../platform/spawn';
+import { spawnProcess, spawnProcessSync } from '../../platform/spawn';
 
 const IS_WIN = process.platform === 'win32';
+
+// 模块级缓存：bin 路径与版本号在 daemon 生命周期内几乎不变，而每次探测都是
+// 一个 spawn（which ~5ms、codex --version ~320ms），startThread/listThreads/
+// readHistory 每次都付。只缓存**成功**结果——未找到/失败不缓存（用户随后装好
+// codex 要立刻可见）；DM 体检传 force 强制重探（路径/版本可能刚变过）。
+let binCache: string | null = null;
+const versionCache = new Map<string, string>();
 
 /**
  * Resolve the codex CLI binary, in priority order:
@@ -16,7 +23,14 @@ const IS_WIN = process.platform === 'win32';
  * On Windows an npm-installed bin is a `codex.cmd`/`codex.exe` shim, never a
  * bare `codex`, so the private-install probe enumerates PATHEXT variants.
  */
-export function resolveCodexBin(): string | null {
+export function resolveCodexBin(opts?: { force?: boolean }): string | null {
+  // 命中后仍 existsSync 复验（零 spawn）：codex 被卸载/移动时自动失效重探。
+  if (!opts?.force && binCache && existsSync(binCache)) return binCache;
+  binCache = locateBin();
+  return binCache;
+}
+
+function locateBin(): string | null {
   const env = process.env.CODEX_BIN;
   if (env && existsSync(env)) return env;
 
@@ -67,14 +81,50 @@ function which(cmd: string): string | null {
   }
 }
 
-/** Best-effort version string of the resolved codex binary. */
-export function codexVersion(bin: string): string | null {
+/** Best-effort version string of the resolved codex binary（同步，CLI 场景用；
+ * 卡片回调等事件循环上下文请用 {@link codexVersionAsync}）。 */
+export function codexVersion(bin: string, opts?: { force?: boolean }): string | null {
+  if (!opts?.force) {
+    const hit = versionCache.get(bin);
+    if (hit !== undefined) return hit;
+  }
+  let out: string | null;
   try {
     // cross-spawn so a Windows `.cmd` shim runs (avoids execFile EINVAL).
     const res = spawnProcessSync(bin, ['--version'], { encoding: 'utf8' });
-    if (res.status !== 0 || typeof res.stdout !== 'string') return null;
-    return res.stdout.trim();
+    out = res.status === 0 && typeof res.stdout === 'string' ? res.stdout.trim() : null;
   } catch {
-    return null;
+    out = null;
   }
+  if (out !== null) versionCache.set(bin, out);
+  return out;
+}
+
+/** Async counterpart of {@link codexVersion}（共享同一缓存）。卡片回调里
+ * **绝不能** spawnSync——同步 `codex --version`（~320ms）会冻结整条 event
+ * loop，所有话题的流式 pump、WS 心跳、⏹ 回调一起停摆。 */
+export async function codexVersionAsync(bin: string, opts?: { force?: boolean }): Promise<string | null> {
+  if (!opts?.force) {
+    const hit = versionCache.get(bin);
+    if (hit !== undefined) return hit;
+  }
+  const out = await new Promise<string | null>((resolve) => {
+    let child;
+    try {
+      // 同 codexVersion：cross-spawn 跑 Windows `.cmd` shim（裸 execFile 会 EINVAL）。
+      child = spawnProcess(bin, ['--version'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      resolve(null);
+      return;
+    }
+    let stdout = '';
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (d: string) => {
+      stdout += d;
+    });
+    child.on('error', () => resolve(null));
+    child.on('close', (code) => resolve(code === 0 ? stdout.trim() : null));
+  });
+  if (out !== null) versionCache.set(bin, out);
+  return out;
 }

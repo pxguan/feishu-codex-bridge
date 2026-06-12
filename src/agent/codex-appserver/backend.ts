@@ -20,7 +20,7 @@ import type {
 import { isGoalTerminal } from '../types';
 import { AppServerClient } from './app-server-client';
 import { mapNotification } from './event-map';
-import { codexVersion, resolveCodexBin } from './locate';
+import { codexVersionAsync, resolveCodexBin } from './locate';
 import type { Thread, ThreadItem, Turn } from './protocol';
 
 const APPROVAL_POLICY = 'never';
@@ -366,8 +366,9 @@ export class CodexAppServerBackend implements AgentBackend {
   private modelCache: ModelInfo[] | null = null;
 
   async isAvailable(): Promise<boolean> {
+    // async 版本探测：DM 体检等卡片回调会 await 这里，同步 spawn 会冻结事件循环。
     const bin = resolveCodexBin();
-    return bin !== null && codexVersion(bin) !== null;
+    return bin !== null && (await codexVersionAsync(bin)) !== null;
   }
 
   async listModels(): Promise<ModelInfo[]> {
