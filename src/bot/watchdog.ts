@@ -6,12 +6,19 @@
  * not emit a mappable terminal on turn/interrupt, so we must end the consume
  * loop locally instead of waiting on the backend). `idleMs <= 0` disables the
  * idle timer.
+ *
+ * `lastActivity` decouples LIVENESS from RENDERING: the event map drops raw
+ * notifications it doesn't surface (e.g. command output deltas), so a long
+ * shell command can stream output for minutes while yielding nothing here.
+ * When the idle timer fires we check the backend's real activity clock — if it
+ * moved within `idleMs`, re-arm for the remainder instead of killing the turn.
  */
 export async function* withIdleTimeout<T>(
   source: AsyncIterable<T>,
   idleMs: number,
   onTimeout: () => void,
   stop?: Promise<unknown>,
+  lastActivity?: () => number,
 ): AsyncGenerator<T> {
   if ((!idleMs || idleMs <= 0) && !stop) {
     yield* source;
@@ -19,22 +26,35 @@ export async function* withIdleTimeout<T>(
   }
   const iter = source[Symbol.asyncIterator]();
   const stopRace = stop?.then(() => '__stop__' as const);
+  // Re-arming must keep waiting on the SAME pending next() — an async generator
+  // queues a second next() behind the first, so racing a fresh one each lap
+  // would silently drop the value the abandoned call eventually resolves with.
+  let pendingNext: Promise<IteratorResult<T>> | undefined;
+  let timerMs = idleMs;
   while (true) {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const races: Promise<IteratorResult<T> | '__idle__' | '__stop__'>[] = [iter.next()];
+    pendingNext ??= iter.next();
+    const races: Promise<IteratorResult<T> | '__idle__' | '__stop__'>[] = [pendingNext];
     if (idleMs && idleMs > 0) {
       races.push(new Promise<'__idle__'>((res) => {
-        timer = setTimeout(() => res('__idle__'), idleMs);
+        timer = setTimeout(() => res('__idle__'), timerMs);
       }));
     }
     if (stopRace) races.push(stopRace);
     const raced = await Promise.race(races);
     if (timer) clearTimeout(timer);
     if (raced === '__idle__') {
+      const sinceActivity = lastActivity ? Date.now() - lastActivity() : Infinity;
+      if (sinceActivity < idleMs) {
+        timerMs = idleMs - sinceActivity; // real activity recently — re-arm for the remainder
+        continue;
+      }
       onTimeout();
       return;
     }
     if (raced === '__stop__') return;
+    pendingNext = undefined;
+    timerMs = idleMs;
     const r = raced as IteratorResult<T>;
     if (r.done) return;
     yield r.value;

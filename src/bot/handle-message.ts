@@ -1296,10 +1296,12 @@ export function createOrchestrator(
   const PENDING_TTL_MS = 30 * 60_000; // abandoned config cards expire after 30 min
   // Goal runs have NO total wall-clock cap (a healthy goal may legitimately run
   // for days — matching codex's native behavior). The only automatic backstop is
-  // an IDLE watchdog: if codex emits NO event at all for this long, the run is
-  // presumed wedged and torn down to free its concurrency slot. A live goal
-  // streams events continuously, so this never fires on real work; manual control
-  // is the run card's ⏹ 终止 / 🎯 结束目标 buttons.
+  // an IDLE watchdog: if codex emits NO raw notification at all for this long
+  // (run.lastActivity — unmapped notifications like command output deltas count
+  // as liveness), the run is presumed wedged and torn down to free its
+  // concurrency slot. A live goal streams notifications continuously, so this
+  // never fires on real work; manual control is the run card's ⏹ 终止 /
+  // 🎯 结束目标 buttons.
   const GOAL_IDLE_MS = 30 * 60_000;
 
   // A card update issued from inside a cardAction handler must land AFTER Feishu
@@ -2292,6 +2294,7 @@ export function createOrchestrator(
             timedOut = true;
           },
           stopSignal,
+          run.lastActivity, // raw-notification liveness: a long shell command isn't "idle"
         );
         // Per-turn stream-latency observability (file log `stream.timing`): locates
         // where a reply lags — first byte, backlog (lastEv vs done), push split, RTT.
@@ -2613,7 +2616,7 @@ export function createOrchestrator(
       const stop = Promise.race([stopSignal, endSignal]);
       const guarded = withIdleTimeout(run.events, GOAL_IDLE_MS, () => {
         idledOut = true;
-      }, stop);
+      }, stop, run.lastActivity);
       for await (const ev of guarded) {
         if (ev.type === 'goal_update') {
           lastStatus = ev.status;
@@ -2786,7 +2789,7 @@ export function createOrchestrator(
             let timedOut = false;
             const guarded = withIdleTimeout(run.events, currentIdleMs(), () => {
               timedOut = true;
-            });
+            }, undefined, run.lastActivity);
             for await (const ev of guarded) state = reduce(state, ev);
 
             if (timedOut) {

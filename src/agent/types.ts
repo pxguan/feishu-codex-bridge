@@ -150,6 +150,11 @@ export interface AgentRun {
   events: AsyncIterable<AgentEvent>;
   /** current turn id, available after `turn_started` */
   turnId(): string | undefined;
+  /** epoch ms of the last RAW backend activity — refreshed on EVERY server
+   * notification, including ones the event map drops (e.g. command output
+   * deltas). Lets the idle watchdog tell a busy-but-quiet turn (long shell
+   * command, >120s npm install) from a truly wedged one. */
+  lastActivity?(): number;
 }
 
 /** Outcome of a manual {@link AgentThread.compact}. `compacted` is true iff codex

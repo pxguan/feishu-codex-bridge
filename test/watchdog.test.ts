@@ -135,6 +135,56 @@ describe('withIdleTimeout', () => {
     expect(onTimeout).not.toHaveBeenCalled();
   });
 
+  // QW-5: 活性与渲染解耦 — event-map 丢弃的原始通知（如命令输出 delta）也算活着。
+  it('does not time out while raw activity continues, even with mapped events silent for 150s', async () => {
+    vi.useFakeTimers();
+    const onTimeout = vi.fn();
+    let lastRaw = Date.now();
+    let rawAlive = true; // 模拟原始通知持续到达（长命令输出），但没有可映射事件
+    const heartbeat = setInterval(() => {
+      if (rawAlive) lastRaw = Date.now();
+    }, 1_000);
+    const iter = withIdleTimeout(neverEnding('first'), 120_000, onTimeout, undefined, () => lastRaw)[
+      Symbol.asyncIterator
+    ]();
+
+    await expect(iter.next()).resolves.toEqual({ done: false, value: 'first' });
+    const second = iter.next();
+    // 映射事件停了 150s（> 120s idle），但原始活动一直在 → 绝不超时
+    await vi.advanceTimersByTimeAsync(150_000);
+    expect(onTimeout).not.toHaveBeenCalled();
+
+    // 原始活动也停了 → 距最后一次真实活动满 120s 才超时
+    rawAlive = false;
+    await vi.advanceTimersByTimeAsync(120_000);
+    await expect(second).resolves.toEqual({ done: true, value: undefined });
+    expect(onTimeout).toHaveBeenCalledTimes(1);
+    clearInterval(heartbeat);
+  });
+
+  it('re-arming keeps waiting on the same pending next() — a late value is not dropped', async () => {
+    vi.useFakeTimers();
+    const onTimeout = vi.fn();
+    let lastRaw = Date.now();
+    // 值在 80ms 后才到；idle 50ms 会先触发一次，但原始活动 30ms 时刷新过 → 重置后值必须照常产出
+    async function* lateValue(): AsyncGenerator<string> {
+      await new Promise<void>((res) => setTimeout(res, 80));
+      yield 'late';
+    }
+    setTimeout(() => {
+      lastRaw = Date.now();
+    }, 30);
+    const out: string[] = [];
+    const done = (async () => {
+      for await (const v of withIdleTimeout(lateValue(), 50, onTimeout, undefined, () => lastRaw)) out.push(v);
+    })();
+
+    await vi.advanceTimersByTimeAsync(80);
+    await done;
+    expect(out).toEqual(['late']);
+    expect(onTimeout).not.toHaveBeenCalled();
+  });
+
   it('still passes through values when a stop signal is provided but unresolved', async () => {
     const onTimeout = vi.fn();
     const stop = new Promise<void>(() => {}); // never resolves

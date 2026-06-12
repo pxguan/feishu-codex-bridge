@@ -162,6 +162,10 @@ class CodexThread implements AgentThread {
     // Per-turn overrides persist for subsequent turns (matches turn/start semantics).
     if (turn?.model) this.model = turn.model;
     if (turn?.effort) this.effort = turn.effort;
+    // Liveness clock for the idle watchdog: refreshed on EVERY raw notification
+    // below (even ones mapNotification drops, like command output deltas), so a
+    // long-running shell command doesn't read as "wedged".
+    let lastActivityAt = Date.now();
     async function* gen(): AsyncGenerator<AgentEvent> {
       const params: Record<string, unknown> = {
         threadId: self.codexThreadId,
@@ -194,6 +198,7 @@ class CodexThread implements AgentThread {
           return;
         }
         if (step.done) return;
+        lastActivityAt = Date.now();
         const ev = mapNotification(step.value);
         if (!ev) continue;
         if (ev.type === 'turn_started') self.currentTurnId = ev.turnId;
@@ -202,12 +207,15 @@ class CodexThread implements AgentThread {
         if (ev.type === 'error' && !ev.willRetry) return;
       }
     }
-    return { events: gen(), turnId: () => self.currentTurnId };
+    return { events: gen(), turnId: () => self.currentTurnId, lastActivity: () => lastActivityAt };
   }
 
   runGoal(objective: string): AgentRun {
     const self = this;
     this.currentTurnId = undefined;
+    // Same liveness clock as runStreamed — the goal's 30min idle backstop must
+    // also see raw activity, not just mapped events.
+    let lastActivityAt = Date.now();
     async function* gen(): AsyncGenerator<AgentEvent> {
       // Clear any leftover goal on this thread FIRST. codex keeps a goal attached
       // even after it completes and re-broadcasts it on every resume (verified);
@@ -252,6 +260,7 @@ class CodexThread implements AgentThread {
           return;
         }
         if (step.done) return;
+        lastActivityAt = Date.now();
         const ev = mapNotification(step.value);
         if (!ev) continue;
         if (ev.type === 'turn_started') {
@@ -288,7 +297,7 @@ class CodexThread implements AgentThread {
         if (ev.type === 'error' && !ev.willRetry) return; // a fatal error kills the run
       }
     }
-    return { events: gen(), turnId: () => self.currentTurnId };
+    return { events: gen(), turnId: () => self.currentTurnId, lastActivity: () => lastActivityAt };
   }
 
   async clearGoal(): Promise<void> {
