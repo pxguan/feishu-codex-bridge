@@ -39,11 +39,8 @@ describe('claude-sdk backend：能力守卫（无半实现）', () => {
     expect(be.capabilities).toEqual({ goal: false, steer: false, compact: false, resume: false });
   });
 
-  it('listThreads / resumeThread 抛明确的「暂不支持」错误', async () => {
+  it('listThreads（/resume 选择卡）抛明确的「暂不支持」错误', async () => {
     await expect(be.listThreads('/tmp')).rejects.toThrow(/暂不支持.*resume 历史会话/);
-    await expect(
-      be.resumeThread({ cwd: '/tmp', sessionId: 'sess-x' }),
-    ).rejects.toThrow(/暂不支持恢复历史会话/);
   });
 
   it('readHistory 按接口契约 never-throws：返回空转写', async () => {
@@ -53,6 +50,10 @@ describe('claude-sdk backend：能力守卫（无半实现）', () => {
   it('qa/write 权限档 fail-closed：spawn 之前即拒绝，绝不降级为完全访问', async () => {
     await expect(be.startThread({ cwd: '/tmp', mode: 'qa' })).rejects.toThrow(/仅支持「完全访问」/);
     await expect(be.startThread({ cwd: '/tmp', mode: 'write' })).rejects.toThrow(/绝不静默降级/);
+    // resumeThread（重启恢复路径）同样 fail-closed —— 守卫在 spawn 之前
+    await expect(be.resumeThread({ cwd: '/tmp', sessionId: 'sess-x', mode: 'qa' })).rejects.toThrow(
+      /仅支持「完全访问」/,
+    );
   });
 
   it('listModels 返回静态 claude 别名，含默认项（pickDefault 可用）', async () => {

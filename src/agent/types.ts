@@ -246,7 +246,8 @@ export interface AgentCapabilities {
   steer: boolean;
   /** /compact 手动压缩（compact） */
   compact: boolean;
-  /** /resume 历史会话（listThreads/readHistory/resumeThread） */
+  /** /resume 历史会话选择卡（listThreads/readHistory）。注意 resumeThread 本身
+   * 不在此能力位之下 —— 重启恢复路径（resolveThread）对所有后端直接调用它。 */
   resume: boolean;
 }
 

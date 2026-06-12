@@ -25,17 +25,18 @@ import { ClaudeEventMapper, type SdkMessageLike } from './event-map';
  * Claude Code backend via the official Agent SDK (@anthropic-ai/claude-agent-sdk).
  *
  * MINIMAL SLICE (multi-backend step 1, see research/05 + synthesis L-1): only
- * isAvailable / listModels / startThread / runStreamed / abort are real. Every
- * codex-only capability is hard-guarded — `capabilities` flags them false AND
- * the methods throw a clear "not supported" error (never a silent
- * half-implementation):
+ * isAvailable / listModels / startThread / resumeThread / runStreamed / abort
+ * are real. Every codex-only capability is hard-guarded — `capabilities` flags
+ * them false AND the methods throw a clear "not supported" error (never a
+ * silent half-implementation):
  *   - goal/steer/compact → throw (orchestrator surfaces ❌ / falls back to queue)
- *   - resume picker (listThreads/readHistory) + resumeThread → throw / empty.
- *     After a daemon restart resolveThread's catch therefore starts a FRESH
- *     claude session and re-weaves the topic history (graceful degrade).
- *     TODO: the SDK natively supports `resume:`/listSessions() — wire them up
- *     once SessionRecord carries a backend id (M-8) so session-id drift across
- *     resumes can be persisted.
+ *   - resume PICKER (listThreads/readHistory) → throw / empty. resumeThread
+ *     itself IS implemented (M-8): SessionRecord carries the backend id, so a
+ *     daemon restart routes back here and the SDK-native `resume:` continues
+ *     the SAME session id with prior context (probed on-machine 2026-06; no
+ *     fork → no id drift to persist). A missing/invalid session id surfaces as
+ *     a clear connect failure → resolveThread falls back to a fresh thread +
+ *     full topic re-weave (graceful degrade).
  *
  * Process model mirrors codex: ONE long-lived CLI child per thread (streaming-
  * input query), so supervisor/watchdog/⏹ semantics stay transparent. The SDK
@@ -59,6 +60,8 @@ import { ClaudeEventMapper, type SdkMessageLike } from './event-map';
  */
 const STARTUP_PROBE_MS = 1_500;
 
+// `resume: false` 守卫的是 /resume 选择卡（listThreads/readHistory 未实现）；
+// resumeThread 本身已实现 —— 重启恢复路径（resolveThread）不经此能力位。
 const CAPABILITIES: AgentCapabilities = { goal: false, steer: false, compact: false, resume: false };
 
 /** Model aliases the claude CLI resolves itself (`--model sonnet|opus|haiku`).
@@ -123,10 +126,14 @@ function notSupported(what: string): Error {
 }
 
 class ClaudeSdkThread implements AgentThread {
-  /** Bridge-assigned session UUID, forced onto the CLI via `--session-id` so
-   * the handle exists BEFORE any turn runs (stream-json mode emits no init
-   * until the first input — see STARTUP_PROBE_MS). */
-  readonly sessionId = randomUUID();
+  /** New thread: bridge-assigned session UUID, forced onto the CLI via
+   * `--session-id` so the handle exists BEFORE any turn runs (stream-json mode
+   * emits no init until the first input — see STARTUP_PROBE_MS). Resumed
+   * thread: the PRIOR session's id — the SDK `resume:` continues the SAME id
+   * (probed: no fork), so the persisted SessionRecord stays valid as-is. */
+  readonly sessionId: string;
+  /** resume mode (connect passes `resume:` instead of pre-assigning the id) */
+  private readonly resuming: boolean;
   private readonly input = new AsyncQueue<SDKUserMessage>();
   private q!: Query;
   private iter!: AsyncIterator<SDKMessage>;
@@ -144,7 +151,13 @@ class ClaudeSdkThread implements AgentThread {
    * read a premature `done`. Mirrors the codex compact()-drain rationale. */
   private staleResults = 0;
 
-  constructor(private readonly opts: StartThreadOptions) {}
+  constructor(
+    private readonly opts: StartThreadOptions,
+    resumeSessionId?: string,
+  ) {
+    this.sessionId = resumeSessionId ?? randomUUID();
+    this.resuming = resumeSessionId !== undefined;
+  }
 
   /** Spawn the CLI (via query()) and probe that it came up. */
   async connect(): Promise<void> {
@@ -152,9 +165,12 @@ class ClaudeSdkThread implements AgentThread {
     const options: Options = {
       cwd: this.opts.cwd,
       ...(this.opts.model ? { model: this.opts.model } : {}),
-      // Pre-assign the session id (CLI `--session-id`, probed accepted) so the
-      // AgentThread handle is real from t0 without waiting for any message.
-      extraArgs: { 'session-id': this.sessionId },
+      // New thread: pre-assign the session id (CLI `--session-id`, probed
+      // accepted) so the AgentThread handle is real from t0 without waiting for
+      // any message. Resume: SDK-native `resume:` loads the prior conversation
+      // and CONTINUES the same session id (probed on-machine: id stable across
+      // resumes, context recalled — no forkSession, so nothing drifts).
+      ...(this.resuming ? { resume: this.sessionId } : { extraArgs: { 'session-id': this.sessionId } }),
       // TODO(权限映射): full 档专用 — see the module doc. qa/write were already
       // rejected in startThread(); 'full' matches codex's danger-full-access.
       permissionMode: 'bypassPermissions',
@@ -208,8 +224,8 @@ class ClaudeSdkThread implements AgentThread {
     this.pendingNext = first;
     const verdict = await Promise.race([
       first.then(
-        (step) => (step.done ? 'exited' : 'message'),
-        () => 'failed',
+        (step) => (step.done ? ('exited' as const) : step),
+        () => 'failed' as const,
       ),
       new Promise<'silent'>((resolve) => {
         const t = setTimeout(() => resolve('silent'), STARTUP_PROBE_MS);
@@ -227,7 +243,24 @@ class ClaudeSdkThread implements AgentThread {
       await this.close().catch(() => undefined);
       throw new Error(`Claude 后端启动失败：${reason}（请检查 claude 登录态 / ANTHROPIC_API_KEY）`);
     }
-    // 'silent'（正常等待输入）或 'message'（已有消息，留给第一轮消费）都算成功。
+    // A pre-input MESSAGE is normally turn 1's first event (left pending for the
+    // run loop) — EXCEPT an error result, which is how startup failures that the
+    // CLI survives long enough to report surface in stream-json mode. Probed: a
+    // missing/invalid `resume` session id yields an immediate
+    // result{subtype:'error_during_execution', is_error:true} before any input.
+    // Consume it and fail connect so resolveThread's catch can fall back.
+    if (verdict !== 'silent') {
+      const m = verdict.value as SdkMessageLike & { is_error?: boolean; subtype?: string; result?: string };
+      if (m.type === 'result' && m.is_error) {
+        this.pendingNext = undefined; // it IS the failure, not turn data
+        await this.close().catch(() => undefined);
+        const what = m.result || m.subtype || 'error result';
+        throw new Error(
+          `Claude 后端启动失败：${what}${this.resuming ? '（待恢复的会话可能已不存在）' : ''}`,
+        );
+      }
+    }
+    // 'silent'（正常等待输入）或其他先到消息（留给第一轮消费）都算成功。
   }
 
   /** Read the next SDK message, consuming the startup probe's pending read first. */
@@ -378,20 +411,28 @@ export class ClaudeSdkBackend implements AgentBackend {
   }
 
   async startThread(opts: StartThreadOptions): Promise<AgentThread> {
-    // fail-closed（contract: StartThreadOptions.mode）：在权限映射做出来之前，
-    // qa/write 档绝不降级为完全访问 —— 直接拒绝启动并说明原因。
-    if ((opts.mode ?? 'full') !== 'full') {
-      throw new Error(
-        'Claude 后端目前仅支持「完全访问」权限档：qa/write 档到 Claude 权限模式的映射尚未实现，已拒绝启动（绝不静默降级）。请把项目权限档切回「完全访问」或改用 codex 后端。',
-      );
-    }
+    assertFullMode(opts);
     const thread = new ClaudeSdkThread(opts);
     await thread.connect();
     return thread;
   }
 
-  async resumeThread(_opts: ResumeThreadOptions): Promise<AgentThread> {
-    // 能力守卫：见模块注释。resolveThread 的 catch 会落回“新线程 + 全量话题回织”。
-    throw notSupported('恢复历史会话（resume）');
+  async resumeThread(opts: ResumeThreadOptions): Promise<AgentThread> {
+    // SDK-native resume（重启恢复路径，见模块注释）。会话不存在/已损坏时
+    // connect() 抛清晰错误，resolveThread 的 catch 落回「新线程 + 全量话题回织」。
+    assertFullMode(opts);
+    const thread = new ClaudeSdkThread(opts, opts.sessionId);
+    await thread.connect();
+    return thread;
+  }
+}
+
+/** fail-closed（contract: StartThreadOptions.mode）：在权限映射做出来之前，
+ * qa/write 档绝不降级为完全访问 —— 直接拒绝启动并说明原因。 */
+function assertFullMode(opts: StartThreadOptions): void {
+  if ((opts.mode ?? 'full') !== 'full') {
+    throw new Error(
+      'Claude 后端目前仅支持「完全访问」权限档：qa/write 档到 Claude 权限模式的映射尚未实现，已拒绝启动（绝不静默降级）。请把项目权限档切回「完全访问」或改用 codex 后端。',
+    );
   }
 }
