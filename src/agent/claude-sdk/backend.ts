@@ -425,7 +425,7 @@ export class ClaudeSdkBackend implements AgentBackend {
 
   async startThread(opts: StartThreadOptions): Promise<AgentThread> {
     assertFullMode(opts);
-    const thread = new ClaudeSdkThread(opts);
+    const thread = new ClaudeSdkThread(sanitizeClaudeModel(opts));
     await thread.connect();
     return thread;
   }
@@ -434,10 +434,23 @@ export class ClaudeSdkBackend implements AgentBackend {
     // SDK-native resume（重启恢复路径，见模块注释）。会话不存在/已损坏时
     // connect() 抛清晰错误，resolveThread 的 catch 落回「新线程 + 全量话题回织」。
     assertFullMode(opts);
-    const thread = new ClaudeSdkThread(opts, opts.sessionId);
+    const thread = new ClaudeSdkThread(sanitizeClaudeModel(opts), opts.sessionId);
     await thread.connect();
     return thread;
   }
+}
+
+/** 本后端认识的 model id（与 STATIC_MODELS 同源）。 */
+const KNOWN_MODEL_IDS = new Set(STATIC_MODELS.map((m) => m.id));
+
+/** 防御自愈（exported for tests）：跨后端污染的持久化 model id（旧版 /model 卡
+ * 未按后端路由，可能把 codex 的 'gpt-5.5' 写进 claude 会话记录）一旦传给 claude
+ * CLI 的 --model，每轮/每次 resume 都报 invalid model 且群内无 UI 可修——非本
+ * 后端的模型一律忽略并告警，落回 CLI 默认模型，让存量坏记录自愈。 */
+export function sanitizeClaudeModel<T extends { model?: string }>(opts: T): T {
+  if (!opts.model || KNOWN_MODEL_IDS.has(opts.model)) return opts;
+  log.warn('agent', 'claude-model-ignored', { model: opts.model });
+  return { ...opts, model: undefined };
 }
 
 /** fail-closed（contract: StartThreadOptions.mode）：在权限映射做出来之前，

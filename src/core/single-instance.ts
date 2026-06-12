@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { paths } from '../config/paths';
 import { spawnProcessSync } from '../platform/spawn';
@@ -31,6 +31,11 @@ interface LockRecord {
 const CLAIM_ATTEMPTS = 5;
 /** pid 复用判定的时钟余量：ps etime 是秒粒度，再留 NTP 偏差空间。 */
 const PID_REUSE_SLACK_MS = 15_000;
+/** 空锁文件的瞬态/残留分界：抢占者 open→write 的间隙是毫秒级，超龄的空文件只
+ * 可能是写入者在 open 之后、write 之前被 SIGKILL（或 ENOSPC 写失败）留下的残留
+ * ——写入者从未注册 exit release（注册发生在写成功之后），没人会清，必须摘掉
+ * 重抢，否则之后每次启动都空转重试后误报「稍后重试」。 */
+const EMPTY_LOCK_STALE_MS = 2_000;
 
 export class BridgeAlreadyRunningError extends Error {
   constructor(public readonly pid: number) {
@@ -125,7 +130,24 @@ export function acquireSingleInstanceLock(appId: string, file: string = paths.pr
           `拒绝启动；请修复该文件的读权限后重试。`,
       );
     }
-    if (raw.trim() === '') continue; // 抢占者 open→write 的瞬时空文件 → 重读
+    if (raw.trim() === '') {
+      // 新鲜空文件 = 抢占者 open→write 的瞬时间隙 → 重读即可；超龄空文件 =
+      // 不可恢复的残留（见 EMPTY_LOCK_STALE_MS）→ 摘掉后回到循环顶重抢。
+      let stale = true;
+      try {
+        stale = Date.now() - statSync(file).mtimeMs > EMPTY_LOCK_STALE_MS;
+      } catch {
+        // 文件已被并发方摘掉/接管 —— 直接重抢
+      }
+      if (stale) {
+        try {
+          unlinkSync(file);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
+      }
+      continue;
+    }
     let rec: Partial<LockRecord>;
     try {
       rec = JSON.parse(raw) as Partial<LockRecord>;
@@ -147,5 +169,8 @@ export function acquireSingleInstanceLock(appId: string, file: string = paths.pr
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
   }
-  throw new Error(`单实例锁竞争 ${CLAIM_ATTEMPTS} 次未果（${file}），请稍后重试。`);
+  throw new Error(
+    `单实例锁竞争 ${CLAIM_ATTEMPTS} 次未果（${file}）。多为并发启动的瞬态，请稍后重试；` +
+      `若反复出现，确认没有其他 bridge 进程在跑后，手动删除该文件再启动。`,
+  );
 }

@@ -44,6 +44,16 @@ interface Pending {
   reject: (e: Error) => void;
 }
 
+/** 应用层 JSON-RPC error 应答——进程本身是健康的（它好好地回了包）。按失败
+ * 弃置/重建进程的调用方（client-pool 的 utilityRequest）必须把它与超时/传输层
+ * 失败区分开：杀掉健康的共享进程会 failAllPending 殃及并发在飞的其他请求。 */
+export class JsonRpcError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'JsonRpcError';
+  }
+}
+
 export interface AppServerClientOptions {
   bin: string;
   cwd: string;
@@ -224,7 +234,7 @@ export class AppServerClient {
       this.pending.delete(msg.id);
       if ('error' in msg && msg.error) {
         const e = msg.error as { message?: string };
-        p.reject(new Error(e.message ?? 'JSON-RPC error'));
+        p.reject(new JsonRpcError(e.message ?? 'JSON-RPC error'));
       } else {
         p.resolve(msg.result);
       }

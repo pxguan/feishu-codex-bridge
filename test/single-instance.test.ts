@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,6 +82,18 @@ describe('acquireSingleInstanceLock 协议逻辑', () => {
     writeFileSync(file, '{half-written');
     expect(() => acquireSingleInstanceLock('app_a', file)).toThrow(/损坏/);
     expect(() => acquireSingleInstanceLock('app_a', file)).not.toThrow(BridgeAlreadyRunningError);
+  });
+
+  it('超龄空锁文件（写入者 open 后被 SIGKILL 的残留）→ 摘掉接管，不再永久卡死', () => {
+    writeFileSync(file, '');
+    const old = (Date.now() - 60_000) / 1000; // mtime 一分钟前 —— 远超瞬态间隙
+    utimesSync(file, old, old);
+    expect(() => acquireSingleInstanceLock('app_a', file)()).not.toThrow();
+  });
+
+  it('新鲜空锁文件（抢占者 open→write 间隙）→ 按瞬态重试，耗尽后给可执行指引', () => {
+    writeFileSync(file, ''); // mtime = now，整个重试期内都「新鲜」
+    expect(() => acquireSingleInstanceLock('app_a', file)).toThrow(/手动删除/);
   });
 
   it('其他 app 的残留记录不挡道（沿旧覆盖语义）', async () => {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_BACKEND_ID, backendIds, createBackend } from '../src/agent';
 import { CodexAppServerBackend } from '../src/agent/codex-appserver/backend';
-import { ClaudeSdkBackend } from '../src/agent/claude-sdk/backend';
+import { ClaudeSdkBackend, sanitizeClaudeModel } from '../src/agent/claude-sdk/backend';
 
 describe('agent backend registry', () => {
   it('defaults to the codex app-server backend (zero-arg call = legacy path)', () => {
@@ -73,5 +73,21 @@ describe('claude-sdk backend：能力守卫（无半实现）', () => {
     const models = await be.listModels();
     expect(models.some((m) => m.isDefault && !m.hidden)).toBe(true);
     expect(models.map((m) => m.id)).toContain('sonnet');
+  });
+});
+
+describe('claude-sdk backend：跨后端 model id 自愈（sanitizeClaudeModel）', () => {
+  it('本后端别名原样放行', () => {
+    expect(sanitizeClaudeModel({ model: 'sonnet' }).model).toBe('sonnet');
+    expect(sanitizeClaudeModel({ model: 'opus' }).model).toBe('opus');
+    expect(sanitizeClaudeModel({ model: undefined }).model).toBeUndefined();
+  });
+
+  it('跨后端污染的 codex model id 被忽略（落回 CLI 默认，存量坏记录自愈）', () => {
+    const opts = { cwd: '/p', model: 'gpt-5.5' };
+    const safe = sanitizeClaudeModel(opts);
+    expect(safe.model).toBeUndefined();
+    expect(safe.cwd).toBe('/p'); // 其余字段不动
+    expect(opts.model).toBe('gpt-5.5'); // 入参不被原地修改
   });
 });

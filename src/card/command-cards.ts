@@ -32,6 +32,9 @@ export interface ModelCardState {
   models: ModelInfo[];
   model: string;
   effort: ReasoningEffort;
+  /** the backend whose models this card lists（写回会话前复核，防跨后端把
+   * codex model id 持久化进 claude 会话——resume 时会喂坏 CLI）。旧卡缺省。 */
+  backend?: string;
   createdAt: number;
   /** transient confirmation line */
   note?: string;

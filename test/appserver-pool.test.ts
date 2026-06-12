@@ -104,14 +104,26 @@ describe.skipIf(process.platform === 'win32')('utility client 复用与出错即
     expect(runs()).toBe(1); // 三个 RPC 一个进程，不再各付一次 spawn+initialize
   });
 
-  it('RPC error → 丢弃常驻进程，下一次调用重建', async () => {
+  it('应用层 JSON-RPC error → 上抛但进程保留（健康进程不被 SIGKILL）', async () => {
     const { runs } = makeFakeCodex();
     await expect(utilityRequest('rpc/error')).rejects.toThrow('boom');
     expect(runs()).toBe(1);
 
     const res = await utilityRequest<{ data: { id: string }[] }>('model/list');
     expect(res.data[0]!.id).toBe('pool-model');
-    expect(runs()).toBe(2); // 出错即重建：第二次是全新进程
+    expect(runs()).toBe(1); // 进程健康（它好好回了 error 包）——复用，不重建
+  });
+
+  it('一个调用方的 RPC error 不殃及并发在飞的请求（不 failAllPending）', async () => {
+    makeFakeCodex();
+    const [bad, good] = await Promise.allSettled([
+      utilityRequest('rpc/error'),
+      utilityRequest<{ data: { id: string }[] }>('model/list'),
+    ]);
+    expect(bad.status).toBe('rejected');
+    expect((bad as PromiseRejectedResult).reason).toMatchObject({ message: 'boom' });
+    expect(good.status).toBe('fulfilled'); // 旧行为会被 discard→SIGKILL 连坐打挂
+    expect((good as PromiseFulfilledResult<{ data: { id: string }[] }>).value.data[0]!.id).toBe('pool-model');
   });
 
   it('进程死亡 → 后续调用自动重建', async () => {

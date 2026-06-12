@@ -1,7 +1,7 @@
 import { statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { log } from '../../core/logger';
-import { AppServerClient } from './app-server-client';
+import { AppServerClient, JsonRpcError } from './app-server-client';
 import { resolveCodexBin } from './locate';
 
 /**
@@ -135,10 +135,15 @@ function discardUtility(client: AppServerClient): void {
 }
 
 /**
- * 在共享 utility client 上发一个 JSON-RPC 请求（懒连接）。任何失败（连接失败 /
- * 进程死亡 / 超时 / RPC error）都**丢弃当前进程**，下一次调用拿全新进程——
- * 「出错即重建」。超时丢弃即 close（SIGKILL），保住旧短命进程对 wedged codex
- * 的「杀进程」恢复语义（readHistory 的 20s 死线靠这个不留孤儿）。
+ * 在共享 utility client 上发一个 JSON-RPC 请求（懒连接）。连接失败 / 进程死亡 /
+ * 超时都**丢弃当前进程**，下一次调用拿全新进程——「出错即重建」。超时丢弃即
+ * close（SIGKILL），保住旧短命进程对 wedged codex 的「杀进程」恢复语义
+ * （readHistory 的 20s 死线靠这个不留孤儿）。
+ *
+ * 例外：应用层 JSON-RPC error 应答（如 thread/read 指向已被 codex 删除的会话）
+ * 说明进程健康，原样上抛、进程保留——否则一个调用方的业务错误会 SIGKILL 共享
+ * 进程，failAllPending 把并发在飞的其他请求（account/read 强刷、thread/list）
+ * 全部打挂，正是本仓库最忌讳的「时灵时不灵」。
  */
 export async function utilityRequest<T = unknown>(
   method: string,
@@ -155,7 +160,7 @@ export async function utilityRequest<T = unknown>(
       `utility ${method}`,
     );
   } catch (err) {
-    discardUtility(client);
+    if (!(err instanceof JsonRpcError)) discardUtility(client);
     throw err;
   }
 }

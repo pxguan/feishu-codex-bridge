@@ -463,10 +463,6 @@ export function createOrchestrator(
     if (sessions.has(key)) sessionTouchedAt.set(key, Date.now());
   }
   const active = new Map<string, ActiveState>();
-  /** F8 兜底：到 run 结束都没换到真实话题 id 的线程（getThreadId 重试仍失败）。
-   * 它们不在 `sessions` 里（pending: 键随 finally 即灭，无人能再触达），正常
-   * shutdown 关不到 → 孤儿 app-server；停机时一并 close。 */
-  const unadopted = new Set<AgentThread>();
   /** Per-doc serialization for comment runs (see {@link withDocLock}). */
   const docLocks = new Map<string, Promise<void>>();
   const sema = new Semaphore(getMaxConcurrentRuns(cfg));
@@ -493,17 +489,12 @@ export function createOrchestrator(
   const lastUsage = new Map<string, { used: number; window: number | null }>();
   /** inbound message/comment dedup (at-least-once delivery, see RecentIdCache) */
   const seenInbound = new RecentIdCache();
-  /** model list cache per backend id (was a single codex-only cache) */
-  const modelsCaches = new Map<string, ModelInfo[]>();
 
-  async function listModels(be: AgentBackend = backend): Promise<ModelInfo[]> {
-    let cached = modelsCaches.get(be.id);
-    if (!cached) {
-      cached = await be.listModels();
-      modelsCaches.set(be.id, cached);
-    }
-    return cached;
-  }
+  /** 模型列表直通后端：两个后端内部都已缓存成功结果（codex 的 modelCache、
+   * claude 的静态常量），这层不再缓存——codex 瞬时不可用时返回的 STATIC_MODELS
+   * 兜底一旦缓存在这层，会被钉死整个 daemon 生命周期（backend 故意不缓存失败
+   * 结果，让下次调用重试；见 codex-appserver/backend.listModels）。 */
+  const listModels = (be: AgentBackend = backend): Promise<ModelInfo[]> => be.listModels();
 
   function pickDefault(models: ModelInfo[]): { model: string; effort: ReasoningEffort } {
     const def = models.find((m) => m.isDefault && !m.hidden) ?? models.find((m) => !m.hidden) ?? models[0];
@@ -1320,15 +1311,24 @@ export function createOrchestrator(
   function postModelCard(msg: NormalizedMessage, sessionKey: string): void {
     void withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
       try {
-        const [models, rec] = await Promise.all([listModels(), getSession(sessionKey)]);
+        // 按会话/项目后端路由（已有会话以记录为准，未开张的用项目配置）：
+        // claude 项目的 /model 卡绝不能列 codex 模型——选中即经 patchSession
+        // 持久化，重启 resume 会把 codex model id 喂给 claude CLI，会话坏死。
+        const [rec, project] = await Promise.all([getSession(sessionKey), getProjectByChatId(msg.chatId)]);
+        const be = backendFor(rec?.backend ?? project?.backend);
+        const models = await listModels(be);
         const def = pickDefault(models);
+        // 记录里跨后端污染的 model id（旧版未路由的 /model 卡写入）不在本后端
+        // 列表里——回落默认，别把坏值当 select 初值渲染。
+        const recModel = rec?.model && models.some((m) => m.id === rec.model) ? rec.model : undefined;
         const state: ModelCardState = {
           chatId: msg.chatId,
           threadId: sessionKey,
           requesterOpenId: msg.senderId,
           models,
-          model: rec?.model ?? def.model,
+          model: recModel ?? def.model,
           effort: rec?.effort ?? def.effort,
+          backend: be.id,
           createdAt: Date.now(),
         };
         const res = await sendManagedCard(channel, msg.chatId, buildModelCard(state), msg.messageId, true);
@@ -1590,6 +1590,14 @@ export function createOrchestrator(
       const state = authPending(modelPending, evt);
       if (!state || !option) return;
       settleUpdate(evt.messageId, async () => {
+        // 防跨后端写入：卡片建立后会话后端可能已变（/resume 换绑等）——这张卡
+        // 列的是 state.backend 的模型，写进别的后端的会话记录会让 resume 把
+        // 错后端的 model id 喂给 CLI（claude 吃到 'gpt-5.5' 即永久报错）。
+        const rec = await getSession(state.threadId);
+        if (state.backend && rec && rec.backend !== state.backend) {
+          state.note = '⚠️ 会话后端已切换，这张卡已过期——请重新发 /model';
+          return buildModelCard(state);
+        }
         state.model = option;
         // re-pick a valid effort if the new model doesn't support the current one
         const m = state.models.find((x) => x.id === option);
@@ -2839,11 +2847,13 @@ export function createOrchestrator(
     } finally {
       active.delete(activeKey);
       if (curCardKey) runsByCard.delete(curCardKey);
-      // F8: adopt 始终没成功的线程进 unadopted（已死/已关的跳过；shutdown 再
-      // close 一次也无害——close 幂等，这只是少囤引用）。
-      if (activeKey.startsWith('pending:') && opts.thread.isAlive()) {
-        unadopted.add(opts.thread);
-        log.warn('intake', 'unadopted-thread', { activeKey });
+      // F8: adopt 始终没成功的线程对任何后续消息都不可达（pending: 键随本
+      // finally 即灭，会话从未 persist，M-3 reaper 只扫 sessions 也看不见它）
+      // ——保活只会把常驻 agent 进程（~172MB/个）泄漏到停机。与 goal 路径
+      // 一致直接回收（close 幂等，已死/已关的也无害）。
+      if (activeKey.startsWith('pending:')) {
+        void opts.thread.close().catch(() => undefined);
+        log.warn('intake', 'unadopted-thread-closed', { activeKey });
       }
       reaction?.done(); // run ended (complete / ⏹ / timeout / error) → ✅ DONE
       release();
@@ -3275,7 +3285,14 @@ export function createOrchestrator(
    * doc replies rarely touch the filesystem, but we keep a sane default). */
   async function resolveDocThread(sessionKey: string, question: string): Promise<AgentThread> {
     const live = sessions.get(sessionKey);
-    if (live) return live;
+    if (live) {
+      if (live.isAlive()) return live;
+      // 与 resolveThread 同款守卫：app-server 死后死线程留在缓存，每次 @ 评论
+      // 都立即失败（且失败轮还 touchSession 给 reaper 续命）——驱逐让它落进
+      // 下面既有的 resume-or-fresh 兜底，话题自愈而不是僵死到重启。
+      sessions.delete(sessionKey);
+      log.info('agent', 'dead-thread-evict', { sessionKey });
+    }
     const rec = await getSession(sessionKey);
     if (rec) {
       try {
@@ -3516,10 +3533,10 @@ export function createOrchestrator(
 
   async function shutdown(): Promise<void> {
     clearInterval(reaper);
-    // sessions + unadopted（F8 的 adopt 失败孤儿）合并去重后统一回收。
-    const live = [...new Set([...sessions.values(), ...unadopted])];
+    // adopt 失败的孤儿线程已在 launchRun/launchGoalRun 的 finally 就地 close，
+    // 这里只需回收 LIVE 会话缓存。
+    const live = [...new Set(sessions.values())];
     sessions.clear();
-    unadopted.clear();
     // close() SIGKILLs each app-server child; settle all so one hang/throw
     // doesn't block reaping the rest.
     await Promise.allSettled(live.map((t) => t.close()));
@@ -3527,10 +3544,9 @@ export function createOrchestrator(
   }
 
   // 启动预热：daemon 首个新话题原本恒吃一次 model/list 冷 spawn（独立 app-server
-  // ~150–300ms），启动是空闲期，提前付掉。必须**直调 backend**——成功时只填
-  // backend 内部缓存，后续 listModels() 包装零成本；失败时 backend 返回
-  // STATIC_MODELS 兜底但不写缓存，所以这里也绝不把结果写进 modelsCache，
-  // 否则 fallback 会被钉死整个 daemon 生命周期（首次真实调用会自动重试）。
+  // ~150–300ms），启动是空闲期，提前付掉。成功时只填 backend 内部缓存，后续
+  // listModels() 零成本；失败时 backend 返回 STATIC_MODELS 兜底但不写缓存——
+  // 首次真实调用会自动重试，fallback 绝不被钉死（listModels 包装层也不缓存）。
   void backend.listModels().catch((err) => log.fail('agent', err, { phase: 'models-prewarm' }));
 
   return { onMessage, onComment, onBotAddedToChat, onBotRemovedFromChat, onReaction, onBotMenu, dispatcher, shutdown };
