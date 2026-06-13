@@ -1082,6 +1082,9 @@ export function createOrchestrator(
           const be = backendFor(project?.backend);
           thread = await be.startThread({ cwd, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
           trackSession(sessionKey, thread);
+          // 自愈观测：来源=全新会话（无持久化记录），与 resume-ok/resume-recreate
+          // 互斥——三者其一 + agent 层的 spawn/prewarm-hit 即可还原完整恢复路径。
+          log.info('agent', 'session-fresh', { sessionKey, sessionId: thread.sessionId, backend: be.id });
           await upsertSession({
             threadId: sessionKey,
             chatId: msg.chatId,
@@ -1193,6 +1196,9 @@ export function createOrchestrator(
         autoCompact: perm?.autoCompact,
       });
       trackSession(threadId, resumed);
+      // 自愈观测：resume 来源=持久化记录（区分「resume 自愈」与 LIVE 快路径的
+      // 普通续轮——后者不经过这里，stream.timing 的 tResolve≈0 是它的指纹）。
+      log.info('agent', 'resume-ok', { threadId, sessionId: rec.sessionId, backend: be.id });
       return { thread: resumed, recreated: false };
     } catch (err) {
       log.fail('agent', err, { phase: 'resume-on-turn', threadId });
@@ -1209,6 +1215,8 @@ export function createOrchestrator(
       // The resumed codex thread is gone — repoint the persisted record at the
       // new thread id so a later restart doesn't keep resuming the dead one.
       await patchSession(threadId, { sessionId: fresh.sessionId }).catch(() => undefined);
+      // 自愈观测：resume 失败已重建全新线程（codex 历史为空，调用方会回灌话题上文）。
+      log.info('agent', 'resume-recreate', { threadId, sessionId: fresh.sessionId, backend: be.id });
       return { thread: fresh, recreated: true };
     }
   }
@@ -2879,6 +2887,14 @@ export function createOrchestrator(
         if (killed || procDead) {
           void opts.thread.close().catch(() => undefined);
           if (topicThreadId) sessions.delete(topicThreadId);
+          // 自愈观测：这里是「kill 中途死」唯一的驱逐点且原先静默——进程死在轮中
+          // 时 LIVE 缓存在本轮收尾就清掉，下一条消息的 resolveThread 不会再命中
+          // dead-thread-evict（那条只兜「轮间死」）。没有这行，e2e 无法从日志还原
+          // 驱逐发生在哪。
+          log.info('agent', 'session-evict', {
+            threadId: topicThreadId ?? null,
+            reason: timedOut ? 'watchdog-timeout' : procDead ? 'proc-dead' : 'forced-interrupt',
+          });
         }
 
         const finalMsgId = cardMsgId;
