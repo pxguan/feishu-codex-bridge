@@ -1,4 +1,5 @@
 import { backendIds } from '../agent';
+import { catalogById } from '../agent/catalog';
 import type { AgentBackend, BackendProbe, PermissionMode } from '../agent/types';
 import { tierLabel, type BackendProbeRow } from '../card/dm-cards';
 import {
@@ -182,6 +183,24 @@ export async function performSetPermissionMode(opts: {
   }
   const p = await getProjectByName(opts.projectName);
   if (!p) return { ok: false, reason: `项目「${opts.projectName}」不存在` };
+  // 后端档位兼容守门：后端在创建时选定、运行时固定（不支持切换），但权限档可改。
+  // 若把档改到该后端的 supportedModes 之外（如 claude 系只支持「完全访问」，却改成只读），
+  // 新话题会在 backend.startThread 的 fail-closed 守卫处直接抛错、整群卡死。提前在这里拦住，
+  // 给清晰原因，而不是让用户改完才发现聊不了。codex（supportedModes undefined）全档放行。
+  const entry = p.backend ? catalogById(p.backend) : undefined;
+  if (entry?.supportedModes) {
+    const resMode = opts.mode ?? effectiveMode(p);
+    const resGuest = opts.guestMode ?? effectiveGuestMode(p);
+    const bad = [...new Set([resMode, resGuest])].find((t) => !entry.supportedModes!.includes(t));
+    if (bad !== undefined) {
+      return {
+        ok: false,
+        reason:
+          `项目的后端「${entry.displayName}」仅支持 ${entry.supportedModes.map(tierLabel).join(' / ')} 权限档，` +
+          `无法改到「${tierLabel(bad)}」。该后端是创建时选定、运行时固定的；如需更低权限档，请删项目后改用 codex 后端重建。`,
+      };
+    }
+  }
   // updateProject 跳过 undefined 值 —— 与 DM 旧写法 {...(mode?{mode}:{})} 等价。
   await updateProject(opts.projectName, { mode: opts.mode, guestMode: opts.guestMode, network: opts.network });
   await opts.evictLiveSessionsForChat(p.chatId);

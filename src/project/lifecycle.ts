@@ -6,8 +6,22 @@ import { paths } from '../config/paths';
 import { log } from '../core/logger';
 import { addProject, getProjectByChatId, getProjectByName, type Project } from './registry';
 import type { PermissionMode } from '../agent/types';
+import { isBackendEntryInstalled } from '../agent';
+import { projectCreatableBackends } from '../agent/catalog';
 import { setAnnouncement } from './announcement';
 import { onboardGroup } from './onboarding';
+
+/**
+ * 校验「创建时选定的后端」此刻仍可用（已下载 + 支持该权限档）。防御卡渲染与提交之间
+ * 的卸载竞态——否则会把无效后端写进项目，直到建会话才 fail-closed 报错。复用
+ * {@link projectCreatableBackends} 的同源过滤（codex external-cli 基线特判，恒可用）。
+ * backend 未设（落回默认 codex）直接放行。
+ */
+export function assertBackendUsable(backend: string | undefined, mode: PermissionMode): void {
+  if (!backend) return;
+  const ok = projectCreatableBackends(mode, isBackendEntryInstalled).some((e) => e.id === backend);
+  if (!ok) throw new Error(`所选后端「${backend}」当前不可用（未下载或不支持该权限档），请回卡片重新选择`);
+}
 
 export interface CreateProjectInput {
   name: string;
@@ -73,6 +87,7 @@ export async function createProject(channel: LarkChannel, input: CreateProjectIn
   const name = input.name.trim();
   if (!name) throw new Error('项目名不能为空');
   if (await getProjectByName(name)) throw new Error(`项目名「${name}」已存在，换个名或用 /projects 看已有的`);
+  assertBackendUsable(input.backend, input.mode ?? 'full'); // 创建默认「完全访问」档
 
   // 1. resolve cwd
   const { cwd, blank } = await resolveCwd(name, input.existingPath);
@@ -137,6 +152,7 @@ export async function joinExistingGroup(channel: LarkChannel, input: JoinGroupIn
   if (await getProjectByName(name)) throw new Error(`项目名「${name}」已存在，换个名或用 /projects 看已有的`);
   const bound = await getProjectByChatId(input.chatId);
   if (bound) throw new Error(`该群已绑定为项目「${bound.name}」`);
+  assertBackendUsable(input.backend, input.mode ?? 'qa'); // 外部群默认「只读」档
 
   const { cwd, blank } = await resolveCwd(name, input.existingPath);
 

@@ -148,6 +148,34 @@ describe('performSetPermissionMode', () => {
     expect(evict).not.toHaveBeenCalled();
     expect((await getProjectByName('demo'))?.mode).toBe('full');
   });
+
+  // 后端档位兼容守门（review wf_28088b2e #2/#5）：claude 系仅「完全访问」，把档改到其
+  // supportedModes 之外应被前置拦住，否则新话题在 backend 的 fail-closed 守卫处整群卡死。
+  it('后端只支持 full，把权限档改到 qa → 前置拒绝且不落盘、不驱逐', async () => {
+    await addProject({ name: 'cl', chatId: 'oc_cl', cwd: '/tmp/cl', blank: false, createdAt: 1, mode: 'full', backend: 'claude-sdk' });
+    const evict = vi.fn(async () => undefined);
+    const r = await performSetPermissionMode({ projectName: 'cl', mode: 'qa', evictLiveSessionsForChat: evict });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('完全访问');
+    expect(evict).not.toHaveBeenCalled();
+    expect((await getProjectByName('cl'))?.mode).toBe('full'); // 未改盘
+    await removeProject('cl');
+  });
+
+  it('guestMode 改到后端不支持的档同样被拦（普通用户档也要兼容后端）', async () => {
+    await addProject({ name: 'cl2', chatId: 'oc_cl2', cwd: '/tmp/cl2', blank: false, createdAt: 1, mode: 'full', backend: 'claude-sdk' });
+    const r = await performSetPermissionMode({ projectName: 'cl2', guestMode: 'qa', evictLiveSessionsForChat: async () => undefined });
+    expect(r.ok).toBe(false);
+    await removeProject('cl2');
+  });
+
+  it('codex 后端（supportedModes 全档）→ 任意权限档放行', async () => {
+    await addProject({ name: 'cx', chatId: 'oc_cx', cwd: '/tmp/cx', blank: false, createdAt: 1, mode: 'full', backend: 'codex-appserver' });
+    const r = await performSetPermissionMode({ projectName: 'cx', mode: 'qa', evictLiveSessionsForChat: async () => undefined });
+    expect(r.ok).toBe(true);
+    expect((await getProjectByName('cx'))?.mode).toBe('qa');
+    await removeProject('cx');
+  });
 });
 
 describe('performBackendSwitch（注册表 → doctor 探活 → 档位支持面，全过才写盘）', () => {

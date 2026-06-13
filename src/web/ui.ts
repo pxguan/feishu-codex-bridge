@@ -1078,7 +1078,7 @@ ${UI_PURE_JS}
     else if (route.tab === 'backends' || route.tab === 'doctor' || route.tab === 'logs' || route.tab === 'home') location.hash = '#' + route.tab;
     else location.hash = '#overview';
   }
-  window.addEventListener('hashchange', function () { diag = null; diagBotId = null; closeDrawer(); closeSidebar(); renderRoute(); });
+  window.addEventListener('hashchange', function () { diag = null; diagBotId = null; bkDetailId = null; closeDrawer(); closeSidebar(); renderRoute(); });
 
   // 小工具：一张 KPI 磁贴（线性图标 + 标签 + 大数字 + 副文）；catalog 后端 id → 显示名。
   function kpiTile(iconName, label, val, sub, ok) {
@@ -1387,7 +1387,7 @@ ${UI_PURE_JS}
   }
   function closeAllMenus() { document.querySelectorAll('.menu.open').forEach(function (m) { m.classList.remove('open'); }); }
 
-  function openBackendDetail(id) { bkDetailId = id; document.querySelector('.content').scrollTop = 0; renderRoute(); }
+  function openBackendDetail(id) { bkDetailId = id; var c = document.querySelector('.content'); if (c) c.scrollTop = 0; renderRoute(); }
   function backBackendList() { bkDetailId = null; renderRoute(); }
 
   // ── 后端 Agent 详情：头部 + 元信息 + 关联项目 + 右栏诊断/操作 ────────────────────

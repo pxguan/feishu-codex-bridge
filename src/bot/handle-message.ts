@@ -270,7 +270,7 @@ function backendOptionsFor(mode: PermissionMode): SelectOption[] {
   return projectCreatableBackends(mode, isBackendEntryInstalled).map((e) => ({ label: e.displayName, value: e.id }));
 }
 /** 把卡片提交的 backend 收成安全值：必须是注册表里的 id，否则丢弃（落回默认 codex），防伪造。 */
-function safeBackendId(formValue: Record<string, unknown> | undefined): string | undefined {
+export function safeBackendId(formValue: Record<string, unknown> | undefined): string | undefined {
   const v = selectValue(formValue, 'backend');
   return v && backendIds().includes(v) ? v : undefined;
 }
