@@ -11,7 +11,7 @@ const { CATALOG, doctorResults } = vi.hoisted(() => {
   const doctorResults: Record<string, BackendProbe> = {
     'codex-appserver': { ok: true, version: '1.2.3' },
     'claude-sdk': { ok: false, version: null, hint: '未安装，点下载', depState: 'not-installed', installable: true },
-    'claude-acp': { ok: false, version: null, hint: '需手动装适配器', depState: 'external-missing' },
+    'claude-acp': { ok: false, version: null, hint: '未安装，点下载', depState: 'not-installed', installable: true },
   };
   const CATALOG = [
     {
@@ -44,10 +44,12 @@ const { CATALOG, doctorResults } = vi.hoisted(() => {
       displayName: 'Claude（订阅·ACP）',
       access: 'acp',
       dep: {
-        kind: 'npm-external',
+        kind: 'npm-ondemand',
         pkg: 'claude-pty-acp',
-        detectHint: '需手动装适配器',
-        installCmd: 'npm i -g claude-pty-acp',
+        binName: 'claude-pty-acp',
+        approxSizeMB: 65,
+        detectHint: '未安装，点下载',
+        installCmd: '点「下载 Claude 订阅适配器」',
       },
       supportedModes: ['full'],
       blurb: '走订阅计费',
@@ -104,12 +106,17 @@ describe('listBackendCatalog · 状态聚合', () => {
     expect(sdk.supportedModes).toEqual(['full']);
 
     const acp = out.entries.find((e) => e.id === 'claude-acp')!;
-    expect(acp).toMatchObject({ depKind: 'npm-external', depState: 'external-missing', installable: false });
+    expect(acp).toMatchObject({
+      depKind: 'npm-ondemand',
+      depState: 'not-installed',
+      installable: true,
+      approxSizeMB: 65,
+    });
   });
 });
 
 describe('installBackend · installer 委托 + 守门', () => {
-  it('daemon 注入态：installable 后端委托 installer（带版本 pin），透传进度/结果', async () => {
+  it('库类 installable 后端（SDK）委托 installer（带版本 pin、binName=undefined），透传进度/结果', async () => {
     const installer = vi.fn(async (pkg: string, onProgress?: (c: string) => void) => {
       onProgress?.('added 1 package\n');
       void pkg;
@@ -119,19 +126,23 @@ describe('installBackend · installer 委托 + 守门', () => {
     const chunks: string[] = [];
     const r = await svc.installBackend('claude-sdk', (c) => chunks.push(c));
     expect(r.ok).toBe(true);
-    // 带 pin 版本拼包名
-    expect(installer).toHaveBeenCalledWith('@anthropic-ai/claude-agent-sdk@0.3.175', expect.any(Function), undefined);
+    // 带 pin 版本拼包名；库类 binName 透传 undefined（装完走 require.resolve 校验）
+    expect(installer).toHaveBeenCalledWith(
+      '@anthropic-ai/claude-agent-sdk@0.3.175',
+      expect.any(Function),
+      undefined,
+      { binName: undefined },
+    );
     expect(chunks).toEqual(['added 1 package\n']);
   });
 
-  it('external（claude-acp）不真装：返回 {ok:false} 带手动装法，不调 installer', async () => {
-    const installer = vi.fn();
+  it('bin 类 installable 后端（claude-acp）委托 installer（latest 无 pin、带 binName）', async () => {
+    const installer = vi.fn(async () => ({ ok: true as const, code: 0, aborted: false, tail: 'done' }));
     const svc = createAdminService({ installBackend: installer });
     const r = await svc.installBackend('claude-acp');
-    expect(r.ok).toBe(false);
-    expect(r.tail).toContain('不支持一键下载');
-    expect(r.tail).toContain('npm i -g claude-pty-acp');
-    expect(installer).not.toHaveBeenCalled();
+    expect(r.ok).toBe(true);
+    // version 省略 → 不拼 @ver（latest）；binName 透传 → 装完走 .bin 校验
+    expect(installer).toHaveBeenCalledWith('claude-pty-acp', undefined, undefined, { binName: 'claude-pty-acp' });
   });
 
   it('未知后端 id → {ok:false}，不调 installer', async () => {
@@ -146,12 +157,7 @@ describe('installBackend · installer 委托 + 守门', () => {
   it('只读预览态（无 installer 注入）：installable 后端抛 NotWiredYetError（→ HTTP 501）', async () => {
     const svc = createAdminService(); // 无 deps.installBackend
     await expect(svc.installBackend('claude-sdk')).rejects.toBeInstanceOf(NotWiredYetError);
-  });
-
-  it('只读预览态 + external 后端：先被 external 分支拦下（不抛 501，给手动装法）', async () => {
-    const svc = createAdminService();
-    const r = await svc.installBackend('claude-acp');
-    expect(r.ok).toBe(false);
-    expect(r.tail).toContain('不支持一键下载');
+    // claude-acp 现在也是 installable（npm-ondemand bin 类）→ 同样走 501 引导起 daemon
+    await expect(svc.installBackend('claude-acp')).rejects.toBeInstanceOf(NotWiredYetError);
   });
 });

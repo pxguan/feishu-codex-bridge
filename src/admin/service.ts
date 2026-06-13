@@ -388,6 +388,7 @@ export interface AdminServiceDeps {
     pkg: string,
     onProgress?: InstallProgress,
     signal?: AbortSignal,
+    opts?: { binName?: string },
   ) => Promise<InstallResult>;
 }
 
@@ -694,7 +695,8 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       const pkg = entry.dep.version ? `${entry.dep.pkg}@${entry.dep.version}` : entry.dep.pkg!;
       // install 是 daemon 注入态能力（owns runtime）；只读预览无注入 → 501 引导起 daemon。
       if (!deps.installBackend) throw new NotWiredYetError(`⬇️ 下载「${entry.displayName}」`);
-      return deps.installBackend(pkg, onProgress, signal);
+      // binName ⇒ bin 类后端（claude-pty-acp）：装完按 .bin 校验而非 require.resolve。
+      return deps.installBackend(pkg, onProgress, signal, { binName: entry.dep.binName });
     },
 
     async getDaemonStatus(): Promise<DaemonStatus> {

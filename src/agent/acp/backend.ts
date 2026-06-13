@@ -9,6 +9,7 @@ import { loadConfig } from '../../config/store';
 import { getAcpCommand } from '../../config/schema';
 import { bridgeVersion } from '../../core/version';
 import { BRIDGE_DEVELOPER_INSTRUCTIONS } from '../bridge-instructions';
+import { backendsBinPath } from '../backend-loader';
 import type {
   AgentBackend,
   AgentCapabilities,
@@ -156,7 +157,9 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 
 // ── server 命令解析 ────────────────────────────────────────────────────
 // 开源仓库不能写死任何本机路径。顺序：① per-bot config 的 preferences.acpCommand
-// 覆盖 → ② PATH 上的 claude-pty-acp → ③ null（doctor 给装法提示）。
+// 覆盖 → ② 用户私装目录 node_modules/.bin（Web 一键下载装到这，优先于 PATH 保证
+// 「下载的那个」被用上）→ ③ PATH 上的 claude-pty-acp（用户自己 npm i -g 的）→
+// ④ null（doctor 给装法提示）。
 
 /** PATH 命中缓存（成功才缓存；existsSync 复验，卸载/移动自动失效——同 locate.ts）。 */
 let pathBinCache: string | null = null;
@@ -165,6 +168,10 @@ export async function resolveAcpCommand(opts?: { force?: boolean }): Promise<Acp
   const cfg = await loadConfig().catch(() => ({}));
   const override = getAcpCommand(cfg);
   if (override) return override;
+
+  // 用户私装目录（按需下载）优先：existsSync 即时复验，不缓存——装/卸载后下次调用立即生效。
+  const onDemand = backendsBinPath(ACP_SERVER_BIN);
+  if (onDemand) return { command: onDemand, args: [] };
 
   if (!opts?.force && pathBinCache && existsSync(pathBinCache)) {
     return { command: pathBinCache, args: [] };

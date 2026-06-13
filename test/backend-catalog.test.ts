@@ -42,16 +42,21 @@ describe('catalog ↔ REGISTRY 配对（防漏注册）', () => {
     }
   });
 
-  it('三条初始后端齐全：codex(external-cli)/claude-sdk(npm-ondemand)/claude-acp(npm-external)', () => {
+  it('三条初始后端齐全：codex(external-cli)/claude-sdk(npm-ondemand·库)/claude-acp(npm-ondemand·bin)', () => {
     expect(catalogById('codex-appserver')?.dep.kind).toBe('external-cli');
     expect(catalogById('claude-sdk')?.dep.kind).toBe('npm-ondemand');
-    expect(catalogById('claude-acp')?.dep.kind).toBe('npm-external');
+    expect(catalogById('claude-acp')?.dep.kind).toBe('npm-ondemand');
   });
 
-  it('只有 npm-ondemand 可一键下载（isInstallable）', () => {
+  it('npm-ondemand 都可一键下载（isInstallable）；external-cli 不可', () => {
     expect(isInstallable(catalogById('claude-sdk')!)).toBe(true);
+    expect(isInstallable(catalogById('claude-acp')!)).toBe(true);
     expect(isInstallable(catalogById('codex-appserver')!)).toBe(false);
-    expect(isInstallable(catalogById('claude-acp')!)).toBe(false);
+  });
+
+  it('claude-sdk 是库类（无 binName，走 import）；claude-acp 是 bin 类（有 binName，走 spawn）', () => {
+    expect(catalogById('claude-sdk')!.dep.binName).toBeUndefined();
+    expect(catalogById('claude-acp')!.dep.binName).toBe('claude-pty-acp');
   });
 
   it('claude-sdk dep 标注包名 + pin 版本 + 体积（按需下载确认用）', () => {
@@ -59,6 +64,13 @@ describe('catalog ↔ REGISTRY 配对（防漏注册）', () => {
     expect(sdk.dep.pkg).toBe('@anthropic-ai/claude-agent-sdk');
     expect(sdk.dep.version).toBe('0.3.175');
     expect(sdk.dep.approxSizeMB).toBeGreaterThan(100);
+  });
+
+  it('claude-acp dep 标注包名 + 体积（version 省略走 latest——自管适配器跟新）', () => {
+    const acp = catalogById('claude-acp')!;
+    expect(acp.dep.pkg).toBe('claude-pty-acp');
+    expect(acp.dep.version).toBeUndefined();
+    expect(acp.dep.approxSizeMB).toBeGreaterThan(0);
   });
 
   it('catalogByFamily 分组：codex 1 条 / claude 2 条', () => {
@@ -122,6 +134,8 @@ describe('installer：命令构建（不真跑 npm）', () => {
     expect(args).toContain('@anthropic-ai/claude-agent-sdk@0.3.175');
     expect(args).toContain('--include=optional');
     expect(args).toContain('--no-progress'); // 关 npm 进度条避免流里乱码
+    // 用默认 --save（多后端共存靠 package.json 记账；--no-save 会 prune 掉其它后端 → 互斥）
+    expect(args).not.toContain('--no-save');
     const i = args.indexOf('--prefix');
     expect(args[i + 1]).toBe('/u/backends');
     const c = args.indexOf('--cache');

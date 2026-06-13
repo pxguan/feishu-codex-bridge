@@ -59,7 +59,14 @@ export {
   type AgentRuntime,
   type BackendAvailability,
 } from './detect';
-export { loadBackendDep, isBackendDepInstalled, BackendNotInstalledError } from './backend-loader';
+export {
+  loadBackendDep,
+  isBackendDepInstalled,
+  isBackendBinInstalled,
+  isBackendEntryInstalled,
+  backendsBinPath,
+  BackendNotInstalledError,
+} from './backend-loader';
 export {
   installBackendDep,
   uninstallBackendDep,

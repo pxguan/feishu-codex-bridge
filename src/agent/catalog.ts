@@ -19,8 +19,10 @@ export type BackendAccess = 'app-server' | 'sdk' | 'acp';
 /**
  * 依赖类型 —— 决定「装哪 / 怎么检测 / 能不能一键按需装」。
  *   'external-cli'  外部 CLI（codex / 未来 gemini-cli），bridge 不负责装，doctor 探 PATH。
- *   'npm-ondemand'  重 npm 包，按需装到用户私装目录（claude-agent-sdk）。**唯一可一键下载的类型。**
- *   'npm-external'  外部 npm 包 + 可能 native（claude-pty-acp 适配器），用户自管。
+ *   'npm-ondemand'  npm 包，按需装到用户私装目录（claude-agent-sdk 库 / claude-pty-acp bin）。
+ *                   **唯一可一键下载的类型。** 库类（无 binName）走 import + require.resolve；
+ *                   bin 类（有 binName）被 spawn、走 node_modules/.bin 路径（见 backend-loader）。
+ *   'npm-external'  外部 npm 包，用户自管（当前内置后端无此类，保留给未来不便按需装的包）。
  */
 export type DepKind = 'external-cli' | 'npm-ondemand' | 'npm-external';
 
@@ -28,6 +30,13 @@ export interface BackendDep {
   kind: DepKind;
   /** npm 包名（npm-ondemand / npm-external 时）。 */
   pkg?: string;
+  /**
+   * 该包作为「被 spawn 的可执行文件」消费时的 bin 名（npm 装包生成 node_modules/.bin/<binName>）。
+   * 有此字段 ⇒ bin 类后端（claude-pty-acp）：已装判定/命令解析走 .bin 路径而非 require.resolve
+   *   （bin-only 包通常无 main 入口，resolve 必失败——claude-pty-acp 正是只有 bin）。
+   * 无此字段 ⇒ 库类后端（claude-agent-sdk）：走 import() + require.resolve。
+   */
+  binName?: string;
   /** pin 版本（npm-ondemand，避免漂移）；undefined ⇒ latest。 */
   version?: string;
   /** 体积提示 MB（Web 下载确认用，给用户预期）。 */
@@ -96,15 +105,19 @@ export const BACKEND_CATALOG: readonly BackendCatalogEntry[] = [
     displayName: 'Claude（订阅·ACP）',
     access: 'acp',
     dep: {
-      kind: 'npm-external',
+      kind: 'npm-ondemand',
       pkg: 'claude-pty-acp',
-      // 适配器含 node-pty（多数平台走 prebuilds 预编译、无需现场编译）+ 需本机 claude CLI。
-      // 发布并验证 prebuild 在 --prefix 按需安装下正常后，可升级成 npm-ondemand 一键下载。
-      detectHint: '未找到 claude-pty-acp（运行 npm i -g claude-pty-acp，并确保本机 claude 已登录）',
-      installCmd: 'npm i -g claude-pty-acp（node-pty 多数平台开箱）；或配 preferences.acpCommand 指向适配器',
+      binName: 'claude-pty-acp',
+      // version 省略 ⇒ latest：claude-pty-acp 是本项目自管的适配器、迭代快，跟 latest 比
+      // pin 死省去每次发版改 catalog 的摩擦（坏发布的风险由我们自己控）。
+      // node-pty 多数平台走 prebuilds（darwin/win 预编译、无需现场编译），可按需装到用户目录；
+      // 仍需本机 claude CLI 已登录（适配器把交互式 Claude Code 暴露成 ACP agent → 走订阅）。
+      approxSizeMB: 75,
+      detectHint: '未安装 claude-pty-acp（在控制台点「下载」即按需装到用户目录；另需本机 claude 已登录）',
+      installCmd: '在 Web 控制台点「下载 Claude 订阅适配器」（约 75M·node-pty 多平台免编译）；或 npm i -g claude-pty-acp',
     },
     supportedModes: ['full'],
-    blurb: '走订阅计费（不烧 SDK credit），需额外适配器，高级用户',
+    blurb: '走订阅计费（不烧 SDK credit），按需下载适配器 + 需本机 claude 已登录',
   },
 ];
 

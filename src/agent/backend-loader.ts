@@ -1,7 +1,9 @@
 import { createRequire } from 'node:module';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { paths } from '../config/paths';
+import type { BackendCatalogEntry } from './catalog';
 
 /**
  * 按需后端依赖的加载器（npm-ondemand 包，如 @anthropic-ai/claude-agent-sdk）。
@@ -93,4 +95,37 @@ export function isBackendDepInstalled(pkg: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * 用户私装目录里某个 npm bin 的绝对路径（npm 装包时生成 node_modules/.bin/<name>[.cmd]）。
+ * bin 类后端（claude-pty-acp）被 **spawn** 而非 import —— 已装判定/命令解析走这里，
+ * 不走 {@link isBackendDepInstalled}（bin-only 包通常无 main 入口，require.resolve 必失败）。
+ * 命中需 existsSync 复验（卸载/移动自动失效）。找不到 → null。
+ */
+export function backendsBinPath(binName: string): string | null {
+  const dir = join(paths.backendsDir, 'node_modules', '.bin');
+  // Windows：cross-spawn 认 .cmd shim；POSIX：.bin/<name> 是带 shebang 的可执行软链。
+  const candidates =
+    process.platform === 'win32' ? [join(dir, `${binName}.cmd`), join(dir, binName)] : [join(dir, binName)];
+  return candidates.find((p) => existsSync(p)) ?? null;
+}
+
+/** 一个 bin 类后端是否已装进用户私装目录（.bin 存在即装了）。绝不抛错。 */
+export function isBackendBinInstalled(binName: string): boolean {
+  return backendsBinPath(binName) !== null;
+}
+
+/**
+ * 一条 npm 管理的后端是否已装（catalog/doctor/detect 的统一判定，按 dep 形态分派）：
+ *   bin 类（dep.binName）—— 查 node_modules/.bin（被 spawn 的可执行）。
+ *   库类（仅 dep.pkg）—— 查 require.resolve（被 import 的库）。
+ *   external-cli（codex）—— 不归此判（走 PATH，由 doctor/locate 负责）→ false。
+ * 绝不抛错。
+ */
+export function isBackendEntryInstalled(entry: BackendCatalogEntry): boolean {
+  const { kind, binName, pkg } = entry.dep;
+  if (kind === 'external-cli') return false;
+  if (binName) return isBackendBinInstalled(binName);
+  return pkg ? isBackendDepInstalled(pkg) : false;
 }

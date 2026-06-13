@@ -97,7 +97,7 @@ async function probeClaudeAgent(): Promise<AgentRuntime> {
         reason: acpInstalled ? undefined : acpEntry.dep.detectHint,
         version: null,
         supportedModes: acpEntry.supportedModes,
-        installable: false, // npm-external，手动装
+        installable: !acpInstalled, // npm-ondemand（bin 类）未装 → 可一键下载
       },
     ],
   };

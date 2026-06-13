@@ -1,10 +1,10 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnProcess } from '../platform/spawn';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
-import { isBackendDepInstalled } from './backend-loader';
+import { isBackendDepInstalled, isBackendBinInstalled } from './backend-loader';
 
 /**
  * 按需后端依赖的安装执行器（npm-ondemand 包，如 @anthropic-ai/claude-agent-sdk）。
@@ -58,6 +58,15 @@ export async function ensureBackendsDir(): Promise<void> {
 /**
  * 构建 `npm install` 命令（纯函数，exported for tests——单测只验命令构建，不真跑 npm）。
  * 装进 backendsDir、拉平台二进制、用桥的 npm 缓存目录、关进度条（避免流里乱码）。
+ *
+ * **用默认 --save（不加 --no-save）**：backendsDir 是多后端共享的一个 node_modules + 一个
+ * package.json。npm install 会按 package.json reconcile，把「不在 package.json 里」的包当
+ * extraneous 删掉。所以若用 --no-save + 最小 package.json，装第二个后端会把第一个 prune
+ * 掉（实测：装 SDK 后 claude-acp 的 .bin 消失）——后端变互斥。默认 --save 把每个装过的包
+ * 记进 package.json，多后端因此**共存**：从空目录装 claude-acp 只有它自己（~72M），之后再
+ * 装 SDK 两者并存（按需下载、各自体积如实呈现）。代价是「重装/修复一个」会按 package.json
+ * 重装全部（缓存热则已装的近乎 no-op）。卸载见 {@link uninstallBackendDep}（连带 --save 移除
+ * package.json 条目，避免下次装别的又把它带回）。
  */
 export function buildInstallCommand(
   pkg: string,
@@ -90,11 +99,14 @@ export function buildInstallCommand(
  * @param pkg     npm 包名（catalog 的 installSpec.pkg；可带 @version）
  * @param onProgress npm 输出流回调（每块）
  * @param signal  取消信号（abort → kill 子进程 + rm 半装子目录）
+ * @param opts.binName  bin 类后端的 bin 名（claude-pty-acp）。给了 ⇒ 安装后校验走
+ *   node_modules/.bin 存在性而非 require.resolve（bin-only 包无 main 入口，resolve 必失败）。
  */
 export async function installBackendDep(
   pkg: string,
   onProgress?: InstallProgress,
   signal?: AbortSignal,
+  opts?: { binName?: string },
 ): Promise<InstallResult> {
   // 包名去掉版本后缀（@scope/name@1.2.3 → @scope/name）用于回滚定位 + 校验。
   const bareName = stripVersion(pkg);
@@ -161,15 +173,17 @@ export async function installBackendDep(
     return result;
   }
 
-  // npm exit 0 仍要解析校验（半装、exports 缺失、平台二进制没拉到都可能 exit 0）。
-  if (!isBackendDepInstalled(bareName)) {
+  // npm exit 0 仍要校验（半装、exports 缺失、平台二进制没拉到都可能 exit 0）。bin 类
+  // 查 .bin 存在性，库类查 require.resolve（dispatch 见 backend-loader）。
+  const verifyOk = opts?.binName ? isBackendBinInstalled(opts.binName) : isBackendDepInstalled(bareName);
+  if (!verifyOk) {
     await rollback(bareName);
     log.warn('agent', 'backend-install-unverified', { pkg });
     return {
       ok: false,
       code: result.code,
       aborted: false,
-      tail: `${result.tail}\n\n安装后校验失败：「${bareName}」装好了但解析不到（可能半装/平台二进制缺失），已回滚。`,
+      tail: `${result.tail}\n\n安装后校验失败：「${bareName}」装好了但${opts?.binName ? '.bin 里找不到可执行' : '解析不到'}（可能半装/平台二进制缺失），已回滚。`,
     };
   }
 
@@ -183,11 +197,29 @@ export async function uninstallBackendDep(pkg: string): Promise<boolean> {
   return !isBackendDepInstalled(stripVersion(pkg));
 }
 
-/** rm -rf backendsDir/node_modules/<pkg>（半装回滚 / 卸载）。绝不抛错。 */
+/** rm -rf backendsDir/node_modules/<pkg> + 从 package.json 移除条目（半装回滚 / 卸载）。绝不抛错。 */
 async function rollback(bareName: string): Promise<void> {
   // scoped 包名（@scope/name）是两级目录，rm 整个包目录即可（@scope 空壳无害留着）。
   const target = join(paths.backendsDir, 'node_modules', ...bareName.split('/'));
   await rm(target, { recursive: true, force: true }).catch(() => undefined);
+  // 连带从 package.json 删依赖条目——否则下次装别的后端时 npm 按 package.json reconcile
+  // 又把它拉回来（默认 --save 把装过的都记进 package.json，多后端靠它共存；卸载就得反向清）。
+  await removeBackendsDep(bareName);
+}
+
+/** 从 backendsDir/package.json 的 dependencies 里删一个包（直接编辑 JSON，不 spawn npm）。绝不抛错。 */
+async function removeBackendsDep(bareName: string): Promise<void> {
+  const pkgFile = join(paths.backendsDir, 'package.json');
+  try {
+    const raw = await readFile(pkgFile, 'utf8');
+    const json = JSON.parse(raw) as { dependencies?: Record<string, string> };
+    if (json.dependencies && bareName in json.dependencies) {
+      delete json.dependencies[bareName];
+      await writeFile(pkgFile, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
+    }
+  } catch {
+    /* 文件不存在 / 解析失败 → 无条目可删，忽略 */
+  }
 }
 
 /** 去掉版本后缀：`@scope/name@1.2.3` → `@scope/name`，`name@1.2.3` → `name`。 */

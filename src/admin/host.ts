@@ -9,7 +9,7 @@ import {
   createBackend,
   effectiveDefaultBackend,
   isInstallable,
-  isBackendDepInstalled,
+  isBackendEntryInstalled,
   type BackendCatalogEntry,
 } from '../agent';
 import type { BackendDepState } from '../agent/types';
@@ -179,7 +179,8 @@ export interface BackendDoctorRow {
  */
 function depStateFor(entry: BackendCatalogEntry, ok: boolean): BackendDepState {
   if (entry.dep.kind === 'npm-ondemand') {
-    return entry.dep.pkg && isBackendDepInstalled(entry.dep.pkg) ? 'installed' : 'not-installed';
+    // bin 类（claude-pty-acp）查 .bin、库类（SDK）查 require.resolve——统一走 isBackendEntryInstalled。
+    return isBackendEntryInstalled(entry) ? 'installed' : 'not-installed';
   }
   return ok ? 'installed' : 'external-missing';
 }
