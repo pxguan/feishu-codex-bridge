@@ -8,6 +8,7 @@ import { log } from '../../core/logger';
 import { AdminWriteError } from '../../admin/ops';
 import { createAdminIpcResponder } from '../../admin/ipc';
 import { createAdminService } from '../../admin/service';
+import { spawnDaemonControl } from './daemon-control';
 import { mountWebConsole, type MountedWebConsole } from '../../web/mount';
 
 /**
@@ -124,6 +125,10 @@ async function runSingle(botName?: string): Promise<void> {
                 connection: handle.channel.getConnectionStatus?.()?.state ?? 'unknown',
               }
             : undefined,
+        daemonStartedAt: startedAt,
+        // 重启 / 升级走 detached helper：本进程被 service stop 杀掉后由 helper 续命。
+        restartDaemon: () => spawnDaemonControl('restart'),
+        applyUpdate: () => spawnDaemonControl('update'),
       }),
     );
     if (webConsole) {

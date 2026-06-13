@@ -18,10 +18,12 @@ import { UI_HTML } from './ui';
  *      `Authorization: Bearer` / cookie；`?token=` 仅用于首跳换 cookie（随后
  *      302 去掉 URL 里的 token，防日志/历史记录泄漏长期凭据）。
  *   3. Host/Origin 校验防 DNS rebinding（只认 127.0.0.1 / localhost / [::1]）。
- *   4. 端点最小化：只读（state / diagnosis / logs / sessions / setup-status）+
- *      「DM 卡片已有等价操作」的写入（backend / permission / no-mention /
- *      auto-compact）+ Web 专属 day-0 初始化（POST /api/bots 注册机器人）。绝不
- *      暴露「执行命令」「读任意文件」类端点。
+ *   4. 端点最小化：只读（state / diagnosis / logs / sessions / setup-status /
+ *      daemon / update.check / host-doctor）+「DM 卡片已有等价操作」的写入
+ *      （backend / permission / no-mention / auto-compact）+ Web 专属（POST
+ *      /api/bots 注册；PATCH/DELETE /api/bots/:id 多 bot 管理；POST
+ *      /api/daemon/restart 与 /api/update 经 detached helper）。restart/update
+ *      只投递固定 action 给内部 helper，绝不暴露「执行任意命令」「读任意文件」。
  *   5. 日志流只透传现有文件日志行（已是尾 6 位脱敏风格），token 绝不进日志；
  *      POST /api/bots 的 appSecret 仅一次性经 body→keystore，绝不回显/不进日志。
  *
@@ -122,6 +124,52 @@ export function createWebServer(opts: WebServerOptions): WebServer {
       return;
     }
 
+    // ── Web 专属：daemon 生命周期 / 升级 / 宿主机体检 ─────────────────────────
+    if (req.method === 'GET' && pathName === '/api/daemon') {
+      sendJson(res, 200, await opts.service.getDaemonStatus());
+      return;
+    }
+
+    // POST /api/daemon/restart —— detached helper 重启（不在 web 进程里杀自己）。
+    if (req.method === 'POST' && pathName === '/api/daemon/restart') {
+      try {
+        await opts.service.restartDaemon();
+        sendJson(res, 202, { ok: true, message: '重启已发起：daemon 将在数秒内由服务管理器拉起新实例。' });
+      } catch (err) {
+        if (err instanceof NotWiredYetError) {
+          sendJson(res, 501, { error: 'not_wired_yet', message: err.message });
+          return;
+        }
+        throw err;
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && pathName === '/api/update/check') {
+      sendJson(res, 200, await opts.service.checkUpdate());
+      return;
+    }
+
+    // POST /api/update —— 升级（默认只检测不自动升级；点按钮才到这）。
+    if (req.method === 'POST' && pathName === '/api/update') {
+      try {
+        await opts.service.applyUpdate();
+        sendJson(res, 202, { ok: true, message: '升级已发起：安装完成后 daemon 会自动重启加载新版本。' });
+      } catch (err) {
+        if (err instanceof NotWiredYetError) {
+          sendJson(res, 501, { error: 'not_wired_yet', message: err.message });
+          return;
+        }
+        throw err;
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && pathName === '/api/host-doctor') {
+      sendJson(res, 200, await opts.service.hostDoctor());
+      return;
+    }
+
     // ── Web 专属：初始化 / 添加机器人向导（day-0，飞书 DM 卡片做不到）──────────
     // POST /api/bots —— 直填 appId+appSecret 注册。appSecret 仅这一次性经过 body，
     // 绝不回显、绝不进日志（service 层探活后进 keystore，明文不落任何文件）。
@@ -138,13 +186,39 @@ export function createWebServer(opts: WebServerOptions): WebServer {
       return;
     }
 
-    // DELETE /api/bots/:appId —— 删除机器人占位到下一棒（删注册表 + keystore + 退活跃集）。
-    const delMatch = /^\/api\/bots\/([^/]+)$/.exec(pathName);
-    if (req.method === 'DELETE' && delMatch) {
-      sendJson(res, 501, {
-        error: 'not_implemented',
-        message: '删除机器人将在下一棒接入（需同时清注册表 / keystore / 活跃集 / 在跑进程）。',
-      });
+    // PATCH /api/bots/:appId { enabled } —— 多 bot 管理：切活跃集（bots.json 落盘）。
+    const botMatch = /^\/api\/bots\/([^/]+)$/.exec(pathName);
+    if (req.method === 'PATCH' && botMatch) {
+      const appId = decodeURIComponent(botMatch[1]!);
+      let body: Record<string, unknown>;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_body', message: '请求体必须是 JSON' });
+        return;
+      }
+      if (typeof body.enabled !== 'boolean') {
+        sendJson(res, 400, { error: 'invalid_input', message: 'enabled 必须是布尔值' });
+        return;
+      }
+      const r = await opts.service.setBotEnabled(appId, body.enabled);
+      if (r.ok) {
+        sendJson(res, 200, {
+          ok: true,
+          message: '已保存。改活跃集需重启 daemon 才生效（在「daemon」卡点重启，或终端 `restart`）。',
+        });
+      } else {
+        sendJson(res, 409, { error: 'rejected', message: r.reason });
+      }
+      return;
+    }
+
+    // DELETE /api/bots/:appId —— 删除机器人（注册表 + keystore + 状态目录）。
+    // service 层守门：拒删唯一 bot / 带运行中会话的 bot（清晰 reason → 409）。
+    if (req.method === 'DELETE' && botMatch) {
+      const r = await opts.service.deleteBot(decodeURIComponent(botMatch[1]!));
+      if (r.ok) sendJson(res, 200, { ok: true, message: '已删除该机器人的注册表项、密钥与状态目录。' });
+      else sendJson(res, 409, { error: 'rejected', message: r.reason });
       return;
     }
 

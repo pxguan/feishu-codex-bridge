@@ -1,6 +1,8 @@
-import { readFile } from 'node:fs/promises';
-import { loadBots } from '../config/bots';
-import { botPaths } from '../config/paths';
+import { readFile, rm } from 'node:fs/promises';
+import { loadBots, setActiveBots, removeBot } from '../config/bots';
+import { botPaths, botDir } from '../config/paths';
+import { removeSecret } from '../config/keystore';
+import { secretKeyForApp } from '../config/schema';
 import {
   defaultNoMention,
   effectiveGuestMode,
@@ -22,6 +24,10 @@ import {
 import { backendIds, createBackend, DEFAULT_BACKEND_ID } from '../agent';
 import type { PermissionMode } from '../agent/types';
 import { readRecentLogs } from '../core/logger';
+import { getServiceAdapter } from '../service/adapter';
+import { checkUpdate as checkUpdateImpl, type UpdateCheck } from '../service/update';
+import { bridgeVersion } from '../core/version';
+import { collectHostDoctor, toDaemonStatus, type DaemonStatus, type HostDoctor } from './host';
 import type { AdminWriteOp } from './ops';
 
 /**
@@ -102,6 +108,44 @@ export interface AdminService {
    * 生效」。绝不 throw——每段独立降级。
    */
   getSetupStatus(botId: string): Promise<AdminSetupStatus>;
+
+  // ── Web 专属：daemon 生命周期 / 升级 / 多 bot 管理 / 宿主机体检 ──────────────
+  /** daemon 生命周期快照（service 注册状态 + 运行 pid/版本/启动时长）。绝不抛错。 */
+  getDaemonStatus(): Promise<DaemonStatus>;
+  /**
+   * 重启后台 daemon（service stop→start）。不能在 web 进程里直执行（会杀自己），
+   * 走 detached helper（注入 {@link AdminServiceDeps.restartDaemon}）。只读预览
+   * （无 daemon 在跑）抛 {@link NotWiredYetError}（HTTP 501）。
+   */
+  restartDaemon(): Promise<void>;
+  /** 检查 npm 上有无新版（current / latest / hasUpdate / dev）。绝不抛错（latest=null 兜底）。 */
+  checkUpdate(): Promise<UpdateCheck>;
+  /**
+   * 升级到最新版（npm i -g + 重启 daemon）。**默认只检测不自动升级**——只有用户
+   * 点「升级」按钮才走这里。同 restart 走 detached helper。只读预览抛 NotWiredYetError。
+   */
+  applyUpdate(): Promise<void>;
+  /** 宿主机体检：后端环境（复用 doctorBackends）+ Node/平台/配置目录/日志体量。绝不抛错。 */
+  hostDoctor(): Promise<AdminHostDoctor>;
+  /**
+   * 切换某 bot 的 enabled（= 活跃集 active 字段，bots.json 落盘）。纯写宿主机级
+   * 注册表，不需 daemon 在跑（与 registerBot 同档）。改活跃集需重启 daemon 才生效
+   * （提示由 UI 给），这里只落盘。绝不 throw——失败回 {@link BotMutationResult}。
+   */
+  setBotEnabled(appId: string, enabled: boolean): Promise<BotMutationResult>;
+  /**
+   * 删除某 bot：注册表 + keystore 密钥 + 状态目录。**拒绝删除当前唯一 bot 或带
+   * 运行中会话的 bot**——返回 { ok:false, reason } 让 UI 给清晰提示，绝不 throw。
+   */
+  deleteBot(appId: string): Promise<BotMutationResult>;
+}
+
+/** setBotEnabled / deleteBot 的统一返回：ok 或带中文拒因（HTTP 层映射 409）。 */
+export type BotMutationResult = { ok: true } | { ok: false; reason: string };
+
+/** 宿主机体检聚合：宿主机域（host.ts）+ 后端环境探测（doctorBackends 同源）。 */
+export interface AdminHostDoctor extends HostDoctor {
+  backends: AdminBackendStatus[];
 }
 
 /** 只读预览（daemon 未跑 / 独立 `web` 进程）里写方法统一抛它；HTTP 层映射 501。 */
@@ -210,7 +254,7 @@ export interface AdminSetupStatus {
   eventConfigUrl: string;
 }
 
-/** daemon/预览两种进程形态的差异全部收进这两个注入点；读路径完全同源。 */
+/** daemon/预览两种进程形态的差异全部收进这几个注入点；读路径完全同源。 */
 export interface AdminServiceDeps {
   /** 写执行器：botId + op → 完成或抛 AdminWriteError（校验拒绝）。
    * 缺省 = 只读预览，写方法抛 {@link NotWiredYetError}（HTTP 501）。 */
@@ -218,6 +262,15 @@ export interface AdminServiceDeps {
   /** 实时运行状态（daemon 进程内：本进程 channel / 子进程 IPC）。返回 undefined
    * 或缺省 → 回退锁文件探测（该 bot 不归本 daemon 管，如未激活的 bot）。 */
   liveStatus?: (botId: string) => Promise<BotLiveStatus | undefined>;
+  /** daemon 进程启动时刻（内嵌 web 注入）；只读预览不传 → uptime 缺省。 */
+  daemonStartedAt?: number;
+  /**
+   * 重启 daemon 的真正执行器（detached helper，见 cli/commands/daemon-control）。
+   * 缺省 = 只读预览（无 daemon 在跑），restartDaemon/applyUpdate 抛 NotWiredYetError。
+   */
+  restartDaemon?: () => void;
+  /** 升级（npm i -g + 重启）的执行器（detached helper）。缺省同上抛 NotWiredYetError。 */
+  applyUpdate?: () => void;
 }
 
 /**
@@ -338,23 +391,8 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       await executeWrite(botId, '🗜️ 自动压缩开关', { kind: 'setAutoCompact', project: projectName, on });
     },
 
-    async doctorBackends(): Promise<AdminBackendStatus[]> {
-      // 与 DM 🧠 后端检测卡同源：按注册表动态探测，绝不硬编码后端列表。
-      return Promise.all(
-        backendIds().map(async (id) => {
-          const backend = createBackend(id);
-          const probe = await backend.doctor({ force: true }).catch(() => undefined);
-          return {
-            id,
-            name: backend.displayName,
-            ok: probe?.ok === true,
-            version: probe?.version ?? null,
-            location: probe?.location,
-            hint: probe?.ok ? undefined : (probe?.hint ?? '环境探测失败（未安装、未登录或探测超时）'),
-            isDefault: id === DEFAULT_BACKEND_ID,
-          };
-        }),
-      );
+    doctorBackends(): Promise<AdminBackendStatus[]> {
+      return probeAllBackends();
     },
 
     async eventDiagnosis(botId: string): Promise<EventDiagnosis> {
@@ -472,7 +510,111 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
         },
       };
     },
+
+    async getDaemonStatus(): Promise<DaemonStatus> {
+      // service manager 状态在「未支持平台」会抛——按 undefined 降级（toDaemonStatus
+      // 据此置 supported=false，UI 把重启按钮置灰引导前台 run）。
+      let status;
+      try {
+        status = await getServiceAdapter().status();
+      } catch {
+        status = undefined;
+      }
+      return toDaemonStatus({ status, version: bridgeVersion(), startedAt: deps.daemonStartedAt });
+    },
+
+    async restartDaemon(): Promise<void> {
+      // 不能在 web 进程里直执行（会杀自己）：daemon 内注入 detached helper；只读
+      // 预览无 daemon 在跑 → 引导先起 daemon。
+      if (!deps.restartDaemon) throw new NotWiredYetError('🔁 重启 daemon');
+      deps.restartDaemon();
+    },
+
+    checkUpdate(): Promise<UpdateCheck> {
+      return checkUpdateImpl().catch(() => ({
+        current: bridgeVersion(),
+        latest: null,
+        hasUpdate: false,
+        dev: false,
+      }));
+    },
+
+    async applyUpdate(): Promise<void> {
+      if (!deps.applyUpdate) throw new NotWiredYetError('⬆️ 升级');
+      deps.applyUpdate();
+    },
+
+    async hostDoctor(): Promise<AdminHostDoctor> {
+      const [host, backends] = await Promise.all([collectHostDoctor(), probeAllBackends()]);
+      return { ...host, backends };
+    },
+
+    async setBotEnabled(appId: string, enabled: boolean): Promise<BotMutationResult> {
+      const reg = await loadBots();
+      if (!reg.bots.some((b) => b.appId === appId)) {
+        return { ok: false, reason: `机器人「${appId}」不存在。` };
+      }
+      // 活跃集是多选 active 字段：基于当前激活集增/删该 bot 后整集重写（setActiveBots
+      // 会给每个 bot 盖 explicit active 布尔，从此「已配置」）。
+      const current = new Set(
+        reg.bots.some((b) => b.active !== undefined)
+          ? reg.bots.filter((b) => b.active === true).map((b) => b.appId)
+          : reg.current
+            ? [reg.current]
+            : [],
+      );
+      if (enabled) current.add(appId);
+      else current.delete(appId);
+      await setActiveBots([...current]);
+      return { ok: true };
+    },
+
+    async deleteBot(appId: string): Promise<BotMutationResult> {
+      const reg = await loadBots();
+      const target = reg.bots.find((b) => b.appId === appId);
+      if (!target) return { ok: false, reason: `机器人「${appId}」不存在。` };
+      // 保护①：唯一 bot 不许删（删完控制台空了、无从恢复，得引导重新 init）。
+      if (reg.bots.length <= 1) {
+        return { ok: false, reason: '这是当前唯一的机器人，不能删除——删完控制台就空了。先用 `bot init` 添加另一个再删。' };
+      }
+      // 保护②：带运行中会话（bridge 在跑 + 有话题记录）的 bot 不许删——会打断正在跑的
+      // codex 会话、留下孤儿 app-server。先 `bot use` 退活跃集 + 重启让进程退出再删。
+      const run = await runState(appId);
+      if (run.running) {
+        const sessions = await listSessionsIn(botPaths(appId).sessionsFile).catch(() => []);
+        if (sessions.length > 0) {
+          return {
+            ok: false,
+            reason: `机器人「${target.name}」正在运行且有 ${sessions.length} 个活跃会话，不能删除（会打断进行中的对话）。先在「多机器人」里关掉它并重启 daemon，等进程退出后再删。`,
+          };
+        }
+      }
+      // 注册表 + keystore 密钥 + 状态目录（projects/sessions/config），与 `bot rm` 同语义。
+      await removeBot(appId);
+      await removeSecret(secretKeyForApp(appId)).catch(() => undefined);
+      await rm(botDir(appId), { recursive: true, force: true }).catch(() => undefined);
+      return { ok: true };
+    },
   };
+}
+
+/** 与 DM 🧠 后端检测卡同源：按注册表动态探测全部后端，绝不硬编码列表；绝不抛错。 */
+async function probeAllBackends(): Promise<AdminBackendStatus[]> {
+  return Promise.all(
+    backendIds().map(async (id) => {
+      const backend = createBackend(id);
+      const probe = await backend.doctor({ force: true }).catch(() => undefined);
+      return {
+        id,
+        name: backend.displayName,
+        ok: probe?.ok === true,
+        version: probe?.version ?? null,
+        location: probe?.location,
+        hint: probe?.ok ? undefined : (probe?.hint ?? '环境探测失败（未安装、未登录或探测超时）'),
+        isDefault: id === DEFAULT_BACKEND_ID,
+      };
+    }),
+  );
 }
 
 /** 只读预览（独立 `web` 进程，daemon 未跑）：无写执行器、状态靠锁文件探测。 */

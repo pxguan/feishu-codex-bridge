@@ -109,6 +109,49 @@ function stubService(): AdminService {
         eventConfigUrl: 'https://open.feishu.cn/app/' + botId + '/event',
       };
     },
+    async getDaemonStatus() {
+      return {
+        platformName: 'launchd (macOS)',
+        installed: true,
+        running: true,
+        pid: 4242,
+        version: '0.3.11',
+        uptimeMs: 60_000,
+        supported: true,
+      };
+    },
+    async restartDaemon() {
+      throw new NotWiredYetError('🔁 重启 daemon');
+    },
+    async checkUpdate() {
+      return { current: '0.3.11', latest: '0.4.0', hasUpdate: true, dev: false };
+    },
+    async applyUpdate() {
+      throw new NotWiredYetError('⬆️ 升级');
+    },
+    async hostDoctor() {
+      return {
+        node: 'v20.11.0',
+        platform: 'darwin',
+        arch: 'arm64',
+        osRelease: '25.5.0',
+        appDir: '/home/u/.feishu-codex-bridge',
+        logsDir: '/home/u/.feishu-codex-bridge/logs',
+        logBytes: 12_345,
+        version: '0.3.11',
+        backends: [{ id: 'codex-appserver', name: 'Codex', ok: true, version: '1.0.0', isDefault: true }],
+      };
+    },
+    async setBotEnabled(appId, enabled) {
+      if (appId === 'cli_missing') return { ok: false as const, reason: '机器人不存在。' };
+      void enabled;
+      return { ok: true as const };
+    },
+    async deleteBot(appId) {
+      if (appId === 'cli_only') return { ok: false as const, reason: '这是当前唯一的机器人，不能删除。' };
+      if (appId === 'cli_busy') return { ok: false as const, reason: '机器人正在运行且有活跃会话，不能删除。' };
+      return { ok: true as const };
+    },
   };
 }
 
@@ -361,10 +404,80 @@ describe('web server · 添加机器人向导（day-0）', () => {
     expect(body.eventConfigUrl).toContain('/event');
   });
 
-  it('DELETE /api/bots/:appId 占位 → 501（下一棒接入）', async () => {
+  it('DELETE /api/bots/:appId 成功 → 200 { ok }', async () => {
     const res = await authed('/api/bots/cli_new111111', { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    expect((await jsonOf(res)).ok).toBe(true);
+  });
+
+  it('DELETE /api/bots/:appId 删唯一/带会话 → 409 rejected + 中文原因', async () => {
+    const only = await authed('/api/bots/cli_only', { method: 'DELETE' });
+    expect(only.status).toBe(409);
+    expect((await jsonOf(only)).error).toBe('rejected');
+    expect((await jsonOf(await authed('/api/bots/cli_busy', { method: 'DELETE' }))).message).toContain('不能删除');
+  });
+
+  it('PATCH /api/bots/:appId { enabled } → 200，缺布尔 → 400，不存在 → 409', async () => {
+    const ok = await authed('/api/bots/cli_new111111', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(ok.status).toBe(200);
+    expect((await jsonOf(ok)).ok).toBe(true);
+
+    const bad = await authed('/api/bots/cli_new111111', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: 'yes' }),
+    });
+    expect(bad.status).toBe(400);
+    expect((await jsonOf(bad)).error).toBe('invalid_input');
+
+    const missing = await authed('/api/bots/cli_missing', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    });
+    expect(missing.status).toBe(409);
+  });
+});
+
+describe('web server · daemon 生命周期 / 升级 / 宿主机体检', () => {
+  it('GET /api/daemon：service 注册状态 + pid/版本/启动时长', async () => {
+    const body = await jsonOf(await authed('/api/daemon'));
+    expect(body.installed).toBe(true);
+    expect(body.running).toBe(true);
+    expect(body.pid).toBe(4242);
+    expect(body.supported).toBe(true);
+    expect(typeof body.uptimeMs).toBe('number');
+  });
+
+  it('POST /api/daemon/restart：只读预览 stub 抛 NotWiredYetError → 501', async () => {
+    const res = await authed('/api/daemon/restart', { method: 'POST' });
     expect(res.status).toBe(501);
-    expect((await jsonOf(res)).error).toBe('not_implemented');
+    expect((await jsonOf(res)).error).toBe('not_wired_yet');
+  });
+
+  it('GET /api/update/check：current/latest/hasUpdate', async () => {
+    const body = await jsonOf(await authed('/api/update/check'));
+    expect(body.current).toBe('0.3.11');
+    expect(body.latest).toBe('0.4.0');
+    expect(body.hasUpdate).toBe(true);
+  });
+
+  it('POST /api/update：只读预览 stub 抛 NotWiredYetError → 501', async () => {
+    const res = await authed('/api/update', { method: 'POST' });
+    expect(res.status).toBe(501);
+  });
+
+  it('GET /api/host-doctor：Node/平台/路径/日志体量 + 后端', async () => {
+    const body = await jsonOf(await authed('/api/host-doctor'));
+    expect(body.node).toBe('v20.11.0');
+    expect(body.platform).toBe('darwin');
+    expect(body.appDir).toContain('.feishu-codex-bridge');
+    expect(typeof body.logBytes).toBe('number');
+    expect(body.backends[0].id).toBe('codex-appserver');
   });
 });
 

@@ -6,6 +6,7 @@ import type { BotEntry } from '../config/bots';
 import { createAdminIpcCaller, type AdminIpcCaller } from '../admin/ipc';
 import { AdminWriteError } from '../admin/ops';
 import { createAdminService } from '../admin/service';
+import { spawnDaemonControl } from '../cli/commands/daemon-control';
 import { mountWebConsole } from '../web/mount';
 
 /**
@@ -50,6 +51,7 @@ interface Child {
 const STATUS_IPC_TIMEOUT_MS = 2_000;
 
 export async function runSupervisor(bots: BotEntry[]): Promise<void> {
+  const supervisorStartedAt = Date.now();
   const cliEntry = process.argv[1];
   if (!cliEntry) throw new Error('supervisor: 无法解析 CLI 入口（process.argv[1] 为空）');
 
@@ -152,6 +154,10 @@ export async function runSupervisor(bots: BotEntry[]): Promise<void> {
           connection: r?.connection ?? 'unknown',
         };
       },
+      daemonStartedAt: supervisorStartedAt,
+      // 重启 / 升级走 detached helper：supervisor 被 service stop 杀掉后由 helper 续命。
+      restartDaemon: () => spawnDaemonControl('restart'),
+      applyUpdate: () => spawnDaemonControl('update'),
     }),
   );
   if (webConsole) {

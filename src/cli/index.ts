@@ -6,6 +6,7 @@ import { runStart, runStop, runRestart, runStatus, runLogs } from './commands/da
 import { runUpdate } from './commands/update';
 import { runBotInit, runBotList, runBotUse, runBotRm } from './commands/bot';
 import { runWeb } from './commands/web';
+import { runDaemonControl } from './commands/daemon-control';
 import { secretsGet, secretsSet, secretsList, secretsRemove } from './commands/secrets';
 
 const program = new Command();
@@ -74,6 +75,14 @@ program
   .option('--port <port>', '监听端口（默认 7866）')
   .action(async (options: { port?: string }) => {
     await runWeb({ port: options.port !== undefined ? Number(options.port) : undefined });
+  });
+
+// 内部命令：Web 控制台「重启 / 升级」按钮 detached spawn 的 helper 入口。脱离
+// daemon 进程执行 service.restart()（升级则先 npm i -g 再重启），不对外暴露。
+program
+  .command('__daemon-control <action>', { hidden: true })
+  .action(async (action: string) => {
+    await runDaemonControl(action);
   });
 
 // ── 飞书机器人管理 ───────────────────────────────────────────

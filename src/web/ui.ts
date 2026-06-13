@@ -113,11 +113,18 @@ export const UI_HTML = `<!doctype html>
     border-radius: 999px; padding: 3px 14px; font-size: 13px; cursor: pointer;
   }
   .add-bot-tab:hover { background: rgba(255,255,255,.18); }
-  #wizMask {
+  #wizMask, #confirmMask {
     position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; z-index: 30;
     overflow-y: auto; padding: 40px 16px;
   }
-  #wizMask.open { display: block; }
+  #confirmMask { z-index: 40; }
+  #wizMask.open, #confirmMask.open { display: block; }
+  .btn.danger { background: var(--red); border-color: var(--red); color: #fff; }
+  .btn.danger:hover { filter: brightness(.95); }
+  .switch { cursor: pointer; user-select: none; }
+  .bot-row { display: flex; align-items: center; gap: 8px; padding: 9px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .bot-row:last-child { border-bottom: 0; }
+  .bot-row .grow { flex: 1; min-width: 0; }
   .wiz {
     background: var(--card); border-radius: var(--radius); max-width: 560px; margin: 0 auto;
     padding: 22px 24px 26px; box-shadow: 0 12px 40px rgba(0,0,0,.2);
@@ -166,12 +173,24 @@ export const UI_HTML = `<!doctype html>
 <div class="wrap">
   <div class="topbar">
     <h1>🤖 Codex Bridge 管理台</h1>
-    <span class="sub">全局控制台 · 仅本机（127.0.0.1）· 可添加机器人 / 体检 / 管理项目</span>
+    <span class="sub">全局控制台 · 仅本机（127.0.0.1）· 添加机器人 / daemon 管理 / 多 bot / 体检 / 项目</span>
     <div class="bot-tabs" id="botTabs"></div>
   </div>
 
   <div class="cols">
     <div>
+      <div class="card" id="daemonCard">
+        <h2>🛰️ 后台 daemon <span class="right"><button class="btn" id="restartBtn">🔁 重启</button></span></h2>
+        <div id="daemonBody" class="note">加载中…</div>
+        <hr class="hr">
+        <div id="updateBody" class="note">版本检查中…</div>
+      </div>
+
+      <div class="card" id="botsCard">
+        <h2>🤖 多机器人 <span class="right note" id="botsCount"></span></h2>
+        <div id="botsList" class="empty">加载中…</div>
+      </div>
+
       <div class="card" id="overviewCard">
         <h2>📡 概览 <span class="right"><button class="btn" id="rediagBtn">🩺 诊断</button></span></h2>
         <div id="overviewBody" class="empty">加载中…</div>
@@ -182,6 +201,11 @@ export const UI_HTML = `<!doctype html>
       <div class="card">
         <h2>📁 项目列表 <span class="right note" id="projCount"></span></h2>
         <div id="projList" class="empty">加载中…</div>
+      </div>
+
+      <div class="card" id="hostCard">
+        <h2>🩺 宿主机体检 <span class="right"><button class="btn" id="hostBtn">重新检测</button></span></h2>
+        <div id="hostBody" class="note">点「重新检测」查看本机后端环境与运行时信息。</div>
       </div>
     </div>
 
@@ -204,6 +228,9 @@ export const UI_HTML = `<!doctype html>
 
 <!-- ➕ 添加机器人向导：内容由 JS 按步骤渲染（day-0 手填密钥 → checklist → 完成） -->
 <div id="wizMask"><div class="wiz" id="wizBody"></div></div>
+
+<!-- 二次确认弹窗（重启 daemon / 删除机器人等破坏性操作） -->
+<div id="confirmMask"><div class="wiz" id="confirmBody" style="max-width:440px"></div></div>
 
 <div id="toast"></div>
 
@@ -228,6 +255,27 @@ export const UI_HTML = `<!doctype html>
     t.style.display = 'block';
     clearTimeout(t._tm);
     t._tm = setTimeout(function () { t.style.display = 'none'; }, 3200);
+  }
+
+  // 二次确认弹窗（破坏性操作通用）：title/desc/确认按钮文案/危险样式 + onConfirm。
+  function confirmDialog(opts) {
+    var mask = $('confirmMask');
+    var body = $('confirmBody');
+    body.textContent = '';
+    body.appendChild(el('h3', null, opts.title));
+    (opts.lines || []).forEach(function (line) {
+      body.appendChild(el('div', 'note', line));
+    });
+    var actions = el('div', 'actions');
+    var cancel = el('button', 'btn', '取消');
+    cancel.onclick = function () { mask.classList.remove('open'); };
+    actions.appendChild(cancel);
+    actions.appendChild(el('div', 'grow'));
+    var ok = el('button', 'btn ' + (opts.danger ? 'danger' : 'primary'), opts.confirmLabel || '确认');
+    ok.onclick = function () { mask.classList.remove('open'); opts.onConfirm(); };
+    actions.appendChild(ok);
+    body.appendChild(actions);
+    mask.classList.add('open');
   }
 
   // ── 文案（与 DM 卡片 src/card/dm-cards.ts 对齐）───────────────────────────
@@ -274,6 +322,226 @@ export const UI_HTML = `<!doctype html>
       .catch(function () { $('diagBody').textContent = '⚠️ 诊断请求失败'; });
   }
 
+  // ── daemon 生命周期 + 升级 ──────────────────────────────────────────────────
+  var daemon = null;
+  function loadDaemon() {
+    fetch('/api/daemon').then(function (r) { return r.json(); })
+      .then(function (d) { daemon = d; renderDaemon(); })
+      .catch(function () { /* 下个周期重试 */ });
+  }
+  function loadUpdate() {
+    fetch('/api/update/check').then(function (r) { return r.json(); })
+      .then(function (u) { renderUpdate(u); })
+      .catch(function () { $('updateBody').textContent = '⚠️ 版本检查失败（网络或 npm registry）'; });
+  }
+
+  function fmtUptime(ms) {
+    if (typeof ms !== 'number') return '—';
+    var s = Math.floor(ms / 1000);
+    var d = Math.floor(s / 86400); s -= d * 86400;
+    var h = Math.floor(s / 3600); s -= h * 3600;
+    var m = Math.floor(s / 60);
+    if (d > 0) return d + '天' + h + '小时';
+    if (h > 0) return h + '小时' + m + '分';
+    return m + '分钟';
+  }
+
+  function renderDaemon() {
+    var box = $('daemonBody');
+    box.textContent = '';
+    var d = daemon;
+    if (!d) { box.textContent = '加载中…'; return; }
+    var btn = $('restartBtn');
+    if (!d.supported) {
+      box.appendChild(el('div', null, '⚠️ 本平台不支持后台服务'));
+      box.appendChild(el('div', 'note', '用 feishu-codex-bridge run 前台运行；重启请在终端 Ctrl+C 后重跑。'));
+      btn.className = 'btn disabled'; btn.disabled = true;
+      return;
+    }
+    var line = el('div', 'statline');
+    if (d.running) line.appendChild(el('span', 'tag green', '✅ 运行中' + (d.pid ? ' · pid ' + d.pid : '')));
+    else line.appendChild(el('span', 'tag orange', d.installed ? '⚠️ 已安装但未在运行' : '⚪ 未安装为后台服务'));
+    line.appendChild(el('span', 'tag', d.platformName || '后台服务'));
+    line.appendChild(el('span', 'tag blue', 'v' + d.version));
+    box.appendChild(line);
+    if (d.uptimeMs !== undefined && d.running) box.appendChild(el('div', 'note', '已运行 ' + fmtUptime(d.uptimeMs)));
+    if (d.lastExit !== undefined && d.lastExit !== '0') box.appendChild(el('div', 'note', '上次退出码：' + d.lastExit));
+    // 重启按钮：仅在「本进程就是 daemon」（有 uptimeMs，即写操作可用）时真生效；
+    // 只读预览态点了会 501，按钮仍可点但提示去起 daemon。
+    btn.className = 'btn'; btn.disabled = false;
+  }
+
+  function renderUpdate(u) {
+    var box = $('updateBody');
+    box.textContent = '';
+    if (u.dev) {
+      box.appendChild(el('div', null, '🧩 源码开发模式（仓库内有 .git）'));
+      box.appendChild(el('div', 'note', '当前 v' + u.current + '；升级请用 git pull && npm i（不走全局安装）。'));
+      return;
+    }
+    if (u.hasUpdate && u.latest) {
+      box.appendChild(el('div', null, '🆕 有新版 v' + u.latest + '（当前 v' + u.current + '）'));
+      var row = el('div', 'statline');
+      var up = el('button', 'btn primary', '⬆️ 升级到 v' + u.latest);
+      up.onclick = function () { askUpdate(u.latest); };
+      row.appendChild(up);
+      row.appendChild(el('span', 'note', '默认只检测不自动升级；点上方按钮手动升级。'));
+      box.appendChild(row);
+    } else {
+      box.appendChild(el('div', 'note', '✅ 已是最新版 v' + u.current + (u.latest ? '' : '（最新版查询失败，可稍后重试）')));
+    }
+  }
+
+  function askRestart() {
+    confirmDialog({
+      title: '🔁 重启后台 daemon？',
+      lines: [
+        '重启期间所有群短暂无响应（通常数秒）。',
+        '正在进行的 codex 会话会被优雅关闭并在重启后可继续。',
+        '本机服务管理器会在旧实例退出后自动拉起新实例。',
+      ],
+      confirmLabel: '确认重启',
+      onConfirm: function () { postAction('/api/daemon/restart', '重启'); },
+    });
+  }
+  function askUpdate(latest) {
+    confirmDialog({
+      title: '⬆️ 升级到 v' + latest + '？',
+      lines: [
+        '将执行 npm i -g 安装最新版，完成后自动重启 daemon。',
+        '重启期间所有群短暂无响应；正在进行的会话会被优雅关闭。',
+      ],
+      confirmLabel: '确认升级',
+      onConfirm: function () { postAction('/api/update', '升级'); },
+    });
+  }
+  // 重启/升级响应：202 = 已发起（detached helper 接管）；501 = 只读预览（无 daemon）。
+  function postAction(path, label) {
+    fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (resp) {
+        if (resp.status === 202) toast('✅ ' + (resp.body.message || (label + '已发起')));
+        else if (resp.status === 501) toast('⏳ ' + (resp.body.message || (label + '需要 daemon 在跑（当前为只读预览）')));
+        else toast('❌ ' + (resp.body.message || ('HTTP ' + resp.status)));
+      })
+      .catch(function () { toast('❌ 请求失败'); });
+  }
+
+  // ── 多机器人管理 ────────────────────────────────────────────────────────────
+  function renderBots() {
+    var box = $('botsList');
+    box.textContent = '';
+    if (!state || state.bots.length === 0) {
+      box.className = 'empty';
+      box.textContent = '还没有机器人。点右上「➕ 添加机器人」接入。';
+      $('botsCount').textContent = '';
+      return;
+    }
+    box.className = '';
+    $('botsCount').textContent = '共 ' + state.bots.length + ' 个 · 绿点=在线';
+    state.bots.forEach(function (b) {
+      var row = el('div', 'bot-row');
+      var grow = el('div', 'grow');
+      var head = el('div', 'statline');
+      head.appendChild(el('span', null, (b.running ? '🟢 ' : '⚪ ') + (b.botName || b.name)));
+      head.appendChild(el('span', 'tag', b.tenant === 'lark' ? 'Lark' : '飞书'));
+      head.appendChild(el('span', 'tag', b.appId));
+      if (b.current) head.appendChild(el('span', 'tag blue', '主'));
+      grow.appendChild(head);
+      var sub = el('div', 'note',
+        (b.running ? '运行中' + (b.pid ? ' · pid ' + b.pid : '') : '未在运行') +
+        ' · ' + ((b.projects && b.projects.length) || 0) + ' 个项目');
+      grow.appendChild(sub);
+      row.appendChild(grow);
+
+      // enabled 开关（= 活跃集；改后需重启 daemon 生效）
+      var sw = el('button', 'btn' + (b.active ? ' primary' : ''), b.active ? '✅ 已启用' : '⛔ 已停用');
+      sw.title = b.active ? '点一下停用（退出活跃集）' : '点一下启用（加入活跃集）';
+      sw.onclick = function () { toggleBotEnabled(b); };
+      row.appendChild(sw);
+
+      // 删除（二次确认，危险样式）
+      var del = el('button', 'btn danger', '🗑️');
+      del.title = '删除这个机器人';
+      del.onclick = function () { askDeleteBot(b); };
+      row.appendChild(del);
+
+      box.appendChild(row);
+    });
+  }
+
+  function toggleBotEnabled(b) {
+    fetch('/api/bots/' + encodeURIComponent(b.appId), {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !b.active }),
+    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (resp) {
+        if (resp.status === 200) { toast('✅ ' + (resp.body.message || '已保存')); loadState(); }
+        else toast('❌ ' + (resp.body.message || ('HTTP ' + resp.status)));
+      })
+      .catch(function () { toast('❌ 请求失败'); });
+  }
+
+  function askDeleteBot(b) {
+    confirmDialog({
+      title: '🗑️ 删除机器人「' + (b.botName || b.name) + '」？',
+      lines: [
+        '将永久删除：注册表项 + 本机加密密钥 + 状态目录（项目 / 话题记录）。',
+        '此操作不可撤销。删除后需重新 init 才能再次接入这个 App。',
+      ],
+      danger: true,
+      confirmLabel: '确认删除',
+      onConfirm: function () {
+        fetch('/api/bots/' + encodeURIComponent(b.appId), { method: 'DELETE' })
+          .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+          .then(function (resp) {
+            if (resp.status === 200) {
+              toast('✅ ' + (resp.body.message || '已删除'));
+              if (currentBot === b.appId) currentBot = null;
+              loadState();
+            } else toast('❌ ' + (resp.body.message || ('HTTP ' + resp.status)));
+          })
+          .catch(function () { toast('❌ 请求失败'); });
+      },
+    });
+  }
+
+  // ── 宿主机体检 ──────────────────────────────────────────────────────────────
+  function loadHostDoctor() {
+    $('hostBody').textContent = '🔍 正在检测…';
+    fetch('/api/host-doctor').then(function (r) { return r.json(); })
+      .then(function (h) { renderHostDoctor(h); })
+      .catch(function () { $('hostBody').textContent = '⚠️ 体检请求失败'; });
+  }
+  function fmtBytes(n) {
+    if (typeof n !== 'number' || n <= 0) return '0 B';
+    var u = ['B', 'KB', 'MB', 'GB'];
+    var i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
+  }
+  function renderHostDoctor(h) {
+    var box = $('hostBody');
+    box.textContent = '';
+    var rt = el('div', 'statline');
+    rt.appendChild(el('span', 'tag blue', 'Node ' + h.node));
+    rt.appendChild(el('span', 'tag', h.platform + '/' + h.arch));
+    rt.appendChild(el('span', 'tag', 'v' + h.version));
+    box.appendChild(rt);
+    box.appendChild(el('div', 'path', '🗂️ 配置目录：' + h.appDir));
+    box.appendChild(el('div', 'path', '📜 日志目录：' + h.logsDir + '（' + fmtBytes(h.logBytes) + '）'));
+    var title = el('div', null, '🧠 后端环境：');
+    title.style.marginTop = '6px';
+    box.appendChild(title);
+    (h.backends || []).forEach(function (bk) {
+      var row = el('div', 'statline');
+      row.appendChild(el('span', null, (bk.ok ? '✅' : '❌') + ' ' + bk.name + (bk.version ? ' ' + bk.version : '') + (bk.isDefault ? '（默认）' : '')));
+      if (bk.ok && bk.location) row.appendChild(el('span', 'note', bk.location));
+      if (!bk.ok && bk.hint) row.appendChild(el('span', 'note', bk.hint));
+      box.appendChild(row);
+    });
+  }
+
   // ── 渲染 ─────────────────────────────────────────────────────────────────
   function botOf(appId) {
     if (!state) return null;
@@ -283,6 +551,7 @@ export const UI_HTML = `<!doctype html>
 
   function render() {
     renderBotTabs();
+    renderBots();
     renderOverview();
     renderProjects();
     if (drawerProject) renderDrawer(drawerProject);
@@ -883,9 +1152,15 @@ export const UI_HTML = `<!doctype html>
 
   // ── 启动 ─────────────────────────────────────────────────────────────────
   $('rediagBtn').onclick = loadDiagnosis;
+  $('restartBtn').onclick = askRestart;
+  $('hostBtn').onclick = loadHostDoctor;
+  $('confirmMask').onclick = function (e) { if (e.target === $('confirmMask')) $('confirmMask').classList.remove('open'); };
   loadState();
+  loadDaemon();
+  loadUpdate();
   startLogStream();
   setInterval(loadState, 5000); // 轮询 /api/state 5s 刷新
+  setInterval(loadDaemon, 5000); // daemon 运行状态/时长同频刷新
 })();
 </script>
 </body>

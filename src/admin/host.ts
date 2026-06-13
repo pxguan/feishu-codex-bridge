@@ -1,0 +1,158 @@
+import { readdir, stat } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { arch, platform, release } from 'node:os';
+import { paths } from '../config/paths';
+import { bridgeVersion } from '../core/version';
+import type { ServiceStatus } from '../service/common';
+import type { UpdateCheck } from '../service/update';
+
+/**
+ * 宿主机 / daemon 维度的只读聚合 + detached helper 命令构建（Web 专属：飞书 DM
+ * 卡片够不着这一层——初始化机器人 / daemon 生命周期 / 多 bot 管理 / 体检都是
+ * 「全局控制台」的活）。
+ *
+ * 【为什么 restart / update 走 detached helper 而非进程内直执行】
+ *   Web 控制台**内嵌在 daemon 进程里**（run / supervisor）。restart 要 service
+ *   stop→start：在 daemon 自己进程里跑 stop 会把自己（含正在响应这条 HTTP 的
+ *   事件循环）杀掉，start 永远执行不到 → 服务被卸载、无人复活。所以 restart /
+ *   update 一律 detached spawn 一个**脱离本进程**的小 helper（`__daemon-control`
+ *   子命令），由它在 daemon 死后继续把 service 拉起来。命令构建是纯函数
+ *   {@link buildDaemonControlCommand}，单测只验证「生成的命令正确」，绝不真跑。
+ *
+ * 【安全/约束】只读聚合绝不抛错（各段独立降级）；体检不 spawn 危险命令；
+ *   helper 走 cross-spawn（platform/spawn）detached + unref，绝不在 web 进程里
+ *   同步等它（那会把重启阻塞在被杀的进程上）。
+ */
+
+/** daemon 生命周期快照（GET /api/daemon）。service 注册状态 + 运行 pid/版本/时长。 */
+export interface DaemonStatus {
+  /** 本平台的服务管理器名（launchd / Task Scheduler / systemd），未支持平台为 undefined。 */
+  platformName?: string;
+  /** 服务定义（plist/task/unit）已注册到 OS。 */
+  installed: boolean;
+  /** 服务进程当前存活（service manager 视角）。 */
+  running: boolean;
+  /** 服务进程 pid（service manager 报的；可能与内嵌 web 的 process.pid 不同）。 */
+  pid?: number;
+  /** 上次退出码（诊断用）。 */
+  lastExit?: string;
+  /** 当前运行的 bridge 版本（package.json）。 */
+  version: string;
+  /** 本进程（内嵌 web 的 daemon 进程）已运行毫秒数；只读预览进程为 undefined。 */
+  uptimeMs?: number;
+  /** 服务定义路径 / stdout / stderr 路径（诊断用）。 */
+  servicePath?: string;
+  /** 本平台是否支持后台服务（不支持时 restart 按钮置灰，引导前台 run）。 */
+  supported: boolean;
+}
+
+/** 宿主机体检（GET /api/host-doctor）：后端环境 + Node/平台/路径/日志体量。 */
+export interface HostDoctor {
+  node: string;
+  platform: string;
+  arch: string;
+  osRelease: string;
+  /** 配置目录绝对路径（~/.feishu-codex-bridge）。 */
+  appDir: string;
+  /** 日志目录绝对路径。 */
+  logsDir: string;
+  /** 磁盘上日志总字节数（logs/ 目录递归累加；读不到为 0）。 */
+  logBytes: number;
+  /** 当前 bridge 版本。 */
+  version: string;
+}
+
+/**
+ * 把 {@link ServiceStatus}（service 适配器的平台无关快照）+ 本进程运行时长归一成
+ * {@link DaemonStatus}。纯函数（exported for tests）——不碰 service manager，输入
+ * 是已探好的 status，便于单测 mock。`status` 为 undefined ⇒ 本平台不支持后台服务。
+ */
+export function toDaemonStatus(opts: {
+  status?: ServiceStatus;
+  version: string;
+  /** daemon 进程启动时刻（内嵌 web 注入）；只读预览不传 → uptime undefined。 */
+  startedAt?: number;
+  now?: number;
+}): DaemonStatus {
+  const s = opts.status;
+  return {
+    platformName: s?.platformName,
+    installed: s?.installed ?? false,
+    running: s?.running ?? false,
+    pid: s?.pid ? Number(s.pid) : undefined,
+    lastExit: s?.lastExit,
+    version: opts.version,
+    uptimeMs: opts.startedAt !== undefined ? Math.max(0, (opts.now ?? Date.now()) - opts.startedAt) : undefined,
+    servicePath: s?.servicePath,
+    supported: s !== undefined,
+  };
+}
+
+/** 递归累加目录字节数（读不到的项跳过，绝不抛错）。 */
+async function dirBytes(dir: string): Promise<number> {
+  let total = 0;
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of entries) {
+    const full = join(dir, name);
+    try {
+      const st = await stat(full);
+      if (st.isDirectory()) total += await dirBytes(full);
+      else if (st.isFile()) total += st.size;
+    } catch {
+      /* 单项读不到（权限/竞态）→ 跳过 */
+    }
+  }
+  return total;
+}
+
+/** 宿主机体检聚合（绝不抛错）。后端探测由调用方（service 层复用 doctorBackends）
+ * 单独并发；这里只管 Node/平台/路径/日志体量这部分宿主机域。 */
+export async function collectHostDoctor(logsDir: string = join(paths.appDir, 'logs')): Promise<HostDoctor> {
+  return {
+    node: process.version,
+    platform: platform(),
+    arch: arch(),
+    osRelease: release(),
+    appDir: paths.appDir,
+    logsDir,
+    logBytes: await dirBytes(logsDir),
+    version: bridgeVersion(),
+  };
+}
+
+/**
+ * 绝对路径到本包的 bin 入口（与 service/common.resolveCliBinPath 同算法）。打包后
+ * 本模块在 dist/，bin 在 ../bin/feishu-codex-bridge.mjs——全局安装与本地 checkout
+ * 同布局。detached helper 必须用绝对路径起（脱离本进程后 cwd / PATH 不可依赖）。
+ */
+export function resolveCliBinPath(): string {
+  const distDir = dirname(fileURLToPath(import.meta.url));
+  return resolve(distDir, '..', 'bin', 'feishu-codex-bridge.mjs');
+}
+
+export type DaemonControlAction = 'restart' | 'update';
+
+/**
+ * 构建 detached helper 的 spawn 命令（纯函数，exported for tests）：用当前 Node
+ * 执行 bin 入口的内部子命令 `__daemon-control <action>`。该 helper 进程
+ * detached + unref，与 web 进程脱钩——即便本 daemon 随后被 service stop 杀掉，
+ * helper 仍会把 service 重新拉起（restart），或先 npm i -g 再重启（update）。
+ *
+ * 不直接 spawn `npm` / `launchctl`：把全部逻辑收进 helper 子命令，命令面最小
+ * （只一个固定 action 形参），无任意字符串拼进 shell，天然无注入面。
+ */
+export function buildDaemonControlCommand(
+  action: DaemonControlAction,
+  binPath: string = resolveCliBinPath(),
+  nodePath: string = process.execPath,
+): { command: string; args: string[] } {
+  return { command: nodePath, args: [binPath, '__daemon-control', action] };
+}
+
+export type { UpdateCheck };
