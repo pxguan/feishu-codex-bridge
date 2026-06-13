@@ -8,6 +8,10 @@ import { bridgeVersion } from '../core/version';
 import { NotWiredYetError, type AdminService } from '../admin/service';
 import { AdminWriteError } from '../admin/ops';
 import { UI_HTML } from './ui';
+import { GSAP_MIN_JS_BASE64 } from './vendor-gsap';
+
+/** vendored GSAP 解码一次（模块级，不每请求解码）；/vendor/gsap.min.js 路由直接吐这个 Buffer。 */
+const GSAP_MIN_JS = Buffer.from(GSAP_MIN_JS_BASE64, 'base64');
 
 /**
  * 本机 Web 控制台 HTTP 面（node:http，零新依赖）。
@@ -129,6 +133,18 @@ export function createWebServer(opts: WebServerOptions): WebServer {
     if (req.method === 'GET' && pathName === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(html);
+      return;
+    }
+
+    // 本地自带的 GSAP（动画引擎）—— 不走 CDN（隐私 + 离线）。已过 token 鉴权（页面种了
+    // cookie，同源 <script> 自带）；内容不可变 → 可长缓存。GSAP 缺失时前端动画层是无操作
+    // 降级（不影响任何功能），所以这条路由是纯增强。
+    if (req.method === 'GET' && pathName === '/vendor/gsap.min.js') {
+      res.writeHead(200, {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+      });
+      res.end(GSAP_MIN_JS);
       return;
     }
 

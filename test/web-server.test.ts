@@ -355,6 +355,20 @@ describe('web server · 只读 API', () => {
   it('未知路径 → 404', async () => {
     expect((await authed('/api/nope')).status).toBe(404);
   });
+
+  it('GET /vendor/gsap.min.js：鉴权后 200 + JS content-type + 长缓存 + 真是 GSAP 源', async () => {
+    const res = await authed('/vendor/gsap.min.js');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('application/javascript');
+    expect(res.headers.get('cache-control')).toContain('immutable');
+    const body = await res.text();
+    expect(body).toContain('GSAP'); // 许可证头里有 "GSAP 3.x"
+    expect(body.length).toBeGreaterThan(50000); // ~71KB，确认不是空壳
+  });
+
+  it('GET /vendor/gsap.min.js：无 token → 401（静态资源同样过鉴权）', async () => {
+    expect((await get('/vendor/gsap.min.js')).status).toBe(401);
+  });
 });
 
 describe('web server · 写操作占位（只读预览：daemon 未跑）', () => {

@@ -570,6 +570,9 @@ export const UI_HTML = `<!doctype html>
 
 <div id="toast"></div>
 
+<!-- 本地自带的 GSAP 动画引擎（/vendor 路由经 cookie 鉴权，不走 CDN）。同步加载置于下面
+     的 app 脚本之前 → window.gsap 就绪；即便它加载失败，app 的动画层是无操作降级。 -->
+<script src="/vendor/gsap.min.js"></script>
 <script>
 (function () {
   'use strict';
@@ -585,6 +588,58 @@ ${UI_PURE_JS}
   var drawerProject = null;  // 抽屉里打开的项目名
   var diagBotId = null;      // diag 属于哪个 bot（防串台）
 
+  // ── 动画层（GSAP 渐进增强）─────────────────────────────────────────────────
+  // 没加载到 GSAP，或用户在系统里开了「减少动态效果」(prefers-reduced-motion) → fx.on=false，
+  // 所有方法降级为「直接设最终态/无操作」，绝不影响任何功能或可访问性。动画只碰 transform/
+  // autoAlpha（合成层，不触发 layout），进场只在路由切换时播一次（5s 刷新整页重渲不重放）。
+  var fx = (function () {
+    var g = window.gsap;
+    var reduce = false;
+    try { reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) {}
+    var on = !!g && !reduce;
+    if (g) { try { g.defaults({ ease: 'power2.out', duration: 0.4 }); } catch (e) {} }
+    function arr(x) {
+      if (!x) return [];
+      return (x.length !== undefined && !x.nodeType) ? Array.prototype.slice.call(x) : [x];
+    }
+    return {
+      on: on,
+      // 卡片/行进场：自下而上淡入 + 错峰（仅路由切换时调）。
+      enter: function (targets, opts) {
+        var els = arr(targets); if (!on || !els.length) return;
+        opts = opts || {};
+        g.from(els, {
+          autoAlpha: 0, y: opts.y == null ? 12 : opts.y, duration: opts.duration || 0.42,
+          stagger: opts.stagger == null ? 0.06 : opts.stagger, overwrite: 'auto',
+          clearProps: 'transform,opacity,visibility',
+        });
+      },
+      // 弹层（向导/确认）：缩放 + 上移淡入。
+      popIn: function (target) {
+        if (!on || !target) return;
+        g.from(target, {
+          autoAlpha: 0, y: 14, scale: 0.96, duration: 0.34, ease: 'back.out(1.5)',
+          overwrite: 'auto', clearProps: 'transform,opacity,visibility',
+        });
+      },
+      // toast：从下方滑入 / 滑出（!on 时直接走 done）。
+      toastIn: function (target) {
+        if (!on || !target) return;
+        g.fromTo(target, { autoAlpha: 0, y: 16 }, { autoAlpha: 1, y: 0, duration: 0.3, overwrite: 'auto' });
+      },
+      toastOut: function (target, done) {
+        if (!on || !target) { if (done) done(); return; }
+        g.to(target, { autoAlpha: 0, y: 12, duration: 0.24, overwrite: 'auto', onComplete: done });
+      },
+      // 进度条宽度：平滑补间（比直接赋 width 的跳变顺；!on 时直接赋值）。
+      width: function (target, pct) {
+        if (!target) return;
+        if (!on) { target.style.width = pct + '%'; return; }
+        g.to(target, { width: pct + '%', duration: 0.4, ease: 'power1.out', overwrite: 'auto' });
+      },
+    };
+  })();
+
   function $(id) { return document.getElementById(id); }
   function el(tag, cls, text) {
     var n = document.createElement(tag);
@@ -596,8 +651,11 @@ ${UI_PURE_JS}
     var t = $('toast');
     t.textContent = msg;
     t.style.display = 'block';
+    fx.toastIn(t);
     clearTimeout(t._tm);
-    t._tm = setTimeout(function () { t.style.display = 'none'; }, 3200);
+    t._tm = setTimeout(function () {
+      fx.toastOut(t, function () { t.style.display = 'none'; });
+    }, 3200);
   }
 
   // 当前路由派生的 botId（不再是「点 Tab 改的全局变量」，从 hash 派生）。
@@ -623,6 +681,7 @@ ${UI_PURE_JS}
     actions.appendChild(ok);
     body.appendChild(actions);
     mask.classList.add('open');
+    fx.popIn(body);
   }
 
   // ── 文案（与 DM 卡片 src/card/dm-cards.ts 对齐）───────────────────────────
@@ -703,14 +762,19 @@ ${UI_PURE_JS}
   }
 
   // ── 路由：单 #tabContent 按 hash 清空重渲 ───────────────────────────────────
+  var _lastRouteKey = null;
   function renderRoute() {
     var r = parseRoute(location.hash);
+    var key = r.tab + ':' + (r.botId || '');
+    var navigated = key !== _lastRouteKey; // 仅「切换路由」时播进场；5s 刷新整页重渲不重放
+    _lastRouteKey = key;
     renderTabbar();
     var box = $('tabContent');
     if (!box) return;
     box.textContent = '';
     if (r.tab === 'overview') renderOverviewTab(box);
     else renderBotTab(box, r.botId);
+    if (navigated) fx.enter(box.querySelectorAll('.card'));
   }
 
   function renderTabbar() {
@@ -1041,7 +1105,7 @@ ${UI_PURE_JS}
     row.appendChild(tail);
     var lines = 0;
     // 224M 下载没有真进度百分比 —— 用「日志行数」做一个观感进度（封顶 92% 等 done）。
-    function bump() { lines++; var pct = Math.min(92, 8 + lines * 4); fill.style.width = pct + '%'; }
+    function bump() { lines++; var pct = Math.min(92, 8 + lines * 4); fx.width(fill, pct); }
 
     fetch('/api/backends/' + encodeURIComponent(entry.id) + '/install', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
@@ -1075,7 +1139,7 @@ ${UI_PURE_JS}
       tail.textContent += (tail.textContent ? '\\n' : '') + msg.chunk;
       tail.scrollTop = tail.scrollHeight;
     } else if (msg.type === 'done') {
-      fill.style.width = '100%';
+      fx.width(fill, 100);
       btn.textContent = '✅ 已安装'; btn.className = 'btn disabled';
       toast('✅ 「' + entry.displayName + '」安装完成');
       // 刷新 catalog（depState 转 installed）→ 重渲后端管理卡。
@@ -1457,6 +1521,7 @@ ${UI_PURE_JS}
     stopWizPoll(); stopWizQr();
     $('wizMask').classList.add('open');
     renderWizard();
+    fx.popIn($('wizBody'));
   }
   function closeWizard() {
     stopWizPoll(); stopWizQr();
@@ -1862,6 +1927,12 @@ ${UI_PURE_JS}
   loadState();
   loadDaemon();
   renderRoute();
+  // 一次性首屏入场：白色产品头部从上滑入（仅首次，5s 刷新不重放）。
+  if (fx.on) {
+    try {
+      window.gsap.from('.appbar', { autoAlpha: 0, y: -14, duration: 0.45, clearProps: 'transform,opacity,visibility' });
+    } catch (e) {}
+  }
   setInterval(loadState, 5000);  // /api/state 5s 刷新
   setInterval(loadDaemon, 5000); // daemon 状态/时长同频
 })();
