@@ -71,6 +71,9 @@ vi.mock('../src/agent', () => ({
   isInstallable: (entry: { dep: { kind: string } }) => entry.dep.kind === 'npm-ondemand',
   effectiveDefaultBackend: async () => 'codex-appserver',
   installBackendDep: vi.fn(),
+  isBackendInstalledInUserDir: () => false,
+  installedBackendVersion: () => null,
+  latestNpmVersion: async () => null,
 }));
 
 import { createAdminService, NotWiredYetError } from '../src/admin/service';

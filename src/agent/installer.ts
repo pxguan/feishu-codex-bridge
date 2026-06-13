@@ -25,6 +25,36 @@ import { isBackendDepInstalled, isBackendBinInstalled } from './backend-loader';
 
 const NPM = 'npm';
 
+/** 查 npm registry 上某包的最新版本（`npm view <pkg> version`）。用于后端「检查更新」。
+ *  绝不抛错：网络/registry 失败或超时 → null。8s 超时（registry 慢也不卡 UI）。 */
+export async function latestNpmVersion(pkg: string, timeoutMs = 8000): Promise<string | null> {
+  const bare = stripVersion(pkg);
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawnProcess>;
+    try {
+      child = spawnProcess(NPM, ['view', bare, 'version', '--no-fund', '--no-audit'], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      resolve(null);
+      return;
+    }
+    let out = '';
+    const timer = setTimeout(() => {
+      try { child.kill('SIGTERM'); } catch { /* ignore */ }
+      resolve(null);
+    }, timeoutMs);
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (d: string) => { out += d; });
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const v = out.trim().split('\n').pop()?.trim() ?? '';
+      resolve(code === 0 && /^\d+\.\d+\.\d+/.test(v) ? v : null);
+    });
+  });
+}
+
 /** 安装结果：ok + npm 退出码 + 合并输出尾部（失败时给用户看的诊断）。 */
 export interface InstallResult {
   ok: boolean;

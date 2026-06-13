@@ -91,7 +91,7 @@ export const BACKEND_CATALOG: readonly BackendCatalogEntry[] = [
     dep: {
       kind: 'npm-ondemand',
       pkg: '@anthropic-ai/claude-agent-sdk',
-      version: '0.3.175',
+      // version 省略 ⇒ latest：下载/更新都取最新（让「检查更新」有意义；坏发布风险由上游控）。
       approxSizeMB: 224,
       detectHint: '未安装 @anthropic-ai/claude-agent-sdk（在控制台点「下载」即按需装到用户目录）',
       installCmd: '在 Web 控制台点「下载 Claude SDK」（约 224M，按需装到用户目录）',

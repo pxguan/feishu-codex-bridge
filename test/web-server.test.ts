@@ -137,6 +137,8 @@ function stubService(): AdminService {
             depState: 'installed' as const,
             installable: false,
             version: '1.0.0',
+            installedVersion: null,
+            canUninstall: false,
             isDefault: true,
           },
           {
@@ -149,6 +151,8 @@ function stubService(): AdminService {
             installable: true,
             approxSizeMB: 224,
             version: null,
+            installedVersion: null,
+            canUninstall: false,
             hint: '未安装，点下载',
             isDefault: false,
             supportedModes: ['full'] as const,
@@ -163,6 +167,12 @@ function stubService(): AdminService {
       onProgress?.('added 1 package\n');
       if (signal?.aborted) return { ok: false as const, code: null, aborted: true, tail: '安装已取消' };
       return { ok: true as const, code: 0, aborted: false, tail: 'added 1 package' };
+    },
+    async uninstallBackend(id) {
+      return id === 'claude-sdk' ? { ok: true, message: '已卸载' } : { ok: false, message: '无法卸载' };
+    },
+    async backendVersion() {
+      return { installed: '0.3.1', latest: '0.3.2', hasUpdate: true };
     },
     async getDaemonStatus() {
       return {

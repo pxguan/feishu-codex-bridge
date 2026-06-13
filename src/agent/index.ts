@@ -64,12 +64,15 @@ export {
   isBackendDepInstalled,
   isBackendBinInstalled,
   isBackendEntryInstalled,
+  isBackendInstalledInUserDir,
+  installedBackendVersion,
   backendsBinPath,
   BackendNotInstalledError,
 } from './backend-loader';
 export {
   installBackendDep,
   uninstallBackendDep,
+  latestNpmVersion,
   ensureBackendsDir,
   buildInstallCommand,
   stripVersion,

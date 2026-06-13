@@ -8,7 +8,7 @@ import { log } from '../../core/logger';
 import { AdminWriteError } from '../../admin/ops';
 import { createAdminIpcResponder } from '../../admin/ipc';
 import { createAdminService } from '../../admin/service';
-import { installBackendDep } from '../../agent';
+import { installBackendDep, uninstallBackendDep } from '../../agent';
 import { spawnDaemonControl } from './daemon-control';
 import { mountWebConsole, type MountedWebConsole } from '../../web/mount';
 
@@ -80,6 +80,7 @@ async function runOnboardingConsole(): Promise<void> {
       restartDaemon: () => spawnDaemonControl('restart'),
       applyUpdate: () => spawnDaemonControl('update'),
       installBackend: installBackendDep,
+      uninstallBackend: uninstallBackendDep,
     }),
   );
   if (!webConsole) {
@@ -205,6 +206,7 @@ async function runSingle(botName?: string): Promise<void> {
         applyUpdate: () => spawnDaemonControl('update'),
         // 按需后端安装在 daemon 进程内直跑（owns runtime，装完即能解析加载）。
         installBackend: installBackendDep,
+        uninstallBackend: uninstallBackendDep,
       }),
     );
     if (webConsole) {

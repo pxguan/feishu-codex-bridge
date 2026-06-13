@@ -59,10 +59,10 @@ describe('catalog ↔ REGISTRY 配对（防漏注册）', () => {
     expect(catalogById('claude-acp')!.dep.binName).toBe('claude-pty-acp');
   });
 
-  it('claude-sdk dep 标注包名 + pin 版本 + 体积（按需下载确认用）', () => {
+  it('claude-sdk dep 标注包名 + 体积（version 省略走 latest，让下载/更新取最新）', () => {
     const sdk = catalogById('claude-sdk')!;
     expect(sdk.dep.pkg).toBe('@anthropic-ai/claude-agent-sdk');
-    expect(sdk.dep.version).toBe('0.3.175');
+    expect(sdk.dep.version).toBeUndefined();
     expect(sdk.dep.approxSizeMB).toBeGreaterThan(100);
   });
 

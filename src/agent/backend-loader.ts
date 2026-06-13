@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { paths } from '../config/paths';
@@ -128,4 +128,49 @@ export function isBackendEntryInstalled(entry: BackendCatalogEntry): boolean {
   if (kind === 'external-cli') return false;
   if (binName) return isBackendBinInstalled(binName);
   return pkg ? isBackendDepInstalled(pkg) : false;
+}
+
+/**
+ * 一个后端是否装在**用户私装目录**（而非 bridge 自身 node_modules / dev devDep）。
+ * 「卸载」只对用户私装目录里的包有意义（uninstallBackendDep 只 rm backendsDir），所以
+ * canUninstall 用它判定，避免在 dev/worktree 下让用户「卸载」一个其实在仓库 node_modules
+ * 里、点了也删不掉的包。bin 类查 .bin（本就 user-dir-only），库类查 userAnchor resolve。
+ */
+export function isBackendInstalledInUserDir(entry: BackendCatalogEntry): boolean {
+  const { binName, pkg } = entry.dep;
+  if (binName) return isBackendBinInstalled(binName);
+  if (!pkg) return false;
+  try {
+    createRequire(userAnchor()).resolve(pkg);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 已装后端的版本号（读其 package.json 的 version）。先查用户私装目录（按需下载落点），
+ * 再查 bridge 自身 node_modules（dev/worktree）。读不到 → null。绝不抛错。bin 类与库类
+ * 都适用（都是 node_modules/<pkg>/package.json）。供后端管理页展示「当前版本」用。
+ */
+export function installedBackendVersion(pkg: string): string | null {
+  const readVer = (file: string): string | null => {
+    try {
+      const j = JSON.parse(readFileSync(file, 'utf8')) as { version?: string };
+      return typeof j.version === 'string' ? j.version : null;
+    } catch {
+      return null;
+    }
+  };
+  // ① 用户私装目录。
+  const inUser = join(paths.backendsDir, 'node_modules', ...pkg.split('/'), 'package.json');
+  const v1 = readVer(inUser);
+  if (v1) return v1;
+  // ② bridge 自身（dev/worktree）：用 createRequire 解析包的 package.json 路径。
+  try {
+    const resolved = createRequire(import.meta.url).resolve(`${pkg}/package.json`);
+    return readVer(resolved);
+  } catch {
+    return null;
+  }
 }

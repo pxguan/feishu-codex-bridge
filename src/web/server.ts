@@ -302,7 +302,34 @@ export function createWebServer(opts: WebServerOptions): WebServer {
     // 只读预览（无 installer 注入）→ {type:'error',code:'not_wired_yet'}。
     const installMatch = /^\/api\/backends\/([^/]+)\/install$/.exec(pathName);
     if (req.method === 'POST' && installMatch) {
-      handleBackendInstall(req, res, decodeURIComponent(installMatch[1]!));
+      handleBackendInstall(req, res, decodeURIComponent(installMatch[1]!), false);
+      return;
+    }
+
+    // POST /api/backends/:id/update —— 更新到 npm 最新版（同安装 SSE，装 @latest）。
+    const updateMatch = /^\/api\/backends\/([^/]+)\/update$/.exec(pathName);
+    if (req.method === 'POST' && updateMatch) {
+      handleBackendInstall(req, res, decodeURIComponent(updateMatch[1]!), true);
+      return;
+    }
+
+    // GET /api/backends/:id/version —— 已装版本 + npm 最新版 + 有无更新（npm view，较慢）。
+    const verMatch = /^\/api\/backends\/([^/]+)\/version$/.exec(pathName);
+    if (req.method === 'GET' && verMatch) {
+      sendJson(res, 200, await opts.service.backendVersion(decodeURIComponent(verMatch[1]!)));
+      return;
+    }
+
+    // DELETE /api/backends/:id —— 卸载（rm 用户私装目录里的包 + 清 package.json 条目）。
+    const uninstMatch = /^\/api\/backends\/([^/]+)$/.exec(pathName);
+    if (req.method === 'DELETE' && uninstMatch) {
+      try {
+        const r = await opts.service.uninstallBackend(decodeURIComponent(uninstMatch[1]!));
+        sendJson(res, r.ok ? 200 : 409, r);
+      } catch (err) {
+        if (err instanceof NotWiredYetError) sendJson(res, 501, { ok: false, message: err.message });
+        else throw err;
+      }
       return;
     }
 
@@ -507,7 +534,7 @@ export function createWebServer(opts: WebServerOptions): WebServer {
    * → {type:'done'}（ok）/{type:'error'}（失败/未装成/external/501）。AbortSignal
    * 在 SSE 断开时 kill npm 子进程 + 回滚半装（service → installer）。
    */
-  function handleBackendInstall(req: IncomingMessage, res: ServerResponse, id: string): void {
+  function handleBackendInstall(req: IncomingMessage, res: ServerResponse, id: string, update: boolean): void {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -538,7 +565,7 @@ export function createWebServer(opts: WebServerOptions): WebServer {
     req.on('close', cleanup);
 
     void opts.service
-      .installBackend(id, (chunk) => sendData({ type: 'log', chunk }), abort.signal)
+      .installBackend(id, (chunk) => sendData({ type: 'log', chunk }), abort.signal, { update })
       .then((result) => {
         if (result.ok) sendData({ type: 'done' });
         else sendData({ type: 'error', code: result.aborted ? 'aborted' : 'install_failed', message: result.tail });

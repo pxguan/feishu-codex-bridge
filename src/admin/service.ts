@@ -37,6 +37,9 @@ import {
   isInstallable,
   effectiveDefaultBackend,
   installBackendDep,
+  isBackendInstalledInUserDir,
+  installedBackendVersion,
+  latestNpmVersion,
   type BackendCatalogEntry,
   type InstallResult,
   type InstallProgress,
@@ -159,7 +162,20 @@ export interface AdminService {
     id: string,
     onProgress?: InstallProgress,
     signal?: AbortSignal,
+    opts?: { update?: boolean },
   ): Promise<InstallResult>;
+  /**
+   * 卸载一个装在用户私装目录的后端依赖（rm node_modules/<pkg> + 删 package.json 条目）。
+   * 仅 canUninstall 的可卸（npm-ondemand + 确实装在用户目录）。卸载是 daemon 注入态能力
+   * （owns runtime）→ 只读预览无注入 → 抛 {@link NotWiredYetError}（HTTP 501）。绝不 throw 其它。
+   */
+  uninstallBackend(id: string): Promise<{ ok: boolean; message: string }>;
+  /**
+   * 某后端的版本信息：已装版本（用户私装目录 package.json）+ npm 上最新版 + 有无更新。
+   * 网络查询（npm view），较慢，按需调（不进 listBackendCatalog 以免拖慢每次刷新）。
+   * 绝不抛错：查不到 latest → null、hasUpdate=false。
+   */
+  backendVersion(id: string): Promise<{ installed: string | null; latest: string | null; hasUpdate: boolean }>;
 
   // ── Web 专属：daemon 生命周期 / 升级 / 多 bot 管理 / 宿主机体检 ──────────────
   /** daemon 生命周期快照（service 注册状态 + 运行 pid/版本/启动时长）。绝不抛错。 */
@@ -353,6 +369,10 @@ export interface AdminBackendCatalogEntry {
   approxSizeMB?: number;
   /** 探测到的版本（external-cli 的 codex --version 等；未装/无版本 → null）。 */
   version: string | null;
+  /** 已装在用户私装目录里的版本号（读 package.json；未装/dev devDep → null）。后端管理页展示。 */
+  installedVersion: string | null;
+  /** 能否一键卸载（npm-ondemand 且确实装在用户私装目录 → true；dev/worktree 的 devDep 不可卸）。 */
+  canUninstall: boolean;
   /** !installed 时的人读提示（external 给手动装法 / npm-ondemand 给「点下载」）。 */
   hint?: string;
   /** 是否当前全局默认。 */
@@ -390,6 +410,9 @@ export interface AdminServiceDeps {
     signal?: AbortSignal,
     opts?: { binName?: string },
   ) => Promise<InstallResult>;
+  /** 卸载执行器（rm 用户私装目录里的包 + 清 package.json 条目）。daemon 进程注入
+   * {@link uninstallBackendDep}；只读预览不注入 → uninstallBackend 抛 NotWiredYetError。 */
+  uninstallBackend?: (pkg: string) => Promise<boolean>;
 }
 
 /**
@@ -678,7 +701,7 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       return { defaultBackend, entries };
     },
 
-    async installBackend(id, onProgress, signal): Promise<InstallResult> {
+    async installBackend(id, onProgress, signal, opts): Promise<InstallResult> {
       const entry = catalogById(id);
       if (!entry) {
         return { ok: false, code: null, aborted: false, tail: `未知后端「${id}」` };
@@ -692,11 +715,40 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
           tail: `「${entry.displayName}」不支持一键下载。手动安装：${entry.dep.installCmd ?? entry.dep.detectHint}`,
         };
       }
-      const pkg = entry.dep.version ? `${entry.dep.pkg}@${entry.dep.version}` : entry.dep.pkg!;
-      // install 是 daemon 注入态能力（owns runtime）；只读预览无注入 → 501 引导起 daemon。
-      if (!deps.installBackend) throw new NotWiredYetError(`⬇️ 下载「${entry.displayName}」`);
+      // 更新 = 装 @latest（无视 catalog 的 version pin，取 npm 最新）；普通下载用 pin（有的话）。
+      const spec = opts?.update ? 'latest' : entry.dep.version;
+      const pkg = spec ? `${entry.dep.pkg}@${spec}` : entry.dep.pkg!;
+      const verb = opts?.update ? '🔄 更新' : '⬇️ 下载';
+      // install/update 是 daemon 注入态能力（owns runtime）；只读预览无注入 → 501 引导起 daemon。
+      if (!deps.installBackend) throw new NotWiredYetError(`${verb}「${entry.displayName}」`);
       // binName ⇒ bin 类后端（claude-pty-acp）：装完按 .bin 校验而非 require.resolve。
       return deps.installBackend(pkg, onProgress, signal, { binName: entry.dep.binName });
+    },
+
+    async uninstallBackend(id): Promise<{ ok: boolean; message: string }> {
+      const entry = catalogById(id);
+      if (!entry) return { ok: false, message: `未知后端「${id}」` };
+      if (!entry.dep.pkg || !isInstallable(entry)) {
+        return { ok: false, message: `「${entry.displayName}」不是可一键管理的按需后端，无法卸载。` };
+      }
+      if (!isBackendInstalledInUserDir(entry)) {
+        return { ok: false, message: `「${entry.displayName}」并未装在用户目录，无需卸载。` };
+      }
+      // 卸载（rm + 清 package.json 条目）owns runtime → 只读预览无注入 → 501。
+      if (!deps.uninstallBackend) throw new NotWiredYetError(`🗑️ 卸载「${entry.displayName}」`);
+      const ok = await deps.uninstallBackend(entry.dep.pkg);
+      return ok
+        ? { ok: true, message: `已卸载「${entry.displayName}」。` }
+        : { ok: false, message: `卸载「${entry.displayName}」失败（可能仍被占用），可稍后重试。` };
+    },
+
+    async backendVersion(id): Promise<{ installed: string | null; latest: string | null; hasUpdate: boolean }> {
+      const entry = catalogById(id);
+      if (!entry?.dep.pkg) return { installed: null, latest: null, hasUpdate: false };
+      const installed = installedBackendVersion(entry.dep.pkg);
+      const latest = await latestNpmVersion(entry.dep.pkg).catch(() => null);
+      const hasUpdate = !!installed && !!latest && cmpSemver(latest, installed) > 0;
+      return { installed, latest, hasUpdate };
     },
 
     async getDaemonStatus(): Promise<DaemonStatus> {
@@ -786,6 +838,17 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
   };
 }
 
+/** 比较两个 x.y.z 版本：a>b →1，a<b →-1，相等→0。非法段按 0。后端「有无更新」判定用。 */
+function cmpSemver(a: string, b: string): number {
+  const pa = a.split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = b.split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
 /** SDK registerApp reject 的 code → 扫码失败结果（前端文案归 UI/SSE，这里给中文兜底）。 */
 function mapQrFailure(code: string, description: string): QrRegisterFailure {
   switch (code) {
@@ -830,6 +893,8 @@ async function catalogEntryStatus(
     installable: depState === 'not-installed' && isInstallable(entry),
     approxSizeMB: entry.dep.approxSizeMB,
     version: probe?.version ?? null,
+    installedVersion: entry.dep.pkg ? installedBackendVersion(entry.dep.pkg) : null,
+    canUninstall: isInstallable(entry) && isBackendInstalledInUserDir(entry),
     hint: ok ? undefined : (probe?.hint ?? entry.dep.detectHint),
     isDefault: entry.id === defaultBackend,
     supportedModes: entry.supportedModes,
