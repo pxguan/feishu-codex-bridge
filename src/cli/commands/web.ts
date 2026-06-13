@@ -36,10 +36,11 @@ export async function runWeb(opts: { port?: number } = {}): Promise<void> {
   }
 
   // 只读预览唯一放行的宿主级动作：「启动 daemon」。detached helper 装好后台服务并
-  // 拉起（与本预览进程脱钩）；本预览仍持有 51847 → daemon 退化到临时端口，起来后用户
-  // 重开 `web` 即短路到 daemon 的可写控制台（见 readWebConsole 命中分支）。
+  // 拉起（与本预览进程脱钩）；本预览仍持有 51847 → daemon 退化到临时端口。但用户不必
+  // 手动重开 `web`：注入 liveConsole（readWebConsole）后，前端检测到 daemon 已起就自动
+  // 把页面带去那条可写控制台（见 server.ts /api/console/live），端口在哪都不用用户操心。
   const service = createReadonlyAdminService({ startDaemon: () => spawnDaemonControl('start') });
-  const web = createWebServer({ service });
+  const web = createWebServer({ service, liveConsole: () => readWebConsole() });
 
   let url: string;
   try {

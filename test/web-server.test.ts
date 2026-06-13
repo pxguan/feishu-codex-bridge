@@ -584,6 +584,32 @@ describe('web server · daemon 生命周期 / 升级 / 宿主机体检', () => {
     expect((await jsonOf(res)).error).toBe('not_wired_yet');
   });
 
+  it('GET /api/console/live：默认服务器（未注入 liveConsole = daemon 自身）→ live:false', async () => {
+    const body = await jsonOf(await authed('/api/console/live'));
+    expect(body.live).toBe(false);
+    expect(body.url).toBeUndefined();
+  });
+
+  it('GET /api/console/live：注入 liveConsole（只读预览探到 daemon 已起）→ live:true + 带 token 的可点 URL', async () => {
+    const liveWeb = createWebServer({
+      service: stubService(),
+      token: TOKEN,
+      logDir,
+      liveConsole: () => ({ port: 55432, token: 'daemon-tok' }),
+    });
+    const { port } = await liveWeb.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/console/live`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      const body = (await res.json()) as { live: boolean; url?: string };
+      expect(body.live).toBe(true);
+      expect(body.url).toBe('http://127.0.0.1:55432/?token=daemon-tok');
+    } finally {
+      await liveWeb.close();
+    }
+  });
+
   it('GET /api/update/check：current/latest/hasUpdate', async () => {
     const body = await jsonOf(await authed('/api/update/check'));
     expect(body.current).toBe('0.3.11');

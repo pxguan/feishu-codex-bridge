@@ -48,6 +48,12 @@ const LOGO_PNG = Buffer.from(LOGO_PNG_BASE64, 'base64');
 export const DEFAULT_WEB_PORT = 51847;
 export interface WebServerOptions {
   service: AdminService;
+  /**
+   * 只读预览专用：探测「daemon 的可写控制台是否已在别处跑」。注入即代表本进程是只读
+   * 预览（web 命令）——拿到活记录就让前端把用户带去那条可写控制台（见 /api/console/live）。
+   * daemon 自身**绝不注入**（否则会把自己当成「别处」无限自跳）。
+   */
+  liveConsole?: () => { port: number; token: string } | undefined;
   /** 测试注入：日志目录（默认 ~/.feishu-codex-bridge/logs，与 core/logger 同址）。 */
   logDir?: string;
   /** 测试注入：固定 token（默认 crypto.randomUUID()）。 */
@@ -181,7 +187,7 @@ export function createWebServer(opts: WebServerOptions): WebServer {
     if (req.method === 'POST' && pathName === '/api/daemon/restart') {
       try {
         await opts.service.restartDaemon();
-        sendJson(res, 202, { ok: true, message: '重启已发起：daemon 将在数秒内由服务管理器拉起新实例。' });
+        sendJson(res, 202, { ok: true, message: '重启已发起：Feishu Bridge 将在数秒内由服务管理器拉起新实例。' });
       } catch (err) {
         if (err instanceof NotWiredYetError) {
           sendJson(res, 501, { error: 'not_wired_yet', message: err.message });
@@ -198,7 +204,7 @@ export function createWebServer(opts: WebServerOptions): WebServer {
         await opts.service.startDaemon();
         sendJson(res, 202, {
           ok: true,
-          message: '启动已发起：daemon 将在数秒内由服务管理器拉起。起来后重开 `web` 即进入可写控制台。',
+          message: '启动已发起：Feishu Bridge 将在数秒内由服务管理器拉起。起来后本页会自动带你进入可写控制台。',
         });
       } catch (err) {
         if (err instanceof NotWiredYetError) {
@@ -216,7 +222,7 @@ export function createWebServer(opts: WebServerOptions): WebServer {
         await opts.service.stopDaemon();
         sendJson(res, 202, {
           ok: true,
-          message: '停止已发起：daemon 将在数秒内退出（本控制台随之断开，属正常）。',
+          message: '停止已发起：Feishu Bridge 将在数秒内退出（本控制台随之断开，属正常）。',
         });
       } catch (err) {
         if (err instanceof NotWiredYetError) {
@@ -225,6 +231,16 @@ export function createWebServer(opts: WebServerOptions): WebServer {
         }
         throw err;
       }
+      return;
+    }
+
+    // GET /api/console/live —— 只读预览探测 daemon 的可写控制台是否已在别处起来。起了
+    // 就回带 token 的可点 URL（同机同用户、loopback，与 web-console.json 0600 同信任域），
+    // 前端据此把用户从只读预览带去可写控制台。daemon 自身没注入 liveConsole → 永远 live:false。
+    if (req.method === 'GET' && pathName === '/api/console/live') {
+      const live = opts.liveConsole?.();
+      if (live) sendJson(res, 200, { live: true, url: `http://127.0.0.1:${live.port}/?token=${live.token}` });
+      else sendJson(res, 200, { live: false });
       return;
     }
 
@@ -237,7 +253,7 @@ export function createWebServer(opts: WebServerOptions): WebServer {
     if (req.method === 'POST' && pathName === '/api/update') {
       try {
         await opts.service.applyUpdate();
-        sendJson(res, 202, { ok: true, message: '升级已发起：安装完成后 daemon 会自动重启加载新版本。' });
+        sendJson(res, 202, { ok: true, message: '升级已发起：安装完成后 Feishu Bridge 会自动重启加载新版本。' });
       } catch (err) {
         if (err instanceof NotWiredYetError) {
           sendJson(res, 501, { error: 'not_wired_yet', message: err.message });
@@ -308,7 +324,7 @@ export function createWebServer(opts: WebServerOptions): WebServer {
       if (r.ok) {
         sendJson(res, 200, {
           ok: true,
-          message: '已保存。改活跃集需重启 daemon 才生效（在「daemon」卡点重启，或终端 `restart`）。',
+          message: '已保存。改活跃集需重启 Feishu Bridge 才生效（在「Feishu Bridge」卡点重启，或终端 `restart`）。',
         });
       } else {
         sendJson(res, 409, { error: 'rejected', message: r.reason });

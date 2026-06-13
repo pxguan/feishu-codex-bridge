@@ -577,7 +577,7 @@ export const UI_HTML = `<!doctype html>
   .bka-dhead .ic { width: 42px; height: 42px; border-radius: 11px; background: var(--panel-2); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 21px; flex: none; }
   .bka-dhead h2 { font-size: 17px; margin: 0; font-weight: 650; display: flex; align-items: center; gap: 10px; }
   .bka-dhead .dsub { color: var(--text-3); font-size: 12.5px; margin-top: 2px; }
-  .bka-meta { display: grid; grid-template-columns: repeat(4,1fr); gap: 1px; margin-top: 16px; background: var(--border); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .bka-meta { display: grid; grid-template-columns: repeat(3,1fr); gap: 1px; margin-top: 16px; background: var(--border); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   .bka-meta > div { background: var(--panel); padding: 12px 14px; }
   .bka-meta .k { font-size: 11px; color: var(--text-3); margin-bottom: 5px; }
   .bka-meta .v { font-size: 13px; font-weight: 550; }
@@ -946,8 +946,11 @@ ${UI_PURE_JS}
       state = s;
       renderSidebar();
       renderGlobalSummary();
-      // 当前可见页重渲（后台页不白费 DOM）。抽屉打开时由 renderRoute 内保留。
-      renderRoute();
+      // 当前可见页重渲。但体检/日志页不跟 5s 轮询重渲：体检是按「重新检测」才刷的快照
+      // （否则整页闪、还白拉一次体检），日志有自己的 SSE（重渲会断流重连）。其余页(总览/
+      // 机器人/后端)要跟着活数据走，照常重渲。
+      var tab = parseRoute(location.hash).tab;
+      if (tab !== 'doctor' && tab !== 'logs') renderRoute();
     }).catch(function () { /* 下个周期重试 */ });
   }
   function loadDaemon() {
@@ -964,6 +967,33 @@ ${UI_PURE_JS}
     return fetch('/api/backends').then(function (r) { return r.json(); })
       .then(function (c) { catalog = c; return c; })
       .catch(function () { return null; });
+  }
+
+  // ── 只读预览 → 可写控制台自动切换 ───────────────────────────────────────────
+  // 只读预览(web 命令)占着 51847 时，用户点「启动」拉起的 daemon 会退到临时端口，其可写
+  // 控制台不在本页。轮询 /api/console/live：daemon 一起来就醒目提示 + 自动把页面带过去，
+  // 端口在哪都不用用户操心——修「Feishu Bridge 明明在跑却提示只读、点下载不动」的陷阱。
+  // daemon 自身的控制台没注入 liveConsole → 永远 live:false，不会自跳成环。
+  var liveConsoleSwitching = false;
+  function checkLiveConsole() {
+    if (liveConsoleSwitching) return;
+    fetch('/api/console/live').then(function (r) { return r.json(); }).then(function (j) {
+      if (j && j.live && j.url) switchToLiveConsole(j.url);
+    }).catch(function () { /* 下个周期重试 */ });
+  }
+  function switchToLiveConsole(url) {
+    if (liveConsoleSwitching) return;
+    liveConsoleSwitching = true;
+    var bar = el('div');
+    bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:9999;display:flex;align-items:center;gap:14px;justify-content:center;padding:13px 18px;background:linear-gradient(90deg,#3a2fb0,#5b4ddb);color:#fff;font-size:14px;font-weight:600;box-shadow:0 6px 24px rgba(0,0,0,.35)';
+    bar.appendChild(document.createTextNode('✅ Feishu Bridge 已在运行 —— 当前页是只读预览，正在带你进入可写控制台…'));
+    var go = el('button');
+    go.style.cssText = 'background:#fff;color:#3a2fb0;border:0;border-radius:8px;padding:7px 14px;font-weight:700;cursor:pointer';
+    go.textContent = '立即进入 →';
+    go.onclick = function () { location.replace(url); };
+    bar.appendChild(go);
+    document.body.appendChild(bar);
+    setTimeout(function () { location.replace(url); }, 1800);
   }
 
   // ── 路由 → 页面标题/副标题（顶栏面包屑 + 页头复用）─────────────────────────
@@ -1203,6 +1233,15 @@ ${UI_PURE_JS}
   // ════════════════════════════════════════════════════════════════════════════
   //  仪表盘（全局总览：KPI 磁贴 + 机器人 + daemon）
   // ════════════════════════════════════════════════════════════════════════════
+  // 服务管理器名 → 人话标签（不暴露 launchd/systemd 这类没人懂的术语，只留「哪个系统 · 开机自启」）。
+  function svcLabel(pn) {
+    if (!pn) return '后台服务';
+    if (pn.indexOf('launchd') >= 0 || pn.indexOf('macOS') >= 0) return 'macOS · 开机自启';
+    if (pn.indexOf('systemd') >= 0 || pn.indexOf('Linux') >= 0) return 'Linux · 开机自启';
+    if (pn.indexOf('Windows') >= 0) return 'Windows · 登录自启';
+    return '后台服务';
+  }
+
   function renderOverviewTab(root) {
     var s = summarizeState(state);
     var daemonOn = !!(daemon && daemon.running);
@@ -1210,23 +1249,14 @@ ${UI_PURE_JS}
     // KPI 磁贴行
     var kpis = el('div', 'kpis');
     kpis.appendChild(kpiTile('server', 'Feishu Bridge', daemonOn ? '运行中' : '未运行',
-      daemonOn && daemon.uptimeMs !== undefined ? '已运行 ' + fmtUptime(daemon.uptimeMs) : (daemon && daemon.platformName) || '后台服务', daemonOn));
+      daemonOn && daemon.uptimeMs !== undefined ? '已运行 ' + fmtUptime(daemon.uptimeMs) : svcLabel(daemon && daemon.platformName), daemonOn));
     kpis.appendChild(kpiTile('bot', '在线机器人', s.online + ' / ' + s.total, s.active + ' 个在活跃集'));
     kpis.appendChild(kpiTile('folder', '项目总数', String(s.projects), '跨全部机器人'));
     kpis.appendChild(kpiTile('cube', '默认后端', catalog ? backendName(catalog.defaultBackend) : '…', '项目未指定时路由到它'));
     root.appendChild(kpis);
     if (!catalog) loadCatalog().then(function () { if (parseRoute(location.hash).tab === 'overview') renderRoute(); });
 
-    // 🤖 机器人（与下方 Feishu Bridge 卡上下排布，各自占满宽度）
-    var botsCard = el('div', 'card');
-    var bh = el('h2'); bh.appendChild(document.createTextNode('🤖 机器人 '));
-    var bcount = el('span', 'right note'); bh.appendChild(bcount);
-    botsCard.appendChild(bh);
-    var botsList = el('div'); botsCard.appendChild(botsList);
-    root.appendChild(botsCard);
-    renderBots(botsList, bcount);
-
-    // 🛰️ daemon + 升级
+    // 🛰️ Feishu Bridge（放在机器人卡上面：机器人可增删、列表会变长，全局控制放最前位置更稳定）
     var daemonCard = el('div', 'card');
     var dh = el('h2'); dh.appendChild(document.createTextNode('🛰️ Feishu Bridge'));
     // 生命周期按钮按运行态由 renderDaemon 动态填充（运行中→重启/停止；未运行→启动）。
@@ -1241,6 +1271,15 @@ ${UI_PURE_JS}
     root.appendChild(daemonCard);
     renderDaemon(daemonBody);
     loadUpdate(updateBody);
+
+    // 🤖 机器人（在 Feishu Bridge 卡下面，各自占满宽度）
+    var botsCard = el('div', 'card');
+    var bh = el('h2'); bh.appendChild(document.createTextNode('🤖 机器人 '));
+    var bcount = el('span', 'right note'); bh.appendChild(bcount);
+    botsCard.appendChild(bh);
+    var botsList = el('div'); botsCard.appendChild(botsList);
+    root.appendChild(botsCard);
+    renderBots(botsList, bcount);
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -1295,7 +1334,7 @@ ${UI_PURE_JS}
 
     var tbl = el('div', 'bka-tbl');
     var th = el('div', 'bka-th');
-    ['后端 Agent', '状态', '关联项目', '版本 · 体积', ''].forEach(function (t) { th.appendChild(el('div', null, t)); });
+    ['后端 Agent', '状态', '关联项目', '版本', ''].forEach(function (t) { th.appendChild(el('div', null, t)); });
     tbl.appendChild(th);
     entries.forEach(function (e) { tbl.appendChild(renderBackendRow(e)); });
     root.appendChild(tbl);
@@ -1343,14 +1382,19 @@ ${UI_PURE_JS}
     } else { var dash = el('span', null, '—'); dash.style.color = 'var(--text-3)'; pjwrap.appendChild(dash); }
     row.appendChild(pjwrap);
 
-    // 版本 · 体积
+    // 版本（体积不在列表占位——下载前的体积提示挪到「下载」按钮上）
     var verwrap = el('div', 'bka-verm');
     var shownVer = e.installedVersion || (installed ? e.version : '');
     var vtxt = '';
     if (shownVer) vtxt = /^\\d/.test(shownVer) ? 'v' + shownVer : shownVer;
-    verwrap.appendChild(document.createTextNode(vtxt || ''));
-    if (e.approxSizeMB) verwrap.appendChild(el('small', null, (vtxt ? ' · ' : '') + (installed ? '' : '约 ') + e.approxSizeMB + 'M'));
-    else if (e.isDefault) verwrap.appendChild(el('small', null, ' · 内置'));
+    if (vtxt) {
+      verwrap.appendChild(document.createTextNode(vtxt));
+      if (e.isDefault) verwrap.appendChild(el('small', null, ' · 内置'));
+    } else if (e.isDefault) {
+      verwrap.appendChild(el('small', null, '内置'));
+    } else {
+      var dashv = el('small', null, '—'); dashv.style.color = 'var(--text-3)'; verwrap.appendChild(dashv);
+    }
     row.appendChild(verwrap);
 
     // 操作
@@ -1427,7 +1471,6 @@ ${UI_PURE_JS}
     meta.appendChild(mcell('家族', familyName(e.agentFamily)));
     meta.appendChild(mcell('安装方式', e.isDefault ? '内置（随桥）' : (extInstalled ? '外部已装' : (installed ? '按需下载' : '未下载'))));
     meta.appendChild(mcell('版本', /^\\d/.test(shownVer) ? 'v' + shownVer : shownVer, true));
-    meta.appendChild(mcell('体积', e.approxSizeMB ? (installed ? '约 ' : '约 ') + e.approxSizeMB + 'M' : '内置', true));
     hcard.appendChild(meta);
     left.appendChild(hcard);
 
@@ -1566,7 +1609,7 @@ ${UI_PURE_JS}
     var line = el('div', 'statline');
     if (d.running) line.appendChild(el('span', 'tag green', '✅ 运行中' + (d.pid ? ' · pid ' + d.pid : '')));
     else line.appendChild(el('span', 'tag orange', d.installed ? '🟠 已安装但未在运行' : '🟠 未后台启动'));
-    line.appendChild(el('span', 'tag', d.platformName || '后台服务'));
+    line.appendChild(el('span', 'tag', svcLabel(d.platformName)));
     box.appendChild(line);
     // 版本要醒目：大号数字独占一行（取代原来 statline 里那枚小 tag）。
     var ver = el('div'); ver.style.cssText = 'margin-top:12px;display:flex;align-items:baseline;gap:9px';
@@ -1621,9 +1664,8 @@ ${UI_PURE_JS}
     confirmDialog({
       title: '▶️ 启动 Feishu Bridge？',
       lines: [
-        '将把 bridge 注册为后台服务并拉起（开机自启、崩溃自动拉起）。',
-        'Feishu Bridge 起来后，重开 feishu-codex-bridge web 即进入可写控制台。',
-        '（本只读预览仍占着 51847，Feishu Bridge 会换个端口起 —— 故需重开 web 切过去。）',
+        '将把 Feishu Bridge 注册为后台服务并拉起（开机自启、崩溃自动拉起）。',
+        '起来后本页会自动把你带进可写控制台 —— 端口在哪、要不要重开都不用你操心。',
       ],
       confirmLabel: '确认启动',
       onConfirm: function () { postAction('/api/daemon/start', '启动'); },
@@ -2582,6 +2624,7 @@ ${UI_PURE_JS}
   loadCatalog();
   loadState();
   loadDaemon();
+  checkLiveConsole();
   renderRoute();
   // 一次性首屏入场：侧栏淡入 + 顶栏从上滑入（仅首次，5s 刷新不重放）。
   if (fx.on) {
@@ -2592,6 +2635,7 @@ ${UI_PURE_JS}
   }
   setInterval(loadState, 5000);  // /api/state 5s 刷新
   setInterval(loadDaemon, 5000); // daemon 状态/时长同频
+  setInterval(checkLiveConsole, 4000); // 只读预览：daemon 一起来就自动切到可写控制台
 })();
 </script>
 </body>

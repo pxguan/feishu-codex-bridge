@@ -87,6 +87,21 @@ describe('registerBotByQr · 扫码编排', () => {
     expect(registerBotFromCredentialsMock).not.toHaveBeenCalled();
   });
 
+  it('网络/TLS 抖动（无结构化 code，只有 socket 断连 message）→ code:"network" + 可操作中文（不甩英文原文）', async () => {
+    // 复刻真实现场：切 VPN / 网络抖动让到开放平台的 HTTPS 握手中断，SDK 抛裸 Error。
+    registerAppMock.mockRejectedValue(
+      new Error('Client network socket disconnected before secure TLS connection was established'),
+    );
+    const svc = createAdminService();
+    const r = await svc.registerBotByQr({ signal: new AbortController().signal, onQr: () => {} });
+    expect(r).toMatchObject({ ok: false, code: 'network' });
+    if (!r.ok) {
+      expect(r.reason).toContain('飞书开放平台');
+      expect(r.reason).not.toContain('socket'); // 绝不把英文原文甩给用户
+    }
+    expect(registerBotFromCredentialsMock).not.toHaveBeenCalled();
+  });
+
   it('SDK reject {code:"access_denied"} → 映射拒绝文案', async () => {
     registerAppMock.mockRejectedValue({ code: 'access_denied', description: 'denied' });
     const svc = createAdminService();

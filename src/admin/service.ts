@@ -351,7 +351,7 @@ export interface QrRegisterResult {
  * （persist_failed）/ 校验（credential_rejected）。SSE 据 code 映射前端文案与「重试」。 */
 export interface QrRegisterFailure {
   ok: false;
-  code: 'abort' | 'expired_token' | 'access_denied' | 'persist_failed' | 'credential_rejected' | 'unknown';
+  code: 'abort' | 'expired_token' | 'access_denied' | 'persist_failed' | 'credential_rejected' | 'network' | 'unknown';
   reason: string;
 }
 
@@ -894,8 +894,26 @@ function mapQrFailure(code: string, description: string): QrRegisterFailure {
     case 'access_denied':
       return { ok: false, code: 'access_denied', reason: '你在飞书里取消或拒绝了创建。' };
     default:
+      // 网络/TLS 抖动（SDK reject 的不是结构化码，是底层 socket/DNS/TLS 错）——别把英文原文
+      // 甩给用户。常见：切 VPN/代理、断网重连、公司网拦截开放平台。统一归一成可操作的中文。
+      if (isNetworkErrorText(code, description)) {
+        return {
+          ok: false,
+          code: 'network',
+          reason: '连不上飞书开放平台（网络中断或超时）。检查网络 / VPN / 代理后，点「重新生成」重试。',
+        };
+      }
       return { ok: false, code: 'unknown', reason: description ? `创建失败：${description}` : '创建失败，请重试。' };
   }
+}
+
+/** 识别「网络/TLS/DNS 层」失败：code 或 description 命中常见信号即算。切飞书账号本身不会触发，
+ * 真因多是切 VPN/代理或网络抖动让到开放平台的 HTTPS 握手中断。 */
+function isNetworkErrorText(code: string, description: string): boolean {
+  const hay = `${code} ${description}`;
+  return /socket disconnected|secure TLS|\bTLS\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|getaddrinfo|network socket|fetch failed|socket hang up|ECONNABORTED|EPIPE/i.test(
+    hay,
+  );
 }
 
 /**
