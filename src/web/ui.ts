@@ -325,75 +325,100 @@ export const UI_HTML = `<!doctype html>
 <title>Codex Bridge 管理台</title>
 <style>
   :root {
-    --blue: #3370ff;
-    --blue-dark: #245bdb;
+    /* 火山引擎 / Arco Design 令牌：主色 #165DFF，中性灰阶 + 状态色对齐 Arco。 */
+    --blue: #165dff;
+    --blue-hover: #4080ff;
+    --blue-dark: #0e42d2;
+    --blue-tint: #f0f5ff;
     --bg: #f2f3f5;
     --card: #ffffff;
     --border: #e5e6eb;
-    --text: #1f2329;
-    --text-2: #646a73;
-    --green: #34c724;
-    --orange: #ff8800;
-    --red: #f54a45;
-    --radius: 12px;
+    --border-2: #c9cdd4;
+    --text: #1d2129;
+    --text-2: #4e5969;
+    --text-3: #86909c;
+    --green: #00b42a;
+    --orange: #ff7d00;
+    --red: #f53f3f;
+    --radius: 8px;
+    --radius-sm: 6px;
+    --shadow-sm: 0 1px 3px rgba(29,33,41,.06);
+    --shadow-md: 0 4px 16px rgba(29,33,41,.10);
+    --shadow-lg: 0 12px 40px rgba(29,33,41,.16);
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
       "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 1180px; margin: 0 auto; padding: 20px 16px 48px; }
-  .topbar {
-    background: var(--blue); color: #fff; border-radius: var(--radius);
-    padding: 14px 20px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 4px 16px 48px; }
+  /* ── 产品头部：白底 + 底分隔线 + logo 徽标（火山/字节内部控制台观感，非整条蓝色块）── */
+  .appbar {
+    background: var(--card); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 8; box-shadow: var(--shadow-sm);
   }
-  .topbar h1 { font-size: 17px; margin: 0; font-weight: 600; }
-  .topbar .sub { font-size: 12px; opacity: .85; }
-  .topbar .gsum { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
-  .topbar .gtag {
-    background: rgba(255,255,255,.18); color: #fff; border-radius: 6px;
-    padding: 1px 9px; font-size: 12px; white-space: nowrap;
+  .appbar-in {
+    max-width: 1120px; margin: 0 auto; padding: 11px 16px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   }
-  /* ── tabbar：真 Tab 切换条（白底卡片容器，飞书选中态蓝底白字）─────────────── */
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .logo {
+    width: 32px; height: 32px; border-radius: 8px; flex: none;
+    background: linear-gradient(135deg, #165dff, #4080ff); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-size: 17px;
+    box-shadow: 0 2px 6px rgba(22,93,255,.35);
+  }
+  .brand h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; line-height: 1.2; }
+  .brand .sub { font-size: 12px; color: var(--text-3); }
+  .gsum { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+  .gtag {
+    background: var(--bg); color: var(--text-2); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 2px 10px; font-size: 12px; white-space: nowrap;
+  }
+  /* ── tabbar：Arco 胶囊 Tab（白底描边，选中蓝底白字 + 轻投影）──────────────── */
   .tabbar {
-    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 8px 10px; margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+    display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 18px 0 2px;
   }
   .tab {
-    border: 1px solid var(--border); color: var(--text); background: #fff;
-    border-radius: 999px; padding: 4px 16px; font-size: 13px; cursor: pointer;
+    border: 1px solid var(--border); color: var(--text-2); background: var(--card);
+    border-radius: var(--radius-sm); padding: 5px 16px; font-size: 13px; cursor: pointer;
+    transition: color .15s, border-color .15s, background .15s;
   }
-  .tab:hover { filter: brightness(.97); }
-  .tab.on { background: var(--blue); color: #fff; font-weight: 600; border-color: var(--blue); }
+  .tab:hover { color: var(--blue); border-color: var(--blue); background: var(--blue-tint); }
+  .tab.on { background: var(--blue); color: #fff; font-weight: 600; border-color: var(--blue); box-shadow: var(--shadow-sm); }
   .tab.add { border-style: dashed; color: var(--blue); }
+  .tab.add:hover { background: var(--blue-tint); }
   .cols { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 16px; margin-top: 16px; }
   @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
   .card {
     background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 16px 18px; margin-bottom: 16px;
+    padding: 18px 20px; margin-bottom: 16px; box-shadow: var(--shadow-sm);
   }
-  .card h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; }
   .card h2 .right { margin-left: auto; font-weight: 400; }
-  .hr { border: 0; border-top: 1px solid var(--border); margin: 10px 0; }
-  .note { color: var(--text-2); font-size: 12px; }
+  .hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
+  .note { color: var(--text-3); font-size: 12px; }
   .tag {
-    display: inline-block; border-radius: 4px; padding: 0 6px; font-size: 12px;
-    background: #eff0f1; color: var(--text-2); margin-right: 6px; white-space: nowrap;
+    display: inline-block; border-radius: var(--radius-sm); padding: 1px 8px; font-size: 12px;
+    background: var(--bg); color: var(--text-2); margin-right: 6px; white-space: nowrap;
   }
-  .tag.blue { background: #e1eaff; color: var(--blue-dark); }
-  .tag.green { background: #d9f5d6; color: #2ea121; }
-  .tag.orange { background: #feead2; color: #b25e00; }
-  .tag.red { background: #fde2e2; color: #c02a26; }
+  .tag.blue { background: #e8f3ff; color: #165dff; }
+  .tag.green { background: #e8ffea; color: #009a29; }
+  .tag.orange { background: #fff3e8; color: #d25f00; }
+  .tag.red { background: #ffece8; color: #cb272d; }
   .btn {
-    display: inline-block; border-radius: 6px; border: 1px solid var(--border);
-    background: #fff; color: var(--text); padding: 4px 14px; font-size: 13px;
-    cursor: pointer; transition: filter .12s;
+    display: inline-block; border-radius: var(--radius-sm); border: 1px solid var(--border-2);
+    background: var(--card); color: var(--text); padding: 5px 16px; font-size: 13px; line-height: 20px;
+    cursor: pointer; transition: color .15s, border-color .15s, background .15s;
   }
-  .btn:hover { filter: brightness(.96); }
+  .btn:hover { color: var(--blue); border-color: var(--blue); background: var(--blue-tint); }
   .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
-  .btn.disabled { opacity: .5; cursor: not-allowed; }
-  .btn.danger { background: var(--red); border-color: var(--red); color: #fff; }
+  .btn.primary:hover { background: var(--blue-hover); border-color: var(--blue-hover); color: #fff; }
+  .btn.primary:active { background: var(--blue-dark); border-color: var(--blue-dark); }
+  .btn.disabled, .btn.disabled:hover { opacity: .45; cursor: not-allowed; color: var(--text); border-color: var(--border-2); background: var(--card); }
+  .btn.danger, .btn.danger:hover { background: var(--red); border-color: var(--red); color: #fff; }
   .btn.danger:hover { filter: brightness(.95); }
   .proj { padding: 10px 0; border-bottom: 1px solid var(--border); }
   .proj:last-child { border-bottom: 0; }
@@ -412,7 +437,7 @@ export const UI_HTML = `<!doctype html>
   .drawer-mask { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; z-index: 9; }
   .drawer {
     position: fixed; top: 0; right: -460px; width: 440px; max-width: 94vw; height: 100vh;
-    background: var(--card); z-index: 10; box-shadow: -8px 0 24px rgba(0,0,0,.12);
+    background: var(--card); z-index: 10; box-shadow: -8px 0 24px rgba(29,33,41,.12);
     transition: right .2s ease; padding: 18px 20px; overflow-y: auto;
   }
   .drawer.open { right: 0; }
@@ -429,7 +454,7 @@ export const UI_HTML = `<!doctype html>
   .mgr-row:last-child { border-bottom: 0; }
   .mgr-row .grow { flex: 1; min-width: 0; }
   .progress {
-    height: 6px; background: #eff0f1; border-radius: 4px; overflow: hidden; margin: 6px 0 2px;
+    height: 6px; background: var(--bg); border-radius: 4px; overflow: hidden; margin: 6px 0 2px;
   }
   .progress > div { height: 100%; background: var(--blue); width: 0; transition: width .25s; }
   .insttail {
@@ -442,7 +467,7 @@ export const UI_HTML = `<!doctype html>
     background: #1f2329; color: #fff; border-radius: 8px; padding: 8px 18px;
     font-size: 13px; display: none; z-index: 20; max-width: 80vw;
   }
-  .empty { color: var(--text-2); text-align: center; padding: 18px 0; }
+  .empty { color: var(--text-3); text-align: center; padding: 18px 0; }
   #wizMask, #confirmMask {
     position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; z-index: 30;
     overflow-y: auto; padding: 40px 16px;
@@ -455,7 +480,7 @@ export const UI_HTML = `<!doctype html>
   .bot-row .grow { flex: 1; min-width: 0; }
   .wiz {
     background: var(--card); border-radius: var(--radius); max-width: 560px; margin: 0 auto;
-    padding: 22px 24px 26px; box-shadow: 0 12px 40px rgba(0,0,0,.2);
+    padding: 22px 24px 26px; box-shadow: var(--shadow-lg);
   }
   .wiz h3 { margin: 0 0 4px; font-size: 17px; }
   .wiz .steps { display: flex; gap: 6px; margin: 12px 0 16px; }
@@ -505,13 +530,19 @@ export const UI_HTML = `<!doctype html>
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="topbar">
-    <h1>🤖 Codex Bridge 管理台</h1>
-    <span class="sub">仅本机 · 127.0.0.1</span>
+<header class="appbar">
+  <div class="appbar-in">
+    <div class="brand">
+      <span class="logo">🤖</span>
+      <div>
+        <h1>Codex Bridge 控制台</h1>
+        <span class="sub">本机 · 127.0.0.1 · 多机器人 / 多后端统一管理</span>
+      </div>
+    </div>
     <div class="gsum" id="globalSummary"></div>
   </div>
-
+</header>
+<div class="wrap">
   <div class="tabbar" id="tabbar"></div>
 
   <!-- 单内容容器：renderRoute 按 hash 路由清空重渲（总览 / 某 bot） -->
