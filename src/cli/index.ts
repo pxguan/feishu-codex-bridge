@@ -5,6 +5,7 @@ import { runRun } from './commands/run';
 import { runStart, runStop, runRestart, runStatus, runLogs } from './commands/daemon';
 import { runUpdate } from './commands/update';
 import { runBotInit, runBotList, runBotUse, runBotRm } from './commands/bot';
+import { runWeb } from './commands/web';
 import { secretsGet, secretsSet, secretsList, secretsRemove } from './commands/secrets';
 
 const program = new Command();
@@ -65,6 +66,14 @@ program
   .option('--check', '只检查有无新版，不安装')
   .action(async (options: { check?: boolean }) => {
     await runUpdate({ check: Boolean(options.check) });
+  });
+
+program
+  .command('web')
+  .description('本机 Web 控制台（只读预览，仅 127.0.0.1 + token；写操作随 daemon 集成开放）')
+  .option('--port <port>', '监听端口（默认 7866）')
+  .action(async (options: { port?: string }) => {
+    await runWeb({ port: options.port !== undefined ? Number(options.port) : undefined });
   });
 
 // ── 飞书机器人管理 ───────────────────────────────────────────
