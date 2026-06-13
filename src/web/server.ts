@@ -38,7 +38,7 @@ import { UI_HTML } from './ui';
  */
 
 /** 默认端口（设计文档 §3 方案 B 的示例端口）；被占用时 daemon 退临时端口。 */
-export const DEFAULT_WEB_PORT = 7866;
+export const DEFAULT_WEB_PORT = 51847;
 export interface WebServerOptions {
   service: AdminService;
   /** 测试注入：日志目录（默认 ~/.feishu-codex-bridge/logs，与 core/logger 同址）。 */

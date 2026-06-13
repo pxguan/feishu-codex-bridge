@@ -72,7 +72,7 @@ program
 program
   .command('web')
   .description('本机 Web 控制台（只读预览，仅 127.0.0.1 + token；写操作随 daemon 集成开放）')
-  .option('--port <port>', '监听端口（默认 7866）')
+  .option('--port <port>', '监听端口（默认 51847）')
   .action(async (options: { port?: string }) => {
     await runWeb({ port: options.port !== undefined ? Number(options.port) : undefined });
   });

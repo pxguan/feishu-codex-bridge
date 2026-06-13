@@ -6,7 +6,7 @@ import { createWebServer, DEFAULT_WEB_PORT } from './server';
 /**
  * daemon（run / supervisor）进程内挂 Web 控制台。
  *
- *   - 先试默认端口 7866；被占（另一个 daemon / 任意进程）退临时端口——端口
+ *   - 先试默认端口 51847；被占（另一个 daemon / 任意进程）退临时端口——端口
  *     由发现文件透出，`web` 子命令不靠猜。
  *   - 起不来只告警，**绝不拖垮 bot 主流程**（控制台是旁路，不是必需品）。
  *   - 成功后写发现文件（0600，{port, token, pid}），并挂 process exit 钩子
