@@ -321,6 +321,13 @@ export interface AccountUsageBundle {
   usage: AccountUsageSnapshot;
 }
 
+/** 一个按需后端依赖的安装态（doctor 三态的细分；catalog/Web 据此决定渲染）。
+ *   'installed'        —— 解析得到，已装（codex 这类 external-cli 装了也算 installed）
+ *   'not-installed'    —— npm-ondemand 包未装，但可一键下载（installable=true）
+ *   'external-missing' —— external-cli / npm-external 缺失，需用户手动装（给 hint，不出下载按钮）
+ */
+export type BackendDepState = 'installed' | 'not-installed' | 'external-missing';
+
 /** A backend's environment probe（doctor / onboarding / DM 体检卡共用）。 */
 export interface BackendProbe {
   /** the backend runtime is present and runnable */
@@ -331,6 +338,11 @@ export interface BackendProbe {
   location?: string;
   /** actionable install/login pointer when !ok */
   hint?: string;
+  /** 本后端依赖能否在 Web 一键按需下载（npm-ondemand 且当前未装 → true）。
+   * 区分「未安装·点下载」(true) 与「登录失败/外部缺失·去手动处理」(false/undefined)。 */
+  installable?: boolean;
+  /** 依赖安装态细分（{@link BackendDepState}）；未声明 ⇒ 由 ok 推导（ok=installed）。 */
+  depState?: BackendDepState;
 }
 
 /**

@@ -20,7 +20,11 @@ import type {
   TurnOptions,
 } from '../types';
 import { BRIDGE_DEVELOPER_INSTRUCTIONS } from '../bridge-instructions';
+import { loadBackendDep, BackendNotInstalledError } from '../backend-loader';
 import { ClaudeEventMapper, type SdkMessageLike } from './event-map';
+
+/** SDK 的 npm 包名（与 catalog 的 claude-sdk dep.pkg 同源）。 */
+const SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk';
 
 /**
  * Claude Code backend via the official Agent SDK (@anthropic-ai/claude-agent-sdk).
@@ -170,7 +174,9 @@ class ClaudeSdkThread implements AgentThread {
 
   /** Spawn the CLI (via query()) and probe that it came up. */
   async connect(): Promise<void> {
-    const { query } = await import('@anthropic-ai/claude-agent-sdk');
+    // 按需加载：先 bridge 自身（dev/worktree），再用户私装目录（生产）。未装会抛
+    // BackendNotInstalledError —— connect 失败，resolveThread 的 catch 落回兜底。
+    const { query } = await loadBackendDep<typeof import('@anthropic-ai/claude-agent-sdk')>(SDK_PACKAGE);
     const options: Options = {
       cwd: this.opts.cwd,
       ...(this.opts.model ? { model: this.opts.model } : {}),
@@ -403,13 +409,28 @@ export class ClaudeSdkBackend implements AgentBackend {
   }
 
   async doctor(): Promise<BackendProbe> {
-    // SDK 自带平台二进制——能 import 即可跑；不真探活（登录态/网络问题在
-    // startThread 的启动探针处报清晰错误）。无版本可探（SDK 不导出），留 null。
+    // 三态（design backend-catalog-ondemand.md §1.4）：
+    //   未安装 → loadBackendDep 抛 BackendNotInstalledError → ok:false +
+    //            installable（Web 出「下载」按钮），depState:'not-installed'。
+    //   已装 → import ok → ok:true（不真探活；登录态/网络问题在 startThread 启动
+    //          探针处报清晰错误）。无版本可探（SDK 不导出），留 null。
+    // 「未安装」与「真坏」严格区分：前者点下载，后者（loadBackendDep 抛别的错）
+    // 给原始错误文案——绝不混成一个红叉。
     try {
-      await import('@anthropic-ai/claude-agent-sdk');
-      return { ok: true, version: null, location: '@anthropic-ai/claude-agent-sdk' };
-    } catch {
-      return { ok: false, version: null, hint: '未安装 @anthropic-ai/claude-agent-sdk（在 bridge 目录 npm i 后重试）' };
+      await loadBackendDep(SDK_PACKAGE);
+      return { ok: true, version: null, location: SDK_PACKAGE, depState: 'installed' };
+    } catch (err) {
+      if (err instanceof BackendNotInstalledError) {
+        return {
+          ok: false,
+          version: null,
+          hint: '未安装 Claude SDK —— 在控制台点「下载」即按需装到用户目录（约 224M）',
+          installable: true,
+          depState: 'not-installed',
+        };
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, version: null, hint: `Claude SDK 加载失败：${msg}` };
     }
   }
 

@@ -1,0 +1,96 @@
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { paths } from '../config/paths';
+
+/**
+ * 按需后端依赖的加载器（npm-ondemand 包，如 @anthropic-ai/claude-agent-sdk）。
+ *
+ * 真机验证过的解析方案（design/backend-catalog-ondemand.md §2.1，实验 C/D/F）：
+ *   ① 先试 bridge 自身的 node_modules —— 直接 `await import(pkg)`（bare specifier）。
+ *      这条兜 dev / worktree 模式：源码 checkout 里 `npm i` 把包装进仓库
+ *      node_modules，命中此条，**绝不破坏当前 worktree 的 claude-sdk 测试/运行**。
+ *      （ESM bare import 只认 importer 自身的 node_modules 链——实验 A/B。）
+ *   ② catch ERR_MODULE_NOT_FOUND → 用户私装目录解析：
+ *      `createRequire(backendsDir 下的锚点).resolve(pkg)`（honors exports map，实验 D）
+ *      → `await import(pathToFileURL(resolved).href)`。生产 `npm i -g` 不带这些重包，
+ *      用户在 Web 点「下载」后装进 backendsDir，从这条加载（SDK 内部对平台二进制的
+ *      require.resolve 也落在这棵树里——实验 F）。
+ *
+ * 两处都解析不到 → 抛 {@link BackendNotInstalledError}（doctor 据此渲染「未安装·可下载」）。
+ */
+
+/** 一个按需后端包未安装（bridge 自身与用户私装目录均解析不到）。doctor 把它映射
+ * 成三态里的「未安装」（installable）而非「真坏」。携带包名供卡片渲染下载提示。 */
+export class BackendNotInstalledError extends Error {
+  constructor(readonly pkg: string) {
+    super(`后端依赖「${pkg}」未安装（bridge 自身与用户私装目录均未找到）`);
+    this.name = 'BackendNotInstalledError';
+  }
+}
+
+/** 用户私装目录下一个虚构锚点文件路径。createRequire 只用它定位 node_modules 链，
+ * 文件本身不需真实存在（实验 C）。挂在 backendsDir 根 → 解析 backendsDir/node_modules。 */
+function userAnchor(): string {
+  return join(paths.backendsDir, '__backend_anchor__.cjs');
+}
+
+/** Node 的 ESM「找不到模块」错误码族（不同 Node 版本/路径写法可能给不同码）。 */
+const NOT_FOUND_CODES = new Set(['ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED']);
+
+function isNotFound(err: unknown): boolean {
+  const code = (err as { code?: string } | undefined)?.code;
+  if (code !== undefined && NOT_FOUND_CODES.has(code)) return true;
+  // 测试运行器（vite/vitest）拦截 bare `import()` 时给的不是 ERR_MODULE_NOT_FOUND，
+  // 而是「Failed to load url <bare>」——按未找到处理，让第②路（用户目录）接管。
+  // 真实 Node 永不产生此文案，所以生产无副作用。
+  const msg = (err as { message?: string } | undefined)?.message ?? '';
+  return /Failed to (load|resolve) (url|import)/i.test(msg);
+}
+
+/**
+ * 按包名加载一个「可能装在 bridge 自身、也可能装在用户私装目录」的后端依赖。
+ * 解析顺序见模块注释。两处都没有 → 抛 {@link BackendNotInstalledError}。
+ * 拿到的 module 对象与裸 `import(pkg)` 完全一致（导出齐全——实验 F）。
+ */
+export async function loadBackendDep<T = unknown>(pkg: string): Promise<T> {
+  // ① bridge 自身（dev/worktree 模式，或显式还留着依赖时）。
+  try {
+    return (await import(pkg)) as T;
+  } catch (err) {
+    // 仅「找不到模块」才回退用户目录；其它错误（包损坏、语法错误）原样抛出
+    // ——那是真坏，不该被误判为「未安装·可下载」。
+    if (!isNotFound(err)) throw err;
+  }
+  // ② 用户私装目录（生产默认路径）。
+  let resolved: string;
+  try {
+    resolved = createRequire(userAnchor()).resolve(pkg);
+  } catch {
+    throw new BackendNotInstalledError(pkg);
+  }
+  return (await import(pathToFileURL(resolved).href)) as T;
+}
+
+/**
+ * 一个按需后端依赖是否已安装（解析成功即装了——doctor / catalog 的快速判定）。
+ * 与 {@link loadBackendDep} 同解析顺序，但只 resolve、不真 import（更轻、不触发
+ * 包的副作用）。半装/损坏包让 resolve 抛 → 判未安装（与设计 R7 一致：宁可判未装，
+ * 也不假阳性放行一个加载会炸的包）。绝不抛错。
+ */
+export function isBackendDepInstalled(pkg: string): boolean {
+  // ① bridge 自身。
+  try {
+    createRequire(import.meta.url).resolve(pkg);
+    return true;
+  } catch {
+    /* fall through to user dir */
+  }
+  // ② 用户私装目录。
+  try {
+    createRequire(userAnchor()).resolve(pkg);
+    return true;
+  } catch {
+    return false;
+  }
+}

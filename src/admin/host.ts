@@ -4,6 +4,15 @@ import { fileURLToPath } from 'node:url';
 import { arch, platform, release } from 'node:os';
 import { paths } from '../config/paths';
 import { bridgeVersion } from '../core/version';
+import {
+  BACKEND_CATALOG,
+  createBackend,
+  effectiveDefaultBackend,
+  isInstallable,
+  isBackendDepInstalled,
+  type BackendCatalogEntry,
+} from '../agent';
+import type { BackendDepState } from '../agent/types';
 import type { ServiceStatus } from '../service/common';
 import type { UpdateCheck } from '../service/update';
 
@@ -131,6 +140,82 @@ export async function collectHostDoctor(logsDir: string = join(paths.appDir, 'lo
     logBytes: await dirBytes(logsDir),
     version: bridgeVersion(),
   };
+}
+
+/**
+ * 一条后端体检行（Web 后端页 / 宿主机体检共用）：catalog 元数据 + doctor 三态 +
+ * 依赖安装态。从 catalog 渲染（不硬编码列表）；新后端注册到 catalog 即自动出现。
+ */
+export interface BackendDoctorRow {
+  id: string;
+  /** catalog displayName */
+  name: string;
+  /** agent 家族（picker 分组用） */
+  agentFamily: string;
+  /** 接入方式短名（app-server / sdk / acp） */
+  access: string;
+  ok: boolean;
+  version: string | null;
+  location?: string;
+  hint?: string;
+  /** 依赖安装态三态（installed / not-installed / external-missing） */
+  depState: BackendDepState;
+  /** 可一键按需下载（npm-ondemand 且当前未装） */
+  installable: boolean;
+  /** 体积提示 MB（installable 时给下载确认用） */
+  approxSizeMB?: number;
+  /** 手动装法 / 下载旁注 */
+  installCmd?: string;
+  /** 全局有效默认后端 */
+  isDefault: boolean;
+}
+
+/**
+ * 一条 catalog 的依赖安装态（doctor.ok 不直接等于装了——已装未登录也 ok:false，所以
+ * 安装态单独由 catalog dep + 解析判定）：
+ *   npm-ondemand —— 解析得到包 = installed，否则 not-installed（可一键下载）。
+ *   external-cli / npm-external —— 不在此探解析（走 PATH / 握手），按 probe.ok：
+ *     ok = installed，否则 external-missing（手动装）。
+ */
+function depStateFor(entry: BackendCatalogEntry, ok: boolean): BackendDepState {
+  if (entry.dep.kind === 'npm-ondemand') {
+    return entry.dep.pkg && isBackendDepInstalled(entry.dep.pkg) ? 'installed' : 'not-installed';
+  }
+  return ok ? 'installed' : 'external-missing';
+}
+
+/**
+ * 后端体检聚合（从 catalog 渲染 + 每条带 depState/installable）。绝不抛错——
+ * 每条 doctor 独立降级（force 探「现在」的状态）。service.ts 的 doctorBackends /
+ * probeAllBackends 复用它（host.ts 是宿主机域聚合的单一出口）。
+ */
+export async function doctorBackends(): Promise<BackendDoctorRow[]> {
+  const def = await effectiveDefaultBackend({ force: true }).catch(() => undefined);
+  return Promise.all(
+    BACKEND_CATALOG.map(async (entry) => {
+      const probe = await createBackend(entry.id)
+        .doctor({ force: true })
+        .catch(() => undefined);
+      const ok = probe?.ok === true;
+      const installable = isInstallable(entry) && !ok;
+      const depState = depStateFor(entry, ok);
+      return {
+        id: entry.id,
+        name: entry.displayName,
+        agentFamily: entry.agentFamily,
+        access: entry.access,
+        ok,
+        version: probe?.version ?? null,
+        location: probe?.location,
+        hint: ok ? undefined : (probe?.hint ?? entry.dep.detectHint),
+        depState,
+        installable,
+        approxSizeMB: entry.dep.approxSizeMB,
+        installCmd: entry.dep.installCmd,
+        isDefault: entry.id === def,
+      };
+    }),
+  );
 }
 
 /**

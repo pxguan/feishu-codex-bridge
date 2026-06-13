@@ -1,5 +1,5 @@
 import { rm } from 'node:fs/promises';
-import { ensureCodex, registerNewBot } from '../../bot/onboarding';
+import { ensureAnyAgent, registerNewBot } from '../../bot/onboarding';
 import { loadBots, findBot, activeBots, setActiveBots, removeBot } from '../../config/bots';
 import { removeSecret } from '../../config/keystore';
 import { secretKeyForApp } from '../../config/schema';
@@ -8,10 +8,8 @@ import { checkboxSelect } from '../checkbox';
 
 /** `bot init [name]` — register an additional feishu app via scan-QR + authorize. */
 export async function runBotInit(name?: string): Promise<void> {
-  if (!(await ensureCodex())) {
-    process.exitCode = 1;
-    return;
-  }
+  // 任一 agent 可用即放行；都无也只告警不阻塞（Web 引导下载）。
+  await ensureAnyAgent();
   const result = await registerNewBot(name);
   if (!result) {
     process.exitCode = 1;

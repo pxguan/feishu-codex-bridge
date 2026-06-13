@@ -13,7 +13,7 @@ import {
   type EventDiagnosis,
 } from '../utils/event-diagnosis';
 import { buildScopeGrantUrl, buildEventConfigUrl, labelScope } from '../config/scopes';
-import { createBackend } from '../agent';
+import { detectAgents } from '../agent';
 import { openUrl } from '../utils/open-url';
 import { log } from '../core/logger';
 import { useBotDir } from '../config/paths';
@@ -28,19 +28,32 @@ export interface OnboardResult {
   events?: EventDiagnosis;
 }
 
-/** Verify the default agent backend (codex CLI) is runnable — needed to run AND
- * to spawn the per-session app-server. Probes via AgentBackend.doctor()（M-8：
- * 不再深 import codex 探测）。 */
-export async function ensureCodex(): Promise<boolean> {
-  if ((await createBackend().doctor()).ok) return true;
-  console.error(
-    '✗ 未找到 codex CLI。请先安装 Codex 并登录：\n' +
-      '    • 安装：npm i -g @openai/codex（或安装 Codex.app，或用 CODEX_BIN 指向已有二进制）\n' +
-      '    • 登录：codex login\n' +
-      '  然后重跑。可先用 `feishu-codex-bridge doctor` 自检。',
-  );
-  return false;
+/**
+ * Verify SOME agent backend is runnable — codex OR claude（按需化后只有 claude 的
+ * 机器也能启动；Web 引导下载重后端）。探 codex/claude 两个 agent（detectAgents），
+ * 任一后端可用即放行；都不可用时**仍只告警不阻塞**（与缺权限策略一致——零交互纯
+ * 告知，因为要同时支持人 + codex 安装/升级），让用户在 Web 控制台引导下载。
+ *
+ * 返回 true 始终放行（不再拒启）。布尔仍保留给调用方签名（早期返回点用得到）。
+ */
+export async function ensureAnyAgent(): Promise<boolean> {
+  const agents = await detectAgents().catch(() => []);
+  const anyAvailable = agents.some((a) => a.backends.some((b) => b.available));
+  if (anyAvailable) return true;
+  // 都无：告警但不阻塞（Web 控制台可引导下载 Claude SDK / 装 codex）。
+  const rule = '-'.repeat(64);
+  console.error(`\n${rule}`);
+  console.error('⚠️  未检测到任何可用 agent 后端（codex / claude 都没就绪）——仍会启动，但群里发消息会报后端不可用。');
+  console.error('   选一个装上：');
+  console.error('    • codex（能力最全）：npm i -g @openai/codex，然后 codex login');
+  console.error('    • Claude SDK（开箱即用，约 224M）：启动后在 Web 控制台点「下载 Claude SDK」');
+  console.error('   装好后用 `feishu-codex-bridge doctor` 自检。');
+  console.error(`${rule}\n`);
+  return true;
 }
+
+/** @deprecated 旧名，保留兼容 `bot init` 调用点；语义已是 ensureAnyAgent（任一 agent 可用即放行，都无也不阻塞）。 */
+export const ensureCodex = ensureAnyAgent;
 
 /**
  * Bring a bot to a runnable state and return its config + secret.
@@ -63,7 +76,8 @@ export async function ensureCodex(): Promise<boolean> {
 export async function ensureOnboarded(
   opts: { allowCreate?: boolean; bot?: string } = {},
 ): Promise<OnboardResult | null> {
-  if (!(await ensureCodex())) return null;
+  // 任一 agent 可用即放行；都无也只告警不阻塞（Web 引导下载）—— 永远 true。
+  await ensureAnyAgent();
 
   const reg = await ensureRegistry();
   const entry = opts.bot ? findBot(reg, opts.bot) : currentBot(reg);
