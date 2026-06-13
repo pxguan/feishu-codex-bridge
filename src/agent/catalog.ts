@@ -20,7 +20,7 @@ export type BackendAccess = 'app-server' | 'sdk' | 'acp';
  * 依赖类型 —— 决定「装哪 / 怎么检测 / 能不能一键按需装」。
  *   'external-cli'  外部 CLI（codex / 未来 gemini-cli），bridge 不负责装，doctor 探 PATH。
  *   'npm-ondemand'  重 npm 包，按需装到用户私装目录（claude-agent-sdk）。**唯一可一键下载的类型。**
- *   'npm-external'  外部 npm 包 + 可能 native（claude-code-acp 适配器），用户自管。
+ *   'npm-external'  外部 npm 包 + 可能 native（claude-pty-acp 适配器），用户自管。
  */
 export type DepKind = 'external-cli' | 'npm-ondemand' | 'npm-external';
 
@@ -97,10 +97,11 @@ export const BACKEND_CATALOG: readonly BackendCatalogEntry[] = [
     access: 'acp',
     dep: {
       kind: 'npm-external',
-      pkg: 'claude-code-acp',
-      // 适配器含 node-pty native + npm 名被占（见 backend-detection.md §2），短期不做一键装。
-      detectHint: '未找到 claude-code-acp 适配器（需 node-pty 平台编译 + 本机 claude CLI）',
-      installCmd: 'npm i -g claude-code-acp（需 node-pty 平台编译）+ 本机 claude CLI；或配 preferences.acpCommand',
+      pkg: 'claude-pty-acp',
+      // 适配器含 node-pty（多数平台走 prebuilds 预编译、无需现场编译）+ 需本机 claude CLI。
+      // 发布并验证 prebuild 在 --prefix 按需安装下正常后，可升级成 npm-ondemand 一键下载。
+      detectHint: '未找到 claude-pty-acp（运行 npm i -g claude-pty-acp，并确保本机 claude 已登录）',
+      installCmd: 'npm i -g claude-pty-acp（node-pty 多数平台开箱）；或配 preferences.acpCommand 指向适配器',
     },
     supportedModes: ['full'],
     blurb: '走订阅计费（不烧 SDK credit），需额外适配器，高级用户',

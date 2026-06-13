@@ -76,11 +76,11 @@ describe('buildBackendPickerCard（第二段检测结果卡）三态渲染', () 
     const dead: BackendProbeRow = {
       id: 'claude-acp',
       name: 'Claude（订阅·ACP）',
-      probe: { ok: false, version: null, hint: '未检测到 claude-code-acp' },
+      probe: { ok: false, version: null, hint: '未检测到 claude-pty-acp' },
     };
     const card = buildBackendPickerCard({ name: 'P' }, [okCodex, dead]);
     expect(switchButtonFor(card, 'claude-acp')).toBeUndefined();
-    expect(JSON.stringify(card)).toContain('未检测到 claude-code-acp');
+    expect(JSON.stringify(card)).toContain('未检测到 claude-pty-acp');
   });
 
   it('探测超时/没跑成（probe undefined）按不可用渲染，绝不给切换按钮', () => {

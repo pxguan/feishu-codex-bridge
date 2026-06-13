@@ -10,7 +10,7 @@ import { initialState, reduce } from '../src/card/run-state';
  * AcpBackend 契约测试：spawn 真子进程跑 mock ACP server（test/fixtures/
  * acp-mock-server.mjs，零依赖 NDJSON JSON-RPC），全链路覆盖「握手 → session →
  * prompt 流式 → 终态」与权限自动批准 / cancel / loadSession 降级 —— 不花 token、
- * 不依赖 claude-code-acp 装没装。
+ * 不依赖 claude-pty-acp 装没装。
  */
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'acp-mock-server.mjs');
@@ -141,7 +141,7 @@ describe('acp backend：mock server 全链路契约', () => {
 });
 
 describe('acp backend：能力守卫（无半实现）', () => {
-  // serverCommand 显式 null = 模拟「未检测到 claude-code-acp」（不碰 PATH/配置）
+  // serverCommand 显式 null = 模拟「未检测到 claude-pty-acp」（不碰 PATH/配置）
   const be = new AcpBackend(null);
 
   it('capabilities 全 false，supportedModes 仅 full', () => {
@@ -167,9 +167,9 @@ describe('acp backend：能力守卫（无半实现）', () => {
   it('未检测到 server 命令：doctor 给装法提示，startThread 清晰报错', async () => {
     const probe = await be.doctor();
     expect(probe.ok).toBe(false);
-    expect(probe.hint).toContain('npm i -g claude-code-acp');
+    expect(probe.hint).toContain('npm i -g claude-pty-acp');
     expect(probe.hint).toContain('acpCommand');
-    await expect(be.startThread({ cwd: '/tmp' })).rejects.toThrow(/未检测到 claude-code-acp/);
+    await expect(be.startThread({ cwd: '/tmp' })).rejects.toThrow(/未检测到 claude-pty-acp/);
   });
 
   it('listThreads（/resume 选择卡）抛明确「暂不支持」；readHistory 按契约返回空', async () => {

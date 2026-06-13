@@ -29,20 +29,20 @@ import { AcpEventMapper, type AcpUpdateLike, type AcpUsageLike } from './event-m
 
 /**
  * Claude Code backend via ACP（Agent Client Protocol）—— bridge 作 ACP **client**，
- * spawn 一个 ACP server 子进程（默认 claude-code-acp：把交互式 Claude Code 暴露成
+ * spawn 一个 ACP server 子进程（默认 claude-pty-acp：把交互式 Claude Code 暴露成
  * ACP agent，用量走订阅而非 Agent SDK credit——这是本后端存在的全部理由，见
  * research/06+07）。一线程一 server 子进程（stdio 传输），与 codex/claude-sdk 的
  * 进程模型一致，supervisor/watchdog/⏹ 语义透明复用。
  *
  * SDK 版本 **精确 pin 0.25.0**（package.json 无 ^）：ACP SDK 0.2x 仍在快速迭代
  * （0.20→0.25 连续破坏性变化、mode 方法已预告废弃改 config options），与参考
- * 项目 claude-code-acp（^0.25.0）同代。升级时整目录回归后再动。协议类型全部
+ * 项目 claude-pty-acp（^0.25.0）同代。升级时整目录回归后再动。协议类型全部
  * 关在 src/agent/acp/ 内（event-map 用结构化视图），不泄漏到卡片层。
  *
  * MINIMAL SLICE（对齐 claude-sdk 的最小切片）：能力守卫 + 硬错误，无半实现——
  *   - goal/steer/compact → throw（ACP 无对应协议面；steer 失败 orchestrator 落排队）
  *   - resume 选择卡（listThreads/readHistory）→ throw / 空。resumeThread 本身已
- *     实现：ACP `session/load`（claude-code-acp 宣告 loadSession 能力，参考项目
+ *     实现：ACP `session/load`（claude-pty-acp 宣告 loadSession 能力，参考项目
  *     test-resume.mjs 全链路验证过「杀进程→loadSession→记忆恢复」）。server 不
  *     支持 loadSession 时 connect 抛清晰错误 → resolveThread 落回「新会话 + 话题
  *     回织」的既有降级。
@@ -60,7 +60,7 @@ export interface AcpServerCommand {
 }
 
 /** PATH 上要找的默认 ACP server 命令名。 */
-const ACP_SERVER_BIN = 'claude-code-acp';
+const ACP_SERVER_BIN = 'claude-pty-acp';
 
 /** initialize 是纯协议握手（server 不 spawn agent），慢于此即视为不是 ACP server。 */
 const INITIALIZE_TIMEOUT_MS = 10_000;
@@ -89,7 +89,7 @@ const STATIC_MODELS: ModelInfo[] = [
   {
     id: 'claude-acp-default',
     displayName: 'Claude Code（订阅）',
-    description: '模型由 claude-code-acp 背后的本机 Claude Code 配置决定（ACP 不支持切换模型）',
+    description: '模型由 claude-pty-acp 背后的本机 Claude Code 配置决定（ACP 不支持切换模型）',
     hidden: false,
     isDefault: true,
     supportedEfforts: [],
@@ -156,7 +156,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 
 // ── server 命令解析 ────────────────────────────────────────────────────
 // 开源仓库不能写死任何本机路径。顺序：① per-bot config 的 preferences.acpCommand
-// 覆盖 → ② PATH 上的 claude-code-acp → ③ null（doctor 给装法提示）。
+// 覆盖 → ② PATH 上的 claude-pty-acp → ③ null（doctor 给装法提示）。
 
 /** PATH 命中缓存（成功才缓存；existsSync 复验，卸载/移动自动失效——同 locate.ts）。 */
 let pathBinCache: string | null = null;
@@ -457,7 +457,7 @@ class AcpThread implements AgentThread {
       // already closed
     }
     try {
-      // claude-code-acp 的 SIGTERM handler 会连带杀掉子 claude + 清理 socket。
+      // claude-pty-acp 的 SIGTERM handler 会连带杀掉子 claude + 清理 socket。
       this.child?.kill('SIGTERM');
     } catch {
       // already dead
@@ -496,7 +496,7 @@ export class AcpBackend implements AgentBackend {
       return {
         ok: false,
         version: null,
-        hint: '未检测到 claude-code-acp：npm i -g claude-code-acp，或在配置 preferences.acpCommand 指定启动命令（如 {"command":"node","args":["/path/claude-code-acp/dist/index.js"]}）',
+        hint: '未检测到 claude-pty-acp：npm i -g claude-pty-acp，或在配置 preferences.acpCommand 指定启动命令（如 {"command":"node","args":["/path/claude-pty-acp/dist/index.js"]}）',
       };
     }
     const key = [server.command, ...server.args].join(' ');
@@ -544,7 +544,7 @@ export class AcpBackend implements AgentBackend {
 }
 
 function noServerError(): string {
-  return '未检测到 claude-code-acp（ACP server）。请 npm i -g claude-code-acp，或在配置 preferences.acpCommand 指定启动命令。';
+  return '未检测到 claude-pty-acp（ACP server）。请 npm i -g claude-pty-acp，或在配置 preferences.acpCommand 指定启动命令。';
 }
 
 /** 轻探活：spawn server → ACP initialize 握手 → 读 agentInfo 版本 → 杀掉。

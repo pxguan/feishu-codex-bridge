@@ -90,7 +90,7 @@ export type AcpUpdateLike =
 /** ACP PromptResponse.stopReason（开放 string：未来新增值按 done 兜底）。 */
 export type AcpStopReason = string;
 
-/** PromptResponse 可选携带的 token 用量（unstable，claude-code-acp 不发）。 */
+/** PromptResponse 可选携带的 token 用量（unstable，claude-pty-acp 不发）。 */
 export interface AcpUsageLike {
   inputTokens?: number;
   outputTokens?: number;

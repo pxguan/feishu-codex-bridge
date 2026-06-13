@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// claude-acp 后端真机探针：spawn 一个真实 ACP server（默认 claude-code-acp），
+// claude-acp 后端真机探针：spawn 一个真实 ACP server（默认 claude-pty-acp），
 // 用与 src/agent/acp/backend.ts 完全相同的 client 姿态（fs/terminal 全 false、
 // 权限自动 allow）走完 initialize → session/new → session/prompt → stopReason
 // 一整轮流式。手动运行，不进 vitest（vitest 只收 test/**/*.test.ts）；mock 全链路
@@ -8,8 +8,8 @@
 // ⚠️ 真跑会向 ACP server 背后的 Claude 发一条最小消息（花订阅用量），所以默认
 // 跳过 —— 必须显式开环境变量：
 //
-//   ACP_SMOKE=1 node test/probe-acp.mjs                         # PATH 上的 claude-code-acp
-//   ACP_SMOKE=1 node test/probe-acp.mjs node /path/claude-code-acp/dist/index.js
+//   ACP_SMOKE=1 node test/probe-acp.mjs                         # PATH 上的 claude-pty-acp
+//   ACP_SMOKE=1 node test/probe-acp.mjs node /path/claude-pty-acp/dist/index.js
 //   ACP_SMOKE=1 ACP_SMOKE_CMD='node /path/dist/index.js' node test/probe-acp.mjs
 //   ACP_SMOKE_CWD=/path/to/workdir  # 可选，默认 os.tmpdir()
 
@@ -25,7 +25,7 @@ if (process.env.ACP_SMOKE !== '1') {
 
 const argvCmd = process.argv.slice(2);
 const envCmd = (process.env.ACP_SMOKE_CMD ?? '').split(/\s+/).filter(Boolean);
-const [cmd, ...args] = argvCmd.length ? argvCmd : envCmd.length ? envCmd : ['claude-code-acp'];
+const [cmd, ...args] = argvCmd.length ? argvCmd : envCmd.length ? envCmd : ['claude-pty-acp'];
 const CWD = process.env.ACP_SMOKE_CWD || tmpdir();
 const PROMPT = 'reply with exactly: pong';
 

@@ -45,9 +45,9 @@ const { CATALOG, doctorResults } = vi.hoisted(() => {
       access: 'acp',
       dep: {
         kind: 'npm-external',
-        pkg: 'claude-code-acp',
+        pkg: 'claude-pty-acp',
         detectHint: '需手动装适配器',
-        installCmd: 'npm i -g claude-code-acp',
+        installCmd: 'npm i -g claude-pty-acp',
       },
       supportedModes: ['full'],
       blurb: '走订阅计费',
@@ -130,7 +130,7 @@ describe('installBackend · installer 委托 + 守门', () => {
     const r = await svc.installBackend('claude-acp');
     expect(r.ok).toBe(false);
     expect(r.tail).toContain('不支持一键下载');
-    expect(r.tail).toContain('npm i -g claude-code-acp');
+    expect(r.tail).toContain('npm i -g claude-pty-acp');
     expect(installer).not.toHaveBeenCalled();
   });
 

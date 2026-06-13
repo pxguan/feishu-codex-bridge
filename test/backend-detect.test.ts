@@ -97,7 +97,7 @@ describe('智能默认 effectiveDefaultBackend（detect 推导）', () => {
   it('无 codex、SDK 未装、ACP 适配器在 → claude-acp', async () => {
     detectState.codexBin = null;
     loaderState.sdkInstalled = false;
-    detectState.acpCmd = { command: '/opt/bin/claude-code-acp', args: [] };
+    detectState.acpCmd = { command: '/opt/bin/claude-pty-acp', args: [] };
     expect(await effectiveDefaultBackend({ force: true })).toBe('claude-acp');
   });
 
