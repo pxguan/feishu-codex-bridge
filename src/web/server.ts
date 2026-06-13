@@ -100,10 +100,16 @@ export function createWebServer(opts: WebServerOptions): WebServer {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     const pathName = url.pathname;
 
-    // ── token 鉴权（Bearer / cookie / ?token= 首跳换 cookie）──────────────
+    // ── token 鉴权（Bearer / ?token= / cookie 任一匹配即放行）──────────────
+    // 关键：检查全部三个来源，任一匹配当前 token 就通过——不能用 `??` 只认第一个
+    // 非空来源，否则「带正确 ?token= 但残留了旧 daemon 的过期 cookie」会被旧 cookie
+    // 挡死 401（daemon 重启换 token 后浏览器旧窗口的常见症状）。?token= 是用户显式
+    // 带的新凭据，必须能盖过过期 cookie。
     const queryToken = url.searchParams.get('token');
-    const presented = bearerToken(req) ?? cookieToken(req) ?? queryToken;
-    if (presented === null || !safeEqual(presented, token)) {
+    const candidates = [bearerToken(req), queryToken, cookieToken(req)].filter(
+      (t): t is string => t !== null,
+    );
+    if (!candidates.some((t) => safeEqual(t, token))) {
       sendJson(res, 401, { error: 'unauthorized', message: '缺少或错误的 token；请用启动日志里打印的完整 URL 打开' });
       return;
     }

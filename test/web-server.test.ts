@@ -265,6 +265,18 @@ describe('web server · 安全（loopback + token + Host 校验）', () => {
     expect((await authed('/api/state')).status).toBe(200);
   });
 
+  it('正确 ?token= 能盖过过期 cookie（daemon 重启换 token 后旧窗口不被旧 cookie 挡死）', async () => {
+    // 旧 daemon 留下的过期 cookie + URL 上带正确新 token → 必须放行（回归 #cookie-shadow）
+    const res = await get(`/?token=${TOKEN}`, { headers: { Cookie: 'fcb_console_token=stale-old-token' } });
+    expect(res.status).toBe(302); // 走换 cookie 流程而非 401
+    expect(res.headers.get('set-cookie') ?? '').toContain(`fcb_console_token=${TOKEN}`);
+  });
+
+  it('过期 cookie + 无 ?token= → 仍 401（不放水）', async () => {
+    const res = await get('/api/state', { headers: { Cookie: 'fcb_console_token=stale-old-token' } });
+    expect(res.status).toBe(401);
+  });
+
   it('?token= 首跳：页面 302 去掉 URL token 并种 cookie；cookie 可继续鉴权', async () => {
     const first = await get(`/?token=${TOKEN}`);
     expect(first.status).toBe(302);
