@@ -1,6 +1,7 @@
 import { ensureOnboarded, confirmReadyForDaemon } from '../../bot/onboarding';
 import { activeBots, loadBots } from '../../config/bots';
 import { getServiceAdapter, type ServiceStatus } from '../../service/adapter';
+import { readWebConsole, type WebConsoleRecord } from '../../web/discovery';
 
 /**
  * Daemon lifecycle. `start` installs ONE launchd/systemd/login service whose
@@ -69,7 +70,12 @@ export async function runRestart(): Promise<void> {
 }
 
 export async function runStatus(): Promise<void> {
-  printStatus(await getServiceAdapter().status());
+  const status = await getServiceAdapter().status();
+  // service manager（launchd/systemd）只认它自己托管的服务。手动 `run`/前台/nohup
+  // 起的 daemon 它看不见 → 会误报「没在运行」。daemon 内嵌 Web 控制台时写的发现
+  // 文件（带 pid 活性校验）是 daemon 级的「确有进程在跑」信号，补进来消除误导。
+  const live = readWebConsole();
+  printStatus(status, live);
 }
 
 export async function runLogs(follow: boolean): Promise<void> {
@@ -93,17 +99,25 @@ function installedNote(): string {
   }
 }
 
-function printStatus(status: ServiceStatus): void {
+function printStatus(status: ServiceStatus, live?: WebConsoleRecord): void {
+  // service manager 没报 running，但发现文件有活 daemon → 手动/前台运行中。
+  const selfHosted = !status.running && live !== undefined;
   console.log(`service:   ${status.platformName}`);
   console.log(`path:      ${status.servicePath}`);
   console.log(`installed: ${status.installed ? 'yes' : 'no'}`);
-  console.log(`running:   ${status.running ? 'yes' : 'no'}`);
-  console.log(`pid:       ${status.pid ?? '-'}`);
+  console.log(`running:   ${status.running ? 'yes' : selfHosted ? 'yes（手动/前台运行，非服务托管）' : 'no'}`);
+  console.log(`pid:       ${status.pid ?? live?.pid ?? '-'}`);
   console.log(`last exit: ${status.lastExit ?? '-'}`);
   console.log(`stdout:    ${status.stdoutPath}`);
   console.log(`stderr:    ${status.stderrPath}`);
 
-  if (!status.installed) {
+  if (selfHosted) {
+    console.log(
+      `\ndaemon 正在运行（PID ${live.pid}，Web 控制台 http://127.0.0.1:${live.port}），` +
+        '但不是开机自启服务。\n' +
+        '提示：想关机/登出后自动拉起，运行 `feishu-codex-bridge start` 注册为后台服务。',
+    );
+  } else if (!status.installed) {
     console.log('提示：后台服务尚未安装，运行 `feishu-codex-bridge start`。');
   } else if (!status.running) {
     console.log('提示：服务已注册但当前未运行（试试 `restart`）。');
