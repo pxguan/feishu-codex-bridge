@@ -154,3 +154,39 @@ describe('registerBotFromCredentials · 注册落盘', () => {
     expect(paths.appDir).toContain('register-bot-test-');
   });
 });
+
+describe('registerBotFromCredentials · ownerOpenId（扫码人 = owner+admin）', () => {
+  it('传 ownerOpenId → config.preferences.access 落 ownerOpenId + admins 含它', async () => {
+    const r = await registerBotFromCredentials(
+      { appId: 'cli_owner123456', appSecret: 'sec', tenant: 'feishu', ownerOpenId: 'ou_scanner' },
+      okValidate,
+    );
+    expect(r.ok).toBe(true);
+    const cfg = JSON.parse(readFileSync(botPaths('cli_owner123456').configFile, 'utf8'));
+    expect(cfg.preferences.access.ownerOpenId).toBe('ou_scanner');
+    expect(cfg.preferences.access.admins).toContain('ou_scanner');
+  });
+
+  it('不传 ownerOpenId → 不强行写空管理员（preferences.access 缺省 = 所有人可建项目）', async () => {
+    await registerBotFromCredentials(
+      { appId: 'cli_noowner1234', appSecret: 'sec', tenant: 'feishu' },
+      okValidate,
+    );
+    const cfg = JSON.parse(readFileSync(botPaths('cli_noowner1234').configFile, 'utf8'));
+    // 没有 ownerOpenId → 不写 access（或 access 不含 ownerOpenId），不空写管理员名单
+    expect(cfg.preferences?.access?.ownerOpenId).toBeUndefined();
+  });
+
+  it('幂等：同 appId 重扫 owner，admins 去重不重复堆叠', async () => {
+    await registerBotFromCredentials(
+      { appId: 'cli_dupowner99', appSecret: 's1', tenant: 'feishu', ownerOpenId: 'ou_o' },
+      okValidate,
+    );
+    await registerBotFromCredentials(
+      { appId: 'cli_dupowner99', appSecret: 's2', tenant: 'feishu', ownerOpenId: 'ou_o' },
+      okValidate,
+    );
+    const cfg = JSON.parse(readFileSync(botPaths('cli_dupowner99').configFile, 'utf8'));
+    expect(cfg.preferences.access.admins.filter((a: string) => a === 'ou_o')).toHaveLength(1);
+  });
+});

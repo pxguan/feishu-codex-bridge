@@ -8,6 +8,7 @@ import { log } from '../../core/logger';
 import { AdminWriteError } from '../../admin/ops';
 import { createAdminIpcResponder } from '../../admin/ipc';
 import { createAdminService } from '../../admin/service';
+import { installBackendDep } from '../../agent';
 import { spawnDaemonControl } from './daemon-control';
 import { mountWebConsole, type MountedWebConsole } from '../../web/mount';
 
@@ -129,6 +130,8 @@ async function runSingle(botName?: string): Promise<void> {
         // 重启 / 升级走 detached helper：本进程被 service stop 杀掉后由 helper 续命。
         restartDaemon: () => spawnDaemonControl('restart'),
         applyUpdate: () => spawnDaemonControl('update'),
+        // 按需后端安装在 daemon 进程内直跑（owns runtime，装完即能解析加载）。
+        installBackend: installBackendDep,
       }),
     );
     if (webConsole) {

@@ -19,13 +19,17 @@ import { UI_HTML } from './ui';
  *      302 去掉 URL 里的 token，防日志/历史记录泄漏长期凭据）。
  *   3. Host/Origin 校验防 DNS rebinding（只认 127.0.0.1 / localhost / [::1]）。
  *   4. 端点最小化：只读（state / diagnosis / logs / sessions / setup-status /
- *      daemon / update.check / host-doctor）+「DM 卡片已有等价操作」的写入
- *      （backend / permission / no-mention / auto-compact）+ Web 专属（POST
- *      /api/bots 注册；PATCH/DELETE /api/bots/:id 多 bot 管理；POST
- *      /api/daemon/restart 与 /api/update 经 detached helper）。restart/update
- *      只投递固定 action 给内部 helper，绝不暴露「执行任意命令」「读任意文件」。
+ *      daemon / update.check / host-doctor / backends）+「DM 卡片已有等价操作」的
+ *      写入（backend / permission / no-mention / auto-compact）+ Web 专属（POST
+ *      /api/bots 手填注册；GET /api/bots/register-qr/stream 扫码注册 SSE + DELETE
+ *      取消；POST /api/backends/:id/install 按需安装 SSE；PATCH/DELETE /api/bots/:id
+ *      多 bot 管理；POST /api/daemon/restart 与 /api/update 经 detached helper）。
+ *      restart/update/install 只投递固定 action / catalog 内置包名给内部执行器，
+ *      绝不暴露「执行任意命令」「装任意 npm 包」「读任意文件」。
  *   5. 日志流只透传现有文件日志行（已是尾 6 位脱敏风格），token 绝不进日志；
- *      POST /api/bots 的 appSecret 仅一次性经 body→keystore，绝不回显/不进日志。
+ *      POST /api/bots 的 appSecret、扫码会话的 client_secret 仅一次性经
+ *      body/内存→keystore，绝不回显/不进日志（扫码 SSE 的 done 事件白名单字段，
+ *      永不含 secret）。
  *
  * 进程形态（第二棒已接）：daemon（run/supervisor 进程）经 web/mount.ts 内嵌同一
  * createWebServer——service 注入 executeWrite（进程内 Orchestrator.adminExecute /
@@ -62,6 +66,14 @@ export function createWebServer(opts: WebServerOptions): WebServer {
   const html = opts.html ?? UI_HTML;
   const logDir = opts.logDir ?? join(paths.appDir, 'logs');
   const sseCleanups = new Set<() => void>();
+
+  /**
+   * 单例扫码会话槽（design §1.4）：同时只允许一个扫码会话——registerApp 每会话都吃
+   * 飞书 device_code 配额 + 持续轮询，多开纯浪费；控制台是单机 loopback 单用户工具，
+   * 不存在并发注册。新会话**抢占式替换**旧会话（先 abort 旧、再开新），用户刷新页面
+   * 不会被僵尸会话卡住。SSE 断开（req.on('close')）→ abort 兜底，杜绝僵尸轮询打飞书。
+   */
+  let qrSession: { id: string; abort: AbortController } | null = null;
 
   const server = createServer((req, res) => {
     void handle(req, res).catch((err) => {
@@ -178,6 +190,26 @@ export function createWebServer(opts: WebServerOptions): WebServer {
       return;
     }
 
+    // GET /api/bots/register-qr/stream —— 扫码注册 SSE（启动 registerApp 会话，推
+    // qr → status* → done/error 全程）。EventSource 只能 GET，鉴权靠 cookie。
+    // 必须排在 /^\/api\/bots\/([^/]+)$/ 的 botMatch 之前（否则 register-qr 被当 appId）。
+    if (req.method === 'GET' && pathName === '/api/bots/register-qr/stream') {
+      handleRegisterQrStream(req, res);
+      return;
+    }
+
+    // DELETE /api/bots/register-qr —— 主动取消当前扫码会话（abort signal）。
+    if (req.method === 'DELETE' && pathName === '/api/bots/register-qr') {
+      const sessionId = url.searchParams.get('sessionId');
+      // 带 sessionId 时仅当匹配当前会话才 abort（抢占式替换下防旧页面误杀新会话）。
+      if (sessionId === null || (qrSession && qrSession.id === sessionId)) {
+        qrSession?.abort.abort();
+      }
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
     // GET /api/bots/:appId/setup-status —— 初始化 checklist 聚合（向导页 5s 轮询）。
     const setupMatch = /^\/api\/bots\/([^/]+)\/setup-status$/.exec(pathName);
     if (req.method === 'GET' && setupMatch) {
@@ -232,6 +264,23 @@ export function createWebServer(opts: WebServerOptions): WebServer {
 
     if (req.method === 'GET' && pathName === '/api/logs/stream') {
       handleLogStream(req, res);
+      return;
+    }
+
+    // ── Web 专属：后端 catalog 预览 + 按需安装（backend-catalog-ondemand.md）──────
+    // GET /api/backends —— catalog + 每条依赖态（installed/not-installed/external-missing）
+    // + installable + approxSizeMB + version + 当前全局默认。读路径，不需 daemon。
+    if (req.method === 'GET' && pathName === '/api/backends') {
+      sendJson(res, 200, await opts.service.listBackendCatalog());
+      return;
+    }
+
+    // POST /api/backends/:id/install —— 按需安装 SSE：推 {type:'log'} 进度块 →
+    // {type:'done'}/{type:'error'}。仅 installable 的可装；external 返回指引不真装；
+    // 只读预览（无 installer 注入）→ {type:'error',code:'not_wired_yet'}。
+    const installMatch = /^\/api\/backends\/([^/]+)\/install$/.exec(pathName);
+    if (req.method === 'POST' && installMatch) {
+      handleBackendInstall(req, res, decodeURIComponent(installMatch[1]!));
       return;
     }
 
@@ -356,6 +405,128 @@ export function createWebServer(opts: WebServerOptions): WebServer {
     // 机器可分支的 code → HTTP 状态：格式错 400、密钥无效 409、写盘失败 500。
     const status = result.code === 'invalid_input' ? 400 : result.code === 'credential_rejected' ? 409 : 500;
     sendJson(res, status, { error: result.code, message: result.reason });
+  }
+
+  /**
+   * GET /api/bots/register-qr/stream —— 扫码注册 SSE。启动 registerApp 会话，按
+   * `event: qr|status|done|error` 推送全程；单例 qrSession 抢占式替换；SSE 断开
+   * → abort 兜底（防僵尸轮询）。secret 绝不经前端：service 内 resolve 后直接进
+   * keystore，done payload 只回白名单字段（appId/name/tenant/adminOpenId/botName/missingScopes）。
+   */
+  function handleRegisterQrStream(req: IncomingMessage, res: ServerResponse): void {
+    // 抢占式替换：先 abort 旧会话（旧 EventSource 收到 abort 静默关闭），再开新会话。
+    qrSession?.abort.abort();
+    const abort = new AbortController();
+    const session = { id: randomUUID(), abort };
+    qrSession = session;
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write(': connected\n\n');
+    const heartbeat = setInterval(() => res.write(': ka\n\n'), 15_000);
+
+    let ended = false;
+    const sendEvent = (event: string, data: unknown): void => {
+      if (ended) return;
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+    const finish = (): void => {
+      if (ended) return;
+      ended = true;
+      clearInterval(heartbeat);
+      sseCleanups.delete(cleanup);
+      // 只在仍是本会话时清槽（抢占替换后旧会话结束不能误清新会话）。
+      if (qrSession === session) qrSession = null;
+      res.end();
+    };
+    // cleanup 用于连接断开 / 服务器关闭：abort 后台轮询 + 收尾。
+    const cleanup = (): void => {
+      abort.abort();
+      finish();
+    };
+    sseCleanups.add(cleanup);
+    req.on('close', cleanup);
+
+    void opts.service
+      .registerBotByQr({
+        signal: abort.signal,
+        onQr: (info) => sendEvent('qr', { qrUrl: info.url, expireIn: info.expireIn, sessionId: session.id }),
+        onStatus: (info) => sendEvent('status', { status: info.status, interval: info.interval }),
+      })
+      .then((result) => {
+        if (result.ok) {
+          // done payload 白名单字段——绝不含 client_secret（已进 keystore）。
+          sendEvent('done', {
+            appId: result.appId,
+            name: result.name,
+            tenant: result.tenant,
+            adminOpenId: result.adminOpenId,
+            botName: result.botName,
+            missingScopes: result.missingScopes,
+          });
+        } else if (result.code === 'abort') {
+          // 用户主动取消 / 连接断开：静默关闭，不渲染错误。
+        } else {
+          sendEvent('error', { code: result.code, message: result.reason });
+        }
+      })
+      .catch((err) => {
+        sendEvent('error', { code: 'unknown', message: err instanceof Error ? err.message : String(err) });
+      })
+      .finally(finish);
+  }
+
+  /**
+   * POST /api/backends/:id/install —— 按需安装 SSE。流式推 {type:'log'} npm 进度块
+   * → {type:'done'}（ok）/{type:'error'}（失败/未装成/external/501）。AbortSignal
+   * 在 SSE 断开时 kill npm 子进程 + 回滚半装（service → installer）。
+   */
+  function handleBackendInstall(req: IncomingMessage, res: ServerResponse, id: string): void {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write(': connected\n\n');
+    const heartbeat = setInterval(() => res.write(': ka\n\n'), 15_000);
+
+    const abort = new AbortController();
+    let ended = false;
+    const sendData = (data: unknown): void => {
+      if (ended) return;
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+    const finish = (): void => {
+      if (ended) return;
+      ended = true;
+      clearInterval(heartbeat);
+      sseCleanups.delete(cleanup);
+      res.end();
+    };
+    const cleanup = (): void => {
+      abort.abort(); // 连接断开 → kill npm 子进程 + 回滚半装
+      finish();
+    };
+    sseCleanups.add(cleanup);
+    req.on('close', cleanup);
+
+    void opts.service
+      .installBackend(id, (chunk) => sendData({ type: 'log', chunk }), abort.signal)
+      .then((result) => {
+        if (result.ok) sendData({ type: 'done' });
+        else sendData({ type: 'error', code: result.aborted ? 'aborted' : 'install_failed', message: result.tail });
+      })
+      .catch((err) => {
+        // NotWiredYetError（只读预览无 installer）→ not_wired_yet；其它 → unknown。
+        const code = err instanceof NotWiredYetError ? 'not_wired_yet' : 'unknown';
+        sendData({ type: 'error', code, message: err instanceof Error ? err.message : String(err) });
+      })
+      .finally(finish);
   }
 
   /** GET /api/diagnosis —— 事件订阅三态 + 各后端环境体检（按需，较慢）。 */

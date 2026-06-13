@@ -109,6 +109,61 @@ function stubService(): AdminService {
         eventConfigUrl: 'https://open.feishu.cn/app/' + botId + '/event',
       };
     },
+    async registerBotByQr(o) {
+      // 默认 stub：吐一帧 qr + 一帧 status，再成功。被取消（abort）则返回 abort。
+      o.onQr({ url: 'https://accounts.feishu.cn/scan?code=abc', expireIn: 600 });
+      o.onStatus?.({ status: 'polling' });
+      if (o.signal.aborted) return { ok: false as const, code: 'abort' as const, reason: '已取消扫码。' };
+      return {
+        ok: true as const,
+        appId: 'cli_scanned9999',
+        name: 'scanned',
+        tenant: 'feishu' as const,
+        botName: '扫码机器人',
+        adminOpenId: 'ou_scanner',
+        missingScopes: [],
+      };
+    },
+    async listBackendCatalog() {
+      return {
+        defaultBackend: 'codex-appserver',
+        entries: [
+          {
+            id: 'codex-appserver',
+            agentFamily: 'codex',
+            displayName: 'Codex',
+            access: 'app-server',
+            depKind: 'external-cli',
+            depState: 'installed' as const,
+            installable: false,
+            version: '1.0.0',
+            isDefault: true,
+          },
+          {
+            id: 'claude-sdk',
+            agentFamily: 'claude',
+            displayName: 'Claude（Agent SDK）',
+            access: 'sdk',
+            depKind: 'npm-ondemand',
+            depState: 'not-installed' as const,
+            installable: true,
+            approxSizeMB: 224,
+            version: null,
+            hint: '未安装，点下载',
+            isDefault: false,
+            supportedModes: ['full'] as const,
+          },
+        ],
+      };
+    },
+    async installBackend(id, onProgress, signal) {
+      if (id === 'claude-acp') {
+        return { ok: false as const, code: null, aborted: false, tail: '「Claude（订阅·ACP）」不支持一键下载。手动安装：…' };
+      }
+      onProgress?.('added 1 package\n');
+      if (signal?.aborted) return { ok: false as const, code: null, aborted: true, tail: '安装已取消' };
+      return { ok: true as const, code: 0, aborted: false, tail: 'added 1 package' };
+    },
     async getDaemonStatus() {
       return {
         platformName: 'launchd (macOS)',
@@ -479,6 +534,170 @@ describe('web server · daemon 生命周期 / 升级 / 宿主机体检', () => {
     expect(body.appDir).toContain('.feishu-codex-bridge');
     expect(typeof body.logBytes).toBe('number');
     expect(body.backends[0].id).toBe('codex-appserver');
+  });
+});
+
+// SSE 读取小工具：读到出现 needle 为止，返回累积的全部文本（超时即抛）。
+async function readSseUntil(res: Response, needle: string, timeoutMs: number): Promise<string> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  const deadline = Date.now() + timeoutMs;
+  while (!buf.includes(needle)) {
+    if (Date.now() > deadline) throw new Error(`SSE 超时未等到 ${needle}；已收到：${buf}`);
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+  }
+  return buf;
+}
+
+describe('web server · 扫码注册 SSE', () => {
+  it('GET /api/bots/register-qr/stream：推 qr → status → done（done 不含 secret）', async () => {
+    const res = await authed('/api/bots/register-qr/stream');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/event-stream');
+    const buf = await readSseUntil(res, 'event: done', 4000);
+    // qr 帧：含 qrUrl + expireIn + sessionId
+    expect(buf).toContain('event: qr');
+    expect(buf).toContain('"qrUrl":"https://accounts.feishu.cn/scan?code=abc"');
+    expect(buf).toContain('"expireIn":600');
+    expect(buf).toContain('"sessionId":"');
+    // status 帧
+    expect(buf).toContain('event: status');
+    expect(buf).toContain('"status":"polling"');
+    // done 帧：白名单字段，绝不含 secret
+    expect(buf).toContain('event: done');
+    expect(buf).toContain('"appId":"cli_scanned9999"');
+    expect(buf).toContain('"adminOpenId":"ou_scanner"');
+    expect(buf).not.toContain('secret');
+    expect(buf).not.toContain('client_secret');
+  }, 8000);
+
+  it('扫码失败 → event: error + code/message（expired_token）', async () => {
+    const svc = stubService();
+    svc.registerBotByQr = async (o) => {
+      o.onQr({ url: 'https://accounts.feishu.cn/x', expireIn: 600 });
+      return { ok: false as const, code: 'expired_token' as const, reason: '二维码已过期，请重新生成。' };
+    };
+    const errWeb = createWebServer({ service: svc, token: TOKEN, logDir });
+    const { port } = await errWeb.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/bots/register-qr/stream`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      const buf = await readSseUntil(res, 'event: error', 4000);
+      expect(buf).toContain('event: error');
+      expect(buf).toContain('"code":"expired_token"');
+      expect(buf).toContain('二维码已过期');
+    } finally {
+      await errWeb.close();
+    }
+  }, 8000);
+
+  it('abort（DELETE 取消）→ registerBotByQr 收到 signal.aborted，不推 error', async () => {
+    // stub 的 registerBotByQr 同步检查 signal.aborted；这里用一个会等 abort 的 stub。
+    const svc = stubService();
+    svc.registerBotByQr = (o) =>
+      new Promise((resolve) => {
+        o.onQr({ url: 'https://accounts.feishu.cn/x', expireIn: 600 });
+        o.signal.addEventListener('abort', () => resolve({ ok: false as const, code: 'abort' as const, reason: '已取消扫码。' }), {
+          once: true,
+        });
+      });
+    const abWeb = createWebServer({ service: svc, token: TOKEN, logDir });
+    const { port } = await abWeb.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/bots/register-qr/stream`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      // 单 reader 全程读（getReader 会锁流，不能再开第二个）。
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      const pump = async (needle: string): Promise<void> => {
+        while (!buf.includes(needle)) {
+          const { value, done } = await reader.read();
+          if (value) buf += decoder.decode(value, { stream: true });
+          if (done) return;
+        }
+      };
+      await pump('event: qr');
+      // 主动取消：DELETE（不带 sessionId 也应取消当前会话）
+      const del = await fetch(`http://127.0.0.1:${port}/api/bots/register-qr`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      expect(del.status).toBe(204);
+      // abort 路径静默关闭：读到流结束，buf 里没有 error 帧
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (value) buf += decoder.decode(value, { stream: true });
+        if (done) break;
+      }
+      expect(buf).not.toContain('event: error');
+    } finally {
+      await abWeb.close();
+    }
+  }, 8000);
+
+  it('扫码 SSE 同样要鉴权：无 token → 401', async () => {
+    const res = await get('/api/bots/register-qr/stream');
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('web server · 后端 catalog + 按需安装', () => {
+  it('GET /api/backends：catalog + depState/installable/approxSize/version + 默认', async () => {
+    const body = await jsonOf(await authed('/api/backends'));
+    expect(body.defaultBackend).toBe('codex-appserver');
+    expect(body.entries).toHaveLength(2);
+    const codex = body.entries.find((e: { id: string }) => e.id === 'codex-appserver');
+    expect(codex).toMatchObject({ depState: 'installed', installable: false, isDefault: true });
+    const sdk = body.entries.find((e: { id: string }) => e.id === 'claude-sdk');
+    expect(sdk).toMatchObject({ depState: 'not-installed', installable: true, approxSizeMB: 224, version: null });
+  });
+
+  it('POST /api/backends/claude-sdk/install：SSE 推 log → done', async () => {
+    const res = await authed('/api/backends/claude-sdk/install', { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/event-stream');
+    const buf = await readSseUntil(res, '"type":"done"', 4000);
+    expect(buf).toContain('"type":"log"');
+    expect(buf).toContain('added 1 package');
+    expect(buf).toContain('"type":"done"');
+  }, 8000);
+
+  it('POST /api/backends/claude-acp/install：external 不真装 → error', async () => {
+    const res = await authed('/api/backends/claude-acp/install', { method: 'POST' });
+    const buf = await readSseUntil(res, '"type":"error"', 4000);
+    expect(buf).toContain('"type":"error"');
+    expect(buf).toContain('不支持一键下载');
+  }, 8000);
+
+  it('只读预览（installBackend 抛 NotWiredYetError）→ error code=not_wired_yet', async () => {
+    const svc = stubService();
+    svc.installBackend = async () => {
+      throw new NotWiredYetError('⬇️ 下载「Claude（Agent SDK）」');
+    };
+    const previewWeb = createWebServer({ service: svc, token: TOKEN, logDir });
+    const { port } = await previewWeb.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/backends/claude-sdk/install`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      const buf = await readSseUntil(res, '"type":"error"', 4000);
+      expect(buf).toContain('"code":"not_wired_yet"');
+      expect(buf).toContain('daemon');
+    } finally {
+      await previewWeb.close();
+    }
+  }, 8000);
+
+  it('后端 API 同样要鉴权：无 token → 401', async () => {
+    expect((await get('/api/backends')).status).toBe(401);
+    expect((await get('/api/backends/claude-sdk/install', { method: 'POST' })).status).toBe(401);
   });
 });
 

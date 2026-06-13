@@ -1,7 +1,7 @@
 import { setSecret } from '../config/keystore';
 import { buildEncryptedAccountConfig, loadConfig, saveConfig } from '../config/store';
 import { botPaths } from '../config/paths';
-import { isComplete, secretKeyForApp, type TenantBrand } from '../config/schema';
+import { isComplete, secretKeyForApp, type AppPreferences, type TenantBrand } from '../config/schema';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import { addBot, loadBots, uniqueName } from '../config/bots';
 import { log } from '../core/logger';
@@ -32,6 +32,13 @@ export interface RegisterBotInput {
   tenant: TenantBrand;
   /** 期望的短句柄（默认用探活拿到的 botName / appId 派生，registry 内唯一化）。 */
   desiredName?: string;
+  /**
+   * 扫码注册者的 open_id：有则落成 owner+admin（与扫码向导 wizard.ts 对齐——首个
+   * 创建者自动成为唯一管理员）。缺失时**保留既有 preferences.access 不动**，等于
+   * 「管理员名单为空=所有人都能私聊建项目」（design §5 的兜底与告警归 UI/CLI）。
+   * 仅手填路径（Web POST /api/bots、CLI）不传它；扫码路径（registerBotByQr）传它。
+   */
+  ownerOpenId?: string;
 }
 
 export interface RegisterBotResult {
@@ -98,7 +105,10 @@ export async function registerBotFromCredentials(
     // 显式路径读旧 config（同 appId 重填时保留既有 preferences，如管理员名单），
     // 不存在 / 不完整就建全新的——绝不 useBotDir 切全局目录。
     const existing = await loadConfig(files.configFile);
-    const preferences = isComplete(existing) ? existing.preferences : undefined;
+    const basePrefs = isComplete(existing) ? existing.preferences : undefined;
+    // 扫码人 open_id → 落成 owner+admin（与 wizard 对齐）；手填路径无 ownerOpenId
+    // 则原样保留既有 preferences（不强行写空管理员）。
+    const preferences = withOwnerAdmin(basePrefs, input.ownerOpenId);
     const cfg = await buildEncryptedAccountConfig(appId, tenant, preferences);
     await saveConfig(cfg, files.configFile);
 
@@ -116,4 +126,20 @@ export async function registerBotFromCredentials(
       reason: `保存失败：${err instanceof Error ? err.message : String(err)}`,
     };
   }
+}
+
+/**
+ * 把扫码人 open_id 落成 owner+admin，merge 进既有 preferences（保留 base 的其它字段
+ * 与 access 字段，幂等：admins 去重）。`ownerOpenId` 缺失 → 原样返回 base（手填路径
+ * 不动管理员名单）。owner 恒入 admins（与 schema 注释「ownerOpenId 恒为 admin」一致）。
+ */
+function withOwnerAdmin(base: AppPreferences | undefined, ownerOpenId?: string): AppPreferences | undefined {
+  if (!ownerOpenId) return base;
+  const access = base?.access;
+  const admins = new Set(access?.admins ?? []);
+  admins.add(ownerOpenId);
+  return {
+    ...base,
+    access: { ...access, ownerOpenId, admins: [...admins] },
+  };
 }

@@ -21,8 +21,27 @@ import {
   type RegisterBotResult,
   type RegisterBotFailure,
 } from '../bot/register-bot';
-import { backendIds, createBackend, DEFAULT_BACKEND_ID } from '../agent';
-import type { PermissionMode } from '../agent/types';
+import {
+  startRegistration,
+  registrationErrorCode,
+  registrationErrorMessage,
+  type RegistrationQr,
+  type RegistrationStatus,
+} from '../bot/wizard';
+import {
+  backendIds,
+  createBackend,
+  DEFAULT_BACKEND_ID,
+  BACKEND_CATALOG,
+  catalogById,
+  isInstallable,
+  effectiveDefaultBackend,
+  installBackendDep,
+  type BackendCatalogEntry,
+  type InstallResult,
+  type InstallProgress,
+} from '../agent';
+import type { BackendDepState, BackendProbe, PermissionMode } from '../agent/types';
 import { readRecentLogs } from '../core/logger';
 import { getServiceAdapter } from '../service/adapter';
 import { checkUpdate as checkUpdateImpl, type UpdateCheck } from '../service/update';
@@ -108,6 +127,39 @@ export interface AdminService {
    * 生效」。绝不 throw——每段独立降级。
    */
   getSetupStatus(botId: string): Promise<AdminSetupStatus>;
+  /**
+   * 扫码注册一个机器人（day-0 主路径）：编排 SDK registerApp 扫码会话 → 拿明文密钥
+   * → 复用 registerBotFromCredentials 写盘（keystore + config + bots.json），扫码人
+   * open_id 自动落成 owner+admin。绝不 throw——失败落 {@link QrRegisterFailure}
+   * （HTTP/SSE 层据 code 映射）。callbacks 把 SDK 的 onQr/onStatus 透传给上层做 SSE，
+   * signal 取消（abort → SDK reject code='abort'，本方法返回 {ok:false,code:'abort'}）。
+   * 与 registerBot（手填）的差异：扫码**创建新应用**并拿密钥，手填是接入既有应用。
+   */
+  registerBotByQr(opts: {
+    signal: AbortSignal;
+    onQr: (info: RegistrationQr) => void;
+    onStatus?: (info: RegistrationStatus) => void;
+  }): Promise<QrRegisterResult | QrRegisterFailure>;
+
+  // ── Web 专属：后端 catalog 预览 + 按需安装（backend-catalog-ondemand.md）──────
+  /**
+   * 列出后端 catalog，每条附依赖状态（installed/not-installed/external-missing）+
+   * installable + approxSizeMB + version + 是否当前全局默认。读路径，绝不抛错，
+   * 与 daemon/预览进程形态无关（只探本机装配，不写）。Web GET /api/backends 用它。
+   */
+  listBackendCatalog(): Promise<AdminBackendCatalog>;
+  /**
+   * 按需安装一个后端依赖（npm-ondemand，如 claude-agent-sdk）到用户私装目录。
+   * 仅 installable 的后端可装；external（claude-acp / codex）调用即 {ok:false} 带手动装法。
+   * onProgress 透传 npm 输出（SSE {type:'log'}），signal 取消（kill 子进程 + 回滚半装）。
+   * **install 是 daemon 注入态能力**（owns runtime）：只读预览进程无 installer 注入 →
+   * 抛 {@link NotWiredYetError}（HTTP 501），引导先起 daemon。绝不 throw 其它错。
+   */
+  installBackend(
+    id: string,
+    onProgress?: InstallProgress,
+    signal?: AbortSignal,
+  ): Promise<InstallResult>;
 
   // ── Web 专属：daemon 生命周期 / 升级 / 多 bot 管理 / 宿主机体检 ──────────────
   /** daemon 生命周期快照（service 注册状态 + 运行 pid/版本/启动时长）。绝不抛错。 */
@@ -205,7 +257,7 @@ export interface AdminProject {
   /** effective 普通用户权限档 */
   guestMode: PermissionMode;
   network: boolean;
-  /** effective 后端 id（backend ?? DEFAULT_BACKEND_ID） */
+  /** effective 后端 id（显式 backend ?? 智能默认 effectiveDefaultBackend，与运行时路由同源） */
   backend: string;
   allowedUsersCount: number;
   /** 🧵 话题数（该群名下的会话记录数） */
@@ -254,6 +306,61 @@ export interface AdminSetupStatus {
   eventConfigUrl: string;
 }
 
+/** 扫码注册成功：与手填 registerBot 同构的基本信息 + adminOpenId（扫码人 = owner）。
+ * 绝不含 client_secret（已进 keystore）。Web SSE 的 done 事件 payload 据此组装。 */
+export interface QrRegisterResult {
+  ok: true;
+  appId: string;
+  name: string;
+  tenant: 'feishu' | 'lark';
+  botName?: string;
+  /** 扫码人 open_id（已落成 owner+admin）；SDK 偶尔不返回 → undefined。 */
+  adminOpenId?: string;
+  /** 必需 scope 中尚未授权的（undefined = 没查成；空 = 已齐全）。 */
+  missingScopes?: string[];
+}
+
+/** 扫码注册失败：code 来自 SDK reject（abort/expired_token/access_denied）或写盘
+ * （persist_failed）/ 校验（credential_rejected）。SSE 据 code 映射前端文案与「重试」。 */
+export interface QrRegisterFailure {
+  ok: false;
+  code: 'abort' | 'expired_token' | 'access_denied' | 'persist_failed' | 'credential_rejected' | 'unknown';
+  reason: string;
+}
+
+/** GET /api/backends 的聚合：catalog 全条目（含安装态）+ 当前全局默认后端 id。 */
+export interface AdminBackendCatalog {
+  /** 当前有效全局默认后端 id（项目未显式选择时路由到它）。 */
+  defaultBackend: string;
+  entries: AdminBackendCatalogEntry[];
+}
+
+/** 一条后端 catalog 的管理面投影：catalog 元数据 + 本机探测出的安装/可用态。 */
+export interface AdminBackendCatalogEntry {
+  id: string;
+  agentFamily: string;
+  displayName: string;
+  /** 接入方式短名（app-server / sdk / acp）。 */
+  access: string;
+  blurb?: string;
+  /** 依赖类型（external-cli / npm-ondemand / npm-external）。 */
+  depKind: string;
+  /** 安装态三态：installed / not-installed（可一键装）/ external-missing（手动装）。 */
+  depState: BackendDepState;
+  /** 可一键按需下载（npm-ondemand 且当前未装 → true）。 */
+  installable: boolean;
+  /** 体积提示 MB（下载确认用）。 */
+  approxSizeMB?: number;
+  /** 探测到的版本（external-cli 的 codex --version 等；未装/无版本 → null）。 */
+  version: string | null;
+  /** !installed 时的人读提示（external 给手动装法 / npm-ondemand 给「点下载」）。 */
+  hint?: string;
+  /** 是否当前全局默认。 */
+  isDefault: boolean;
+  /** 本后端支持的权限档（undefined ⇒ 全档）。 */
+  supportedModes?: readonly PermissionMode[];
+}
+
 /** daemon/预览两种进程形态的差异全部收进这几个注入点；读路径完全同源。 */
 export interface AdminServiceDeps {
   /** 写执行器：botId + op → 完成或抛 AdminWriteError（校验拒绝）。
@@ -271,6 +378,17 @@ export interface AdminServiceDeps {
   restartDaemon?: () => void;
   /** 升级（npm i -g + 重启）的执行器（detached helper）。缺省同上抛 NotWiredYetError。 */
   applyUpdate?: () => void;
+  /**
+   * 按需后端依赖的安装执行器（npm-ondemand → 用户私装目录）。daemon 进程注入
+   * {@link installBackendDep}（它 owns runtime，装完即能解析加载）；只读预览进程
+   * 不注入 → installBackend 抛 {@link NotWiredYetError}（HTTP 501）。测试可注入 mock
+   * 推进度 / 模拟失败，不真跑 npm。
+   */
+  installBackend?: (
+    pkg: string,
+    onProgress?: InstallProgress,
+    signal?: AbortSignal,
+  ) => Promise<InstallResult>;
 }
 
 /**
@@ -283,6 +401,9 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
     const files = botPaths(botId);
     const projects = await listProjectsIn(files.projectsFile);
     const sessions = await listSessionsIn(files.sessionsFile);
+    // 未显式选后端的项目，effective backend = 智能默认（与运行时 backendForProject
+    // 同源），UI 展示「会实际路由到哪」而非硬编码 codex；探测失败回退常量默认。
+    const defaultBackend = await effectiveDefaultBackend().catch(() => DEFAULT_BACKEND_ID);
     const countByChat = new Map<string, number>();
     for (const s of sessions) {
       countByChat.set(s.chatId, (countByChat.get(s.chatId) ?? 0) + 1);
@@ -300,7 +421,7 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       mode: effectiveMode(p),
       guestMode: effectiveGuestMode(p),
       network: p.network ?? false,
-      backend: p.backend ?? DEFAULT_BACKEND_ID,
+      backend: p.backend ?? defaultBackend,
       allowedUsersCount: p.allowedUsers?.length ?? 0,
       sessionCount: p.chatId ? (countByChat.get(p.chatId) ?? 0) : 0,
       createdAt: p.createdAt,
@@ -511,6 +632,71 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       };
     },
 
+    async registerBotByQr(opts): Promise<QrRegisterResult | QrRegisterFailure> {
+      // ① 扫码会话：透传 onQr/onStatus 给上层做 SSE；signal 取消 → SDK reject code='abort'。
+      let creds;
+      try {
+        creds = await startRegistration({ signal: opts.signal, onQr: opts.onQr, onStatus: opts.onStatus });
+      } catch (err) {
+        const code = registrationErrorCode(err);
+        return mapQrFailure(code, registrationErrorMessage(err));
+      }
+      // ② 入库：复用手填路径的「探活→keystore→config→bots.json」，扫码人 open_id
+      //    落成 owner+admin（registerBotFromCredentials 的 ownerOpenId 入参）。
+      //    明文 client_secret 只此一次喂进去，绝不回显——done payload 永不含它。
+      const r = await registerBotFromCredentials({
+        appId: creds.clientId,
+        appSecret: creds.clientSecret,
+        tenant: creds.tenant,
+        ownerOpenId: creds.operatorOpenId,
+      });
+      if (!r.ok) {
+        // 写盘 / 探活失败 → 据 register-bot 的 code 映射（invalid_input 理论不该出现，
+        // 扫码拿到的 appId 必合法，归为 unknown 兜底）。
+        const code: QrRegisterFailure['code'] =
+          r.code === 'credential_rejected' ? 'credential_rejected' : r.code === 'persist_failed' ? 'persist_failed' : 'unknown';
+        return { ok: false, code, reason: r.reason };
+      }
+      return {
+        ok: true,
+        appId: r.appId,
+        name: r.name,
+        tenant: r.tenant,
+        botName: r.botName,
+        adminOpenId: creds.operatorOpenId,
+        missingScopes: r.missingScopes,
+      };
+    },
+
+    async listBackendCatalog(): Promise<AdminBackendCatalog> {
+      // force：用户刚装完后要看「现在」的默认（装好 SDK 后 claude 才进候选）。
+      const defaultBackend = await effectiveDefaultBackend({ force: true }).catch(() => DEFAULT_BACKEND_ID);
+      const entries = await Promise.all(
+        BACKEND_CATALOG.map((entry) => catalogEntryStatus(entry, defaultBackend)),
+      );
+      return { defaultBackend, entries };
+    },
+
+    async installBackend(id, onProgress, signal): Promise<InstallResult> {
+      const entry = catalogById(id);
+      if (!entry) {
+        return { ok: false, code: null, aborted: false, tail: `未知后端「${id}」` };
+      }
+      // 仅 installable（npm-ondemand）可一键装；external（codex / claude-acp）给手动装法。
+      if (!isInstallable(entry)) {
+        return {
+          ok: false,
+          code: null,
+          aborted: false,
+          tail: `「${entry.displayName}」不支持一键下载。手动安装：${entry.dep.installCmd ?? entry.dep.detectHint}`,
+        };
+      }
+      const pkg = entry.dep.version ? `${entry.dep.pkg}@${entry.dep.version}` : entry.dep.pkg!;
+      // install 是 daemon 注入态能力（owns runtime）；只读预览无注入 → 501 引导起 daemon。
+      if (!deps.installBackend) throw new NotWiredYetError(`⬇️ 下载「${entry.displayName}」`);
+      return deps.installBackend(pkg, onProgress, signal);
+    },
+
     async getDaemonStatus(): Promise<DaemonStatus> {
       // service manager 状态在「未支持平台」会抛——按 undefined 降级（toDaemonStatus
       // 据此置 supported=false，UI 把重启按钮置灰引导前台 run）。
@@ -595,6 +781,56 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       await rm(botDir(appId), { recursive: true, force: true }).catch(() => undefined);
       return { ok: true };
     },
+  };
+}
+
+/** SDK registerApp reject 的 code → 扫码失败结果（前端文案归 UI/SSE，这里给中文兜底）。 */
+function mapQrFailure(code: string, description: string): QrRegisterFailure {
+  switch (code) {
+    case 'abort':
+      return { ok: false, code: 'abort', reason: '已取消扫码。' };
+    case 'expired_token':
+      return { ok: false, code: 'expired_token', reason: '二维码已过期，请重新生成。' };
+    case 'access_denied':
+      return { ok: false, code: 'access_denied', reason: '你在飞书里取消或拒绝了创建。' };
+    default:
+      return { ok: false, code: 'unknown', reason: description ? `创建失败：${description}` : '创建失败，请重试。' };
+  }
+}
+
+/**
+ * 一条 catalog 的管理面投影：catalog 元数据 + 本机探测态。external-cli（codex）走
+ * doctor 拿版本/可用；npm-ondemand / npm-external 走 isBackendDepInstalled 判装没装。
+ * 绝不抛错——探测失败按「未装/未知」降级。
+ */
+async function catalogEntryStatus(
+  entry: BackendCatalogEntry,
+  defaultBackend: string,
+): Promise<AdminBackendCatalogEntry> {
+  const probe: BackendProbe | undefined = await createBackend(entry.id)
+    .doctor({ force: true })
+    .catch(() => undefined);
+  const ok = probe?.ok === true;
+  // depState：installed（探测通过）/ not-installed（npm-ondemand 可一键装）/
+  // external-missing（external-cli / npm-external 缺失，需手动装）。优先用 doctor
+  // 自报的 depState（claude-sdk 的 not-installed），否则按 ok + installable 推。
+  const installable = ok ? false : isInstallable(entry);
+  const depState: BackendDepState =
+    probe?.depState ?? (ok ? 'installed' : installable ? 'not-installed' : 'external-missing');
+  return {
+    id: entry.id,
+    agentFamily: entry.agentFamily,
+    displayName: entry.displayName,
+    access: entry.access,
+    blurb: entry.blurb,
+    depKind: entry.dep.kind,
+    depState,
+    installable: depState === 'not-installed' && isInstallable(entry),
+    approxSizeMB: entry.dep.approxSizeMB,
+    version: probe?.version ?? null,
+    hint: ok ? undefined : (probe?.hint ?? entry.dep.detectHint),
+    isDefault: entry.id === defaultBackend,
+    supportedModes: entry.supportedModes,
   };
 }
 

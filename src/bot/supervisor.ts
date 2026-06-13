@@ -6,6 +6,7 @@ import type { BotEntry } from '../config/bots';
 import { createAdminIpcCaller, type AdminIpcCaller } from '../admin/ipc';
 import { AdminWriteError } from '../admin/ops';
 import { createAdminService } from '../admin/service';
+import { installBackendDep } from '../agent';
 import { spawnDaemonControl } from '../cli/commands/daemon-control';
 import { mountWebConsole } from '../web/mount';
 
@@ -158,6 +159,8 @@ export async function runSupervisor(bots: BotEntry[]): Promise<void> {
       // 重启 / 升级走 detached helper：supervisor 被 service stop 杀掉后由 helper 续命。
       restartDaemon: () => spawnDaemonControl('restart'),
       applyUpdate: () => spawnDaemonControl('update'),
+      // 按需后端安装在 daemon 进程内直跑（owns runtime，装完即能解析加载）。
+      installBackend: installBackendDep,
     }),
   );
   if (webConsole) {
