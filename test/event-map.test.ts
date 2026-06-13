@@ -137,6 +137,83 @@ describe('mapNotification', () => {
     });
   });
 
+  // codex v0.139 协议（item_builders.rs format_file_change_diff）：add/delete 的
+  // diff 字段是裸文件内容（无 +/- 前缀），只有 update 是 unified diff——按 kind 分流。
+  it('add（新建文件）：标题「新建 path (+N)」，裸内容合成 + 前缀进 ```diff', () => {
+    const changes = [{ path: '/proj/e2e-scratch.md', kind: { type: 'add' }, diff: 'hello world\n' }];
+    expect(mapNotification(itemStarted({ type: 'fileChange', id: 'f-add', changes } as unknown as ThreadItem))).toEqual({
+      type: 'tool_use',
+      itemId: 'f-add',
+      title: '新建 /proj/e2e-scratch.md (+1)',
+    });
+    expect(mapNotification(itemCompleted({ type: 'fileChange', id: 'f-add', changes } as unknown as ThreadItem))).toEqual({
+      type: 'tool_result',
+      itemId: 'f-add',
+      output: '```diff\n+hello world\n```',
+    });
+  });
+
+  it('delete（删除文件）：标题「删除 path」不报行数，裸内容合成 - 前缀进 ```diff', () => {
+    const changes = [{ path: 'old.md', kind: { type: 'delete' }, diff: 'line a\nline b\n' }];
+    expect(mapNotification(itemStarted({ type: 'fileChange', id: 'f-del', changes } as unknown as ThreadItem))).toEqual({
+      type: 'tool_use',
+      itemId: 'f-del',
+      title: '删除 old.md',
+    });
+    expect(mapNotification(itemCompleted({ type: 'fileChange', id: 'f-del', changes } as unknown as ThreadItem))).toEqual({
+      type: 'tool_result',
+      itemId: 'f-del',
+      output: '```diff\n-line a\n-line b\n```',
+    });
+  });
+
+  it('新建空文件：(+0) 且无可渲染 diff（output undefined）', () => {
+    const changes = [{ path: 'empty.md', kind: { type: 'add' }, diff: '' }];
+    expect(mapNotification(itemStarted({ type: 'fileChange', id: 'f-empty', changes } as unknown as ThreadItem))).toEqual({
+      type: 'tool_use',
+      itemId: 'f-empty',
+      title: '新建 empty.md (+0)',
+    });
+    expect(mapNotification(itemCompleted({ type: 'fileChange', id: 'f-empty', changes } as unknown as ThreadItem))).toEqual({
+      type: 'tool_result',
+      itemId: 'f-empty',
+      output: undefined,
+    });
+  });
+
+  it('混合 add+update：动词回退「编辑」，行数按 kind 聚合（add 整文件算 +）', () => {
+    const changes = [
+      { path: 'new.md', kind: { type: 'add' }, diff: 'a\nb\n' },
+      { path: 'mod.ts', kind: { type: 'update', move_path: null }, diff: '@@\n+x\n-y\n-z' },
+    ];
+    const evt = mapNotification(itemStarted({ type: 'fileChange', id: 'f-mix', changes } as unknown as ThreadItem));
+    expect(evt).toEqual({ type: 'tool_use', itemId: 'f-mix', title: '编辑 new.md、mod.ts (+3 −2)' });
+  });
+
+  it('带 cwd 上下文：项目内路径相对化，项目外保持绝对（看得出越界）', () => {
+    const inside = [{ path: '/proj/src/a.ts', kind: { type: 'add' }, diff: 'x\n' }];
+    expect(
+      mapNotification(itemStarted({ type: 'fileChange', id: 'f-in', changes: inside } as unknown as ThreadItem), {
+        cwd: '/proj',
+      }),
+    ).toEqual({ type: 'tool_use', itemId: 'f-in', title: '新建 src/a.ts (+1)' });
+
+    const outside = [{ path: '/etc/hosts', kind: { type: 'update', move_path: null }, diff: '+x' }];
+    expect(
+      mapNotification(itemStarted({ type: 'fileChange', id: 'f-out', changes: outside } as unknown as ThreadItem), {
+        cwd: '/proj',
+      }),
+    ).toEqual({ type: 'tool_use', itemId: 'f-out', title: '编辑 /etc/hosts (+1 −0)' });
+  });
+
+  it('无 cwd 时超长绝对路径只保留末段（…/ 前缀），控制标题单行长度', () => {
+    const changes = [
+      { path: '/Users/clay/devlop/src/ClayCheung/feishu-codex-bridge/e2e-scratch.md', kind: { type: 'add' }, diff: 'x\n' },
+    ];
+    const evt = mapNotification(itemStarted({ type: 'fileChange', id: 'f-long', changes } as unknown as ThreadItem));
+    expect(evt).toEqual({ type: 'tool_use', itemId: 'f-long', title: '新建 …/feishu-codex-bridge/e2e-scratch.md (+1)' });
+  });
+
   it('lists the first files + a count for a multi-file fileChange, ignoring ---/+++ headers', () => {
     const changes = [
       { path: 'a.ts', kind: 'update', diff: '--- a/a.ts\n+++ b/a.ts\n+x' },
