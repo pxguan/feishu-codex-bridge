@@ -55,11 +55,12 @@ describe('claude-sdk backend：能力守卫（无半实现）', () => {
     });
   });
 
-  it('doctor() 返回探测结构（SDK 随包安装 → ok），与 isAvailable 一致', async () => {
+  it('doctor() 返回探测结构，且 ok 与 isAvailable 一致（不耦合 node_modules 里 SDK 装没装）', async () => {
+    // SDK 是按需依赖（dev 可能没装、生产靠 Web 下载），所以不硬断言 ok=true——只验
+    // 「doctor.ok 必须等于 isAvailable」（装了都 true、没装都 false），装了再验 location。
     const probe = await be.doctor();
-    expect(probe.ok).toBe(true);
-    expect(probe.location).toContain('claude-agent-sdk');
     expect(probe.ok).toBe(await be.isAvailable());
+    if (probe.ok) expect(probe.location).toContain('claude-agent-sdk');
   });
 
   it('listThreads（/resume 选择卡）抛明确的「暂不支持」错误', async () => {

@@ -156,11 +156,18 @@ describe('installer：命令构建（不真跑 npm）', () => {
   });
 });
 
-describe('claude-sdk doctor：已装态（worktree node_modules 有 SDK → 第①路命中）', () => {
-  it('ok:true + depState:installed + location 指向 SDK 包名', async () => {
+describe('claude-sdk doctor：依赖装没装的两态（SDK 是按需依赖，dev 可能删了测下载）', () => {
+  it('SDK 可解析 → ok:true/installed/location 指向包名；解析不到 → ok:false/not-installed', async () => {
+    // 不耦合 node_modules 状态：按 isBackendDepInstalled 实际判定再断言对应分支，
+    // CI（npm ci 装 devDep）走已装态、本地删了 SDK 测下载走可下载态，两边都绿。
+    const installed = isBackendDepInstalled('@anthropic-ai/claude-agent-sdk');
     const probe = await createBackend('claude-sdk').doctor();
-    expect(probe.ok).toBe(true);
-    expect(probe.depState).toBe('installed');
-    expect(probe.location).toContain('claude-agent-sdk');
+    expect(probe.ok).toBe(installed);
+    if (installed) {
+      expect(probe.depState).toBe('installed');
+      expect(probe.location).toContain('claude-agent-sdk');
+    } else {
+      expect(probe.depState).toBe('not-installed');
+    }
   });
 });
