@@ -28,10 +28,12 @@
  * 约束：纯字符串拼接、不用反引号 / ${}（这段会被原样塞进 <script>）。
  */
 export const UI_PURE_JS = `
-  // ── hash 路由：'#overview'（或空）→ 总览；'#bot/<appId>' → 该 bot Tab ──────────
+  // ── hash 路由：''/#overview → 仪表盘；#bot/<appId> → 某机器人；#backends/#doctor/#logs
+  //    → 系统分页（后端管理 / 宿主机体检 / 实时日志）。侧栏导航与这些一一对应。──────────
   function parseRoute(hash) {
     var h = (hash || '').replace(/^#/, '');
     if (h.indexOf('bot/') === 0) return { tab: 'bot', botId: decodeURIComponent(h.slice(4)) };
+    if (h === 'backends' || h === 'doctor' || h === 'logs') return { tab: h };
     return { tab: 'overview' };
   }
 
@@ -325,101 +327,140 @@ export const UI_HTML = `<!doctype html>
 <title>Codex Bridge 管理台</title>
 <style>
   :root {
-    /* 火山引擎 / Arco Design 令牌：主色 #165DFF，中性灰阶 + 状态色对齐 Arco。 */
-    --blue: #165dff;
-    --blue-hover: #4080ff;
-    --blue-dark: #0e42d2;
-    --blue-tint: #f0f5ff;
-    --bg: #f2f3f5;
+    /* 现代 console 令牌：靛蓝强调 + 中性灰阶 + 深色侧栏（脱离品牌色约束，参考一线 dashboard）。 */
+    --accent: #4f46e5;
+    --accent-hover: #6366f1;
+    --accent-press: #4338ca;
+    --blue: #4f46e5;          /* 兼容旧 class（.btn.primary/.progress/.spin/.tag.blue 经它取色） */
+    --blue-tint: #eef2ff;
+    --bg: #f6f7f9;
     --card: #ffffff;
-    --border: #e5e6eb;
-    --border-2: #c9cdd4;
-    --text: #1d2129;
-    --text-2: #4e5969;
-    --text-3: #86909c;
-    --green: #00b42a;
-    --orange: #ff7d00;
-    --red: #f53f3f;
-    --radius: 8px;
-    --radius-sm: 6px;
-    --shadow-sm: 0 1px 3px rgba(29,33,41,.06);
-    --shadow-md: 0 4px 16px rgba(29,33,41,.10);
-    --shadow-lg: 0 12px 40px rgba(29,33,41,.16);
+    --border: #ececef;
+    --border-2: #dcdce1;
+    --text: #18181b;
+    --text-2: #5c5c66;
+    --text-3: #9a9aa3;
+    --green: #16a34a; --green-tint: #e9f7ee;
+    --orange: #d97706; --orange-tint: #fbf1e3;
+    --red: #dc2626; --red-tint: #fdecec;
+    --side-bg: #17181f;
+    --side-bg2: #20212b;
+    --side-text: #9c9ca8;
+    --side-active: #ffffff;
+    --radius: 11px;
+    --radius-sm: 8px;
+    --shadow-sm: 0 1px 2px rgba(24,24,27,.04), 0 1px 3px rgba(24,24,27,.06);
+    --shadow-md: 0 6px 22px rgba(24,24,27,.09);
+    --shadow-lg: 0 20px 56px rgba(24,24,27,.22);
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, "PingFang SC",
       "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
     -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 1120px; margin: 0 auto; padding: 4px 16px 48px; }
-  /* ── 产品头部：白底 + 底分隔线 + logo 徽标（火山/字节内部控制台观感，非整条蓝色块）── */
-  .appbar {
-    background: var(--card); border-bottom: 1px solid var(--border);
-    position: sticky; top: 0; z-index: 8; box-shadow: var(--shadow-sm);
+  /* ── 应用骨架：固定深色侧栏 + 右侧主区（顶栏 + 内容）─────────────────────────── */
+  .app { display: flex; min-height: 100vh; }
+  .sidebar {
+    width: 244px; flex: none; background: var(--side-bg); color: var(--side-text);
+    position: fixed; top: 0; left: 0; bottom: 0; z-index: 30;
+    display: flex; flex-direction: column; padding: 14px 12px;
+    border-right: 1px solid rgba(255,255,255,.06);
   }
-  .appbar-in {
-    max-width: 1120px; margin: 0 auto; padding: 11px 16px;
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  .side-brand { display: flex; align-items: center; gap: 11px; padding: 6px 8px 16px; }
+  .side-logo {
+    width: 34px; height: 34px; border-radius: 9px; flex: none;
+    background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-size: 18px;
+    box-shadow: 0 3px 10px rgba(79,70,229,.45);
   }
-  .brand { display: flex; align-items: center; gap: 10px; }
-  .brand .logo {
-    width: 32px; height: 32px; border-radius: 8px; flex: none;
-    background: linear-gradient(135deg, #165dff, #4080ff); color: #fff;
-    display: flex; align-items: center; justify-content: center; font-size: 17px;
-    box-shadow: 0 2px 6px rgba(22,93,255,.35);
+  .side-brand-txt { display: flex; flex-direction: column; line-height: 1.25; }
+  .side-brand-txt b { color: #fff; font-size: 15px; font-weight: 650; letter-spacing: .2px; }
+  .side-brand-txt span { font-size: 11.5px; color: var(--side-text); }
+  .side-nav { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+  .nav-sec { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: #62636f; margin: 14px 10px 5px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px;
+    color: var(--side-text); cursor: pointer; font-size: 13.5px; border: 0; background: transparent;
+    width: 100%; text-align: left; transition: background .14s, color .14s; position: relative;
   }
-  .brand h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; line-height: 1.2; }
-  .brand .sub { font-size: 12px; color: var(--text-3); }
-  .gsum { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+  .nav-item .ic { width: 18px; text-align: center; flex: none; font-size: 15px; }
+  .nav-item .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nav-item:hover { background: var(--side-bg2); color: #d8d8e0; }
+  .nav-item.on { background: var(--side-bg2); color: var(--side-active); font-weight: 600; }
+  .nav-item.on::before {
+    content: ''; position: absolute; left: -12px; top: 8px; bottom: 8px; width: 3px;
+    border-radius: 0 3px 3px 0; background: var(--accent);
+  }
+  .nav-item.add { color: var(--accent-hover); }
+  .nav-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .nav-dot.on { background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,.18); }
+  .nav-dot.off { background: #52525b; }
+  .nav-badge { font-size: 10px; background: rgba(255,255,255,.1); color: #c7c7d1; border-radius: 20px; padding: 0 7px; }
+  .side-foot { padding: 10px 8px 2px; border-top: 1px solid rgba(255,255,255,.06); margin-top: 8px; font-size: 11.5px; color: #6b6c78; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .main { margin-left: 244px; flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .topbar {
+    height: 60px; flex: none; background: rgba(255,255,255,.86); backdrop-filter: saturate(1.6) blur(8px);
+    border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 14px; padding: 0 26px;
+  }
+  .hamburger { display: none; border: 0; background: transparent; font-size: 19px; cursor: pointer; color: var(--text-2); }
+  .crumb { font-size: 15.5px; font-weight: 650; color: var(--text); display: flex; align-items: center; gap: 8px; }
+  .crumb .sub { font-size: 12.5px; font-weight: 400; color: var(--text-3); }
+  .topbar-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .gsum { display: flex; gap: 6px; flex-wrap: wrap; }
   .gtag {
     background: var(--bg); color: var(--text-2); border: 1px solid var(--border);
-    border-radius: var(--radius-sm); padding: 2px 10px; font-size: 12px; white-space: nowrap;
+    border-radius: 20px; padding: 2px 11px; font-size: 12px; white-space: nowrap;
   }
-  /* ── tabbar：Arco 胶囊 Tab（白底描边，选中蓝底白字 + 轻投影）──────────────── */
-  .tabbar {
-    display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 18px 0 2px;
-  }
-  .tab {
-    border: 1px solid var(--border); color: var(--text-2); background: var(--card);
-    border-radius: var(--radius-sm); padding: 5px 16px; font-size: 13px; cursor: pointer;
-    transition: color .15s, border-color .15s, background .15s;
-  }
-  .tab:hover { color: var(--blue); border-color: var(--blue); background: var(--blue-tint); }
-  .tab.on { background: var(--blue); color: #fff; font-weight: 600; border-color: var(--blue); box-shadow: var(--shadow-sm); }
-  .tab.add { border-style: dashed; color: var(--blue); }
-  .tab.add:hover { background: var(--blue-tint); }
-  .cols { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 16px; margin-top: 16px; }
-  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+  .content { padding: 26px 28px 56px; max-width: 1180px; width: 100%; }
+  .page-head { margin: 2px 0 18px; }
+  .page-head h1 { font-size: 20px; margin: 0 0 4px; font-weight: 680; letter-spacing: -.2px; }
+  .page-head p { margin: 0; color: var(--text-2); font-size: 13.5px; }
+  /* ── 仪表盘 KPI 磁贴 ─────────────────────────────────────────────────────── */
+  .kpis { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 14px; margin-bottom: 18px; }
+  @media (max-width: 980px) { .kpis { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+  .kpi { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow-sm); transition: box-shadow .16s, transform .16s; }
+  .kpi:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+  .kpi .k-top { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 12.5px; }
+  .kpi .k-ic { width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 15px; background: var(--blue-tint); }
+  .kpi .k-val { font-size: 26px; font-weight: 700; letter-spacing: -.5px; margin: 8px 0 1px; }
+  .kpi .k-sub { font-size: 12px; color: var(--text-3); }
+  .grid-2 { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 980px) { .grid-2 { grid-template-columns: 1fr; } }
+  .cols { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 16px; margin-top: 0; }
+  @media (max-width: 980px) { .cols { grid-template-columns: 1fr; } }
   .card {
     background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 18px 20px; margin-bottom: 16px; box-shadow: var(--shadow-sm);
   }
-  .card h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; }
+  .card h2 { font-size: 14.5px; margin: 0 0 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 650; }
   .card h2 .right { margin-left: auto; font-weight: 400; }
-  .hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
+  .hr { border: 0; border-top: 1px solid var(--border); margin: 13px 0; }
   .note { color: var(--text-3); font-size: 12px; }
   .tag {
-    display: inline-block; border-radius: var(--radius-sm); padding: 1px 8px; font-size: 12px;
+    display: inline-block; border-radius: 20px; padding: 1px 9px; font-size: 12px;
     background: var(--bg); color: var(--text-2); margin-right: 6px; white-space: nowrap;
   }
-  .tag.blue { background: #e8f3ff; color: #165dff; }
-  .tag.green { background: #e8ffea; color: #009a29; }
-  .tag.orange { background: #fff3e8; color: #d25f00; }
-  .tag.red { background: #ffece8; color: #cb272d; }
+  .tag.blue { background: var(--blue-tint); color: var(--accent-press); }
+  .tag.green { background: var(--green-tint); color: #15803d; }
+  .tag.orange { background: var(--orange-tint); color: #b45309; }
+  .tag.red { background: var(--red-tint); color: #b91c1c; }
   .btn {
-    display: inline-block; border-radius: var(--radius-sm); border: 1px solid var(--border-2);
-    background: var(--card); color: var(--text); padding: 5px 16px; font-size: 13px; line-height: 20px;
-    cursor: pointer; transition: color .15s, border-color .15s, background .15s;
+    display: inline-flex; align-items: center; gap: 5px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border-2); background: var(--card); color: var(--text);
+    padding: 6px 14px; font-size: 13px; line-height: 18px; cursor: pointer; white-space: nowrap;
+    transition: color .14s, border-color .14s, background .14s, box-shadow .14s;
   }
-  .btn:hover { color: var(--blue); border-color: var(--blue); background: var(--blue-tint); }
-  .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
-  .btn.primary:hover { background: var(--blue-hover); border-color: var(--blue-hover); color: #fff; }
-  .btn.primary:active { background: var(--blue-dark); border-color: var(--blue-dark); }
-  .btn.disabled, .btn.disabled:hover { opacity: .45; cursor: not-allowed; color: var(--text); border-color: var(--border-2); background: var(--card); }
+  .btn:hover { color: var(--accent); border-color: var(--accent); background: var(--blue-tint); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 1px 2px rgba(79,70,229,.3); }
+  .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+  .btn.primary:active { background: var(--accent-press); border-color: var(--accent-press); }
+  .btn.disabled, .btn.disabled:hover { opacity: .45; cursor: not-allowed; color: var(--text); border-color: var(--border-2); background: var(--card); box-shadow: none; }
   .btn.danger, .btn.danger:hover { background: var(--red); border-color: var(--red); color: #fff; }
   .btn.danger:hover { filter: brightness(.95); }
+  .btn.sm { padding: 4px 11px; font-size: 12.5px; }
   .proj { padding: 10px 0; border-bottom: 1px solid var(--border); }
   .proj:last-child { border-bottom: 0; }
   .proj .name { font-weight: 600; font-size: 14px; }
@@ -427,10 +468,21 @@ export const UI_HTML = `<!doctype html>
   .proj .path { color: var(--text-2); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .statline { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
   #logbox {
-    background: #0e1117; color: #c9d1d9; border-radius: 8px; padding: 10px 12px;
-    font: 11.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #0d0e14; color: #c9d1d9; border-radius: 10px; padding: 12px 14px;
+    font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
     height: 480px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+    border: 1px solid #1c1d27;
   }
+  #logbox.tall { height: calc(100vh - 240px); min-height: 340px; }
+  /* ── 后端管理页：每后端一张富信息行（版本 / 状态 / 体积 + 下载/更新/卸载）──────── */
+  .bk-item { display: flex; align-items: center; gap: 14px; padding: 15px 4px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .bk-item:last-child { border-bottom: 0; }
+  .bk-ic { width: 40px; height: 40px; border-radius: 10px; flex: none; display: flex; align-items: center; justify-content: center; font-size: 19px; background: var(--bg); border: 1px solid var(--border); }
+  .bk-main { flex: 1; min-width: 200px; }
+  .bk-name { font-weight: 640; font-size: 14.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .bk-meta { color: var(--text-3); font-size: 12.5px; margin-top: 3px; }
+  .bk-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .ver { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   #logbox .hl { color: #79c0ff; }
   #logbox .warn { color: #e3b341; }
   #logbox .err { color: #ff7b72; }
@@ -533,29 +585,41 @@ export const UI_HTML = `<!doctype html>
     font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .copybox code { flex: 1; min-width: 0; word-break: break-all; }
+  /* ── 窄屏：侧栏变可滑出抽屉，汉堡按钮控制 ─────────────────────────────────── */
+  @media (max-width: 820px) {
+    .sidebar { transform: translateX(-100%); transition: transform .22s ease; box-shadow: var(--shadow-lg); }
+    .sidebar.open { transform: translateX(0); }
+    .main { margin-left: 0; }
+    .hamburger { display: block; }
+    .content { padding: 18px 16px 48px; }
+    .topbar { padding: 0 16px; }
+    .side-scrim { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 25; display: none; }
+    .side-scrim.open { display: block; }
+  }
 </style>
 </head>
 <body>
-<header class="appbar">
-  <div class="appbar-in">
-    <div class="brand">
-      <span class="logo">🤖</span>
-      <div>
-        <h1>Codex Bridge 控制台</h1>
-        <span class="sub">本机 · 127.0.0.1 · 多机器人 / 多后端统一管理</span>
-      </div>
+<div class="app">
+  <!-- 左侧深色导航栏：品牌 + 分组导航（概览 / 机器人 / 系统）+ 底部版本与在线态 -->
+  <aside class="sidebar" id="sidebar">
+    <div class="side-brand">
+      <span class="side-logo">🤖</span>
+      <div class="side-brand-txt"><b>Codex Bridge</b><span>本机控制台</span></div>
     </div>
-    <div class="gsum" id="globalSummary"></div>
-  </div>
-</header>
-<div class="wrap">
-  <div class="tabbar" id="tabbar"></div>
-
-  <!-- 单内容容器：renderRoute 按 hash 路由清空重渲（总览 / 某 bot） -->
-  <div id="tabContent"></div>
-
-  <div class="note" style="text-align:center">
-    数据每 5 秒自动刷新 · 写操作（🧠 后端切换 / 🔐 权限 / ✋ 免@ / 🗜️ 自动压缩）与飞书 DM 卡片共享同一服务层；daemon 在跑时实时生效，只读预览（daemon 未跑）下不可写。
+    <nav class="side-nav" id="sideNav"></nav>
+    <div class="side-foot" id="sideFoot"></div>
+  </aside>
+  <div class="side-scrim" id="sideScrim"></div>
+  <div class="main">
+    <!-- 顶栏：汉堡（窄屏）+ 面包屑标题 + 页面级操作 + 全局摘要 chip -->
+    <header class="topbar">
+      <button class="hamburger" id="hamburger" title="菜单" aria-label="菜单">☰</button>
+      <div class="crumb" id="crumb"></div>
+      <div class="topbar-actions" id="topActions"></div>
+      <div class="gsum" id="globalSummary"></div>
+    </header>
+    <!-- 单内容容器：renderRoute 按 hash 路由清空重渲（仪表盘 / 机器人 / 后端 / 体检 / 日志） -->
+    <div class="content" id="tabContent"></div>
   </div>
 </div>
 
@@ -744,21 +808,35 @@ ${UI_PURE_JS}
       return r.json();
     }).then(function (s) {
       state = s;
-      renderTabbar();
+      renderSidebar();
       renderGlobalSummary();
-      // 当前可见 Tab 重渲（后台 Tab 不白费 DOM）。抽屉打开时由 renderRoute 内保留。
+      // 当前可见页重渲（后台页不白费 DOM）。抽屉打开时由 renderRoute 内保留。
       renderRoute();
     }).catch(function () { /* 下个周期重试 */ });
   }
   function loadDaemon() {
     fetch('/api/daemon').then(function (r) { return r.json(); })
-      .then(function (d) { daemon = d; if (parseRoute(location.hash).tab === 'overview') { var b = $('daemonBody'); if (b) renderDaemon(b); } })
+      .then(function (d) {
+        daemon = d;
+        if (parseRoute(location.hash).tab === 'overview') { var b = $('daemonBody'); if (b) renderDaemon(b); }
+        renderSidebarFoot();
+        renderGlobalSummary();
+      })
       .catch(function () { /* 下个周期重试 */ });
   }
   function loadCatalog() {
     return fetch('/api/backends').then(function (r) { return r.json(); })
       .then(function (c) { catalog = c; return c; })
       .catch(function () { return null; });
+  }
+
+  // ── 路由 → 页面标题/副标题（顶栏面包屑 + 页头复用）─────────────────────────
+  function routeTitle(r) {
+    if (r.tab === 'bot') { var b = botOf(r.botId); return { t: (b ? botTitle(b) : '机器人'), s: '单机器人 · 项目 / 接入诊断' }; }
+    if (r.tab === 'backends') return { t: '后端管理', s: '按需下载 / 更新 / 卸载 agent 后端' };
+    if (r.tab === 'doctor') return { t: '宿主机体检', s: '本机后端环境与运行时信息' };
+    if (r.tab === 'logs') return { t: '实时日志', s: '当日文件日志 SSE 实时跟随' };
+    return { t: '仪表盘', s: '全局总览 · 机器人 / 后端 / daemon' };
   }
 
   // ── 路由：单 #tabContent 按 hash 清空重渲 ───────────────────────────────────
@@ -768,33 +846,73 @@ ${UI_PURE_JS}
     var key = r.tab + ':' + (r.botId || '');
     var navigated = key !== _lastRouteKey; // 仅「切换路由」时播进场；5s 刷新整页重渲不重放
     _lastRouteKey = key;
-    renderTabbar();
+    renderSidebar();
+    renderTopbar(r);
     var box = $('tabContent');
     if (!box) return;
     box.textContent = '';
-    if (r.tab === 'overview') renderOverviewTab(box);
-    else renderBotTab(box, r.botId);
-    if (navigated) fx.enter(box.querySelectorAll('.card'));
+    if (r.tab === 'bot') renderBotTab(box, r.botId);
+    else if (r.tab === 'backends') renderBackendsPage(box);
+    else if (r.tab === 'doctor') renderDoctorPage(box);
+    else if (r.tab === 'logs') renderLogsPage(box);
+    else renderOverviewTab(box);
+    if (navigated) fx.enter(box.querySelectorAll('.kpi, .card'));
   }
 
-  function renderTabbar() {
-    var bar = $('tabbar');
-    if (!bar) return;
-    bar.textContent = '';
-    var route = parseRoute(location.hash);
-    var ov = el('button', 'tab' + (route.tab === 'overview' ? ' on' : ''), '📊 总览');
-    ov.onclick = function () { go({ tab: 'overview' }); };
-    bar.appendChild(ov);
+  // ── 左侧导航：概览 / 机器人（每个 + 添加）/ 系统（后端·体检·日志）────────────
+  function navItem(o) {
+    var it = el('button', 'nav-item' + (o.on ? ' on' : '') + (o.add ? ' add' : ''));
+    it.appendChild(el('span', 'ic', o.icon));
+    it.appendChild(el('span', 'lbl', o.label));
+    if (o.dot !== undefined) it.appendChild(el('span', 'nav-dot ' + (o.dot ? 'on' : 'off')));
+    if (o.badge) it.appendChild(el('span', 'nav-badge', o.badge));
+    it.onclick = o.onClick;
+    return it;
+  }
+  function renderSidebar() {
+    var nav = $('sideNav');
+    if (!nav) return;
+    nav.textContent = '';
+    var r = parseRoute(location.hash);
+    nav.appendChild(el('div', 'nav-sec', '概览'));
+    nav.appendChild(navItem({ icon: '📊', label: '仪表盘', on: r.tab === 'overview', onClick: function () { go({ tab: 'overview' }); } }));
+    nav.appendChild(el('div', 'nav-sec', '机器人'));
     var bots = (state && state.bots) || [];
     bots.forEach(function (b) {
-      var on = route.tab === 'bot' && route.botId === b.appId;
-      var t = el('button', 'tab' + (on ? ' on' : ''), botTitle(b));
-      t.onclick = function () { go({ tab: 'bot', botId: b.appId }); };
-      bar.appendChild(t);
+      nav.appendChild(navItem({ icon: '🤖', label: botTitle(b), on: r.tab === 'bot' && r.botId === b.appId, dot: !!b.running, onClick: function () { go({ tab: 'bot', botId: b.appId }); } }));
     });
-    var add = el('button', 'tab add', '➕ 添加机器人');
-    add.onclick = function () { openWizard(); };
-    bar.appendChild(add);
+    nav.appendChild(navItem({ icon: '➕', label: '添加机器人', add: true, onClick: function () { openWizard(); } }));
+    nav.appendChild(el('div', 'nav-sec', '系统'));
+    nav.appendChild(navItem({ icon: '🧠', label: '后端管理', on: r.tab === 'backends', onClick: function () { go({ tab: 'backends' }); } }));
+    nav.appendChild(navItem({ icon: '🩺', label: '宿主机体检', on: r.tab === 'doctor', onClick: function () { go({ tab: 'doctor' }); } }));
+    nav.appendChild(navItem({ icon: '📜', label: '实时日志', on: r.tab === 'logs', onClick: function () { go({ tab: 'logs' }); } }));
+    renderSidebarFoot();
+  }
+  function renderSidebarFoot() {
+    var foot = $('sideFoot');
+    if (!foot) return;
+    foot.textContent = '';
+    var online = !!(daemon && daemon.running);
+    foot.appendChild(el('span', 'nav-dot ' + (online ? 'on' : 'off')));
+    foot.appendChild(el('span', null, (online ? 'daemon 运行中' : 'daemon 未运行') + ' · v' + ((state && state.version) || '?')));
+  }
+  function renderTopbar(r) {
+    var crumb = $('crumb');
+    if (crumb) {
+      crumb.textContent = '';
+      var ti = routeTitle(r);
+      crumb.appendChild(document.createTextNode(ti.t));
+      crumb.appendChild(el('span', 'sub', ti.s));
+    }
+    var act = $('topActions');
+    if (act) {
+      act.textContent = '';
+      if (r.tab === 'overview' || r.tab === 'bot') {
+        var add = el('button', 'btn primary sm', '➕ 添加机器人');
+        add.onclick = function () { openWizard(); };
+        act.appendChild(add);
+      }
+    }
   }
 
   function renderGlobalSummary() {
@@ -802,91 +920,124 @@ ${UI_PURE_JS}
     if (!box) return;
     box.textContent = '';
     var s = summarizeState(state);
-    box.appendChild(el('span', 'gtag', 'v' + ((state && state.version) || '?')));
     box.appendChild(el('span', 'gtag', '🟢 在线 ' + s.online + '/' + s.total));
     box.appendChild(el('span', 'gtag', '📁 项目 ' + s.projects));
     if (daemon && daemon.running && daemon.uptimeMs !== undefined) box.appendChild(el('span', 'gtag', '⏱ ' + fmtUptime(daemon.uptimeMs)));
   }
 
-  // hash 路由切换：切 Tab 必清上一个 bot 的 diag（防串台），关抽屉。
+  // 窄屏抽屉式侧栏开合。
+  function openSidebar() { var s = $('sidebar'); if (s) s.classList.add('open'); var sc = $('sideScrim'); if (sc) sc.classList.add('open'); }
+  function closeSidebar() { var s = $('sidebar'); if (s) s.classList.remove('open'); var sc = $('sideScrim'); if (sc) sc.classList.remove('open'); }
+
+  // hash 路由切换：切页必清上一个 bot 的 diag（防串台），关抽屉与移动端侧栏。
   function go(route) {
     diag = null; diagBotId = null;
-    closeDrawer();
+    closeDrawer(); closeSidebar();
     if (route.tab === 'bot') location.hash = '#bot/' + encodeURIComponent(route.botId);
+    else if (route.tab === 'backends' || route.tab === 'doctor' || route.tab === 'logs') location.hash = '#' + route.tab;
     else location.hash = '#overview';
   }
-  window.addEventListener('hashchange', function () { diag = null; diagBotId = null; closeDrawer(); renderRoute(); });
+  window.addEventListener('hashchange', function () { diag = null; diagBotId = null; closeDrawer(); closeSidebar(); renderRoute(); });
+
+  // 小工具：一张 KPI 磁贴；catalog 后端 id → 显示名。
+  function kpiTile(icon, label, val, sub, ok) {
+    var t = el('div', 'kpi');
+    var top = el('div', 'k-top');
+    var ic = el('div', 'k-ic', icon);
+    if (ok !== undefined) ic.style.background = ok ? 'var(--green-tint)' : 'var(--orange-tint)';
+    top.appendChild(ic);
+    top.appendChild(el('span', null, label));
+    t.appendChild(top);
+    t.appendChild(el('div', 'k-val', val));
+    t.appendChild(el('div', 'k-sub', sub || ''));
+    return t;
+  }
+  function backendName(id) {
+    if (catalog && catalog.entries) { for (var i = 0; i < catalog.entries.length; i++) if (catalog.entries[i].id === id) return catalog.entries[i].displayName; }
+    return id || '—';
+  }
 
   // ════════════════════════════════════════════════════════════════════════════
-  //  总览 Tab（全局维度）
+  //  仪表盘（全局总览：KPI 磁贴 + 机器人 + daemon）
   // ════════════════════════════════════════════════════════════════════════════
   function renderOverviewTab(root) {
-    var cols = el('div', 'cols');
-    var left = el('div');
-    var right = el('div');
+    var s = summarizeState(state);
+    var daemonOn = !!(daemon && daemon.running);
 
-    // 🛰️ 后台 daemon + 升级
-    var daemonCard = el('div', 'card');
-    var dh = el('h2'); dh.appendChild(document.createTextNode('🛰️ 后台 daemon'));
-    var dright = el('span', 'right');
-    var restartBtn = el('button', 'btn', '🔁 重启');
-    restartBtn.onclick = askRestart;
-    dright.appendChild(restartBtn);
-    dh.appendChild(dright);
-    daemonCard.appendChild(dh);
-    var daemonBody = el('div', 'note', '加载中…'); daemonBody.id = 'daemonBody';
-    daemonCard.appendChild(daemonBody);
-    daemonCard.appendChild(el('hr', 'hr'));
-    var updateBody = el('div', 'note', '版本检查中…'); updateBody.id = 'updateBody';
-    daemonCard.appendChild(updateBody);
-    left.appendChild(daemonCard);
-    renderDaemon(daemonBody);
-    loadUpdate(updateBody);
+    // KPI 磁贴行
+    var kpis = el('div', 'kpis');
+    kpis.appendChild(kpiTile('🛰️', 'daemon', daemonOn ? '运行中' : '未运行',
+      daemonOn && daemon.uptimeMs !== undefined ? '已运行 ' + fmtUptime(daemon.uptimeMs) : (daemon && daemon.platformName) || '后台服务', daemonOn));
+    kpis.appendChild(kpiTile('🤖', '在线机器人', s.online + ' / ' + s.total, s.active + ' 个在活跃集'));
+    kpis.appendChild(kpiTile('📁', '项目总数', String(s.projects), '跨全部机器人'));
+    kpis.appendChild(kpiTile('🧠', '默认后端', catalog ? backendName(catalog.defaultBackend) : '…', '项目未指定时路由到它'));
+    root.appendChild(kpis);
+    if (!catalog) loadCatalog().then(function () { if (parseRoute(location.hash).tab === 'overview') renderRoute(); });
 
-    // 🤖 多机器人聚合
+    var grid = el('div', 'grid-2');
+    var left = el('div'); var right = el('div');
+
+    // 🤖 机器人
     var botsCard = el('div', 'card');
-    var bh = el('h2'); bh.appendChild(document.createTextNode('🤖 多机器人 '));
+    var bh = el('h2'); bh.appendChild(document.createTextNode('🤖 机器人 '));
     var bcount = el('span', 'right note'); bh.appendChild(bcount);
     botsCard.appendChild(bh);
     var botsList = el('div'); botsCard.appendChild(botsList);
     left.appendChild(botsCard);
     renderBots(botsList, bcount);
 
-    // 🧠 后端管理卡
-    var mgrCard = el('div', 'card');
-    var mh = el('h2'); mh.appendChild(document.createTextNode('🧠 后端管理 '));
-    var mright = el('span', 'right note', '装哪个后端就能用哪个 agent');
-    mh.appendChild(mright);
-    mgrCard.appendChild(mh);
-    var mgrBody = el('div', 'note', '加载中…');
-    mgrCard.appendChild(mgrBody);
-    left.appendChild(mgrCard);
-    renderBackendManager(mgrBody);
+    // 🛰️ daemon + 升级
+    var daemonCard = el('div', 'card');
+    var dh = el('h2'); dh.appendChild(document.createTextNode('🛰️ 后台 daemon'));
+    var dright = el('span', 'right');
+    var restartBtn = el('button', 'btn sm', '🔁 重启'); restartBtn.onclick = askRestart;
+    dright.appendChild(restartBtn); dh.appendChild(dright);
+    daemonCard.appendChild(dh);
+    var daemonBody = el('div', 'note', '加载中…'); daemonBody.id = 'daemonBody';
+    daemonCard.appendChild(daemonBody);
+    daemonCard.appendChild(el('hr', 'hr'));
+    var updateBody = el('div', 'note', '版本检查中…'); updateBody.id = 'updateBody';
+    daemonCard.appendChild(updateBody);
+    right.appendChild(daemonCard);
+    renderDaemon(daemonBody);
+    loadUpdate(updateBody);
 
-    // 🩺 宿主机体检
-    var hostCard = el('div', 'card');
-    var hh = el('h2'); hh.appendChild(document.createTextNode('🩺 宿主机体检 '));
-    var hright = el('span', 'right');
-    var hostBtn = el('button', 'btn', '重新检测');
-    hright.appendChild(hostBtn); hh.appendChild(hright);
-    hostCard.appendChild(hh);
-    var hostBody = el('div', 'note', '点「重新检测」查看本机后端环境与运行时信息。');
-    hostCard.appendChild(hostBody);
-    hostBtn.onclick = function () { loadHostDoctor(hostBody); };
-    left.appendChild(hostCard);
+    grid.appendChild(left); grid.appendChild(right);
+    root.appendChild(grid);
+  }
 
-    // 📜 全局实时日志（SSE 连接在页面级常驻，这里只是把 ring 缓冲挂回 DOM）
-    var logCard = el('div', 'card');
-    var lh = el('h2'); lh.appendChild(document.createTextNode('📜 实时日志 '));
+  // ════════════════════════════════════════════════════════════════════════════
+  //  系统分页：后端管理 / 宿主机体检 / 实时日志
+  // ════════════════════════════════════════════════════════════════════════════
+  function renderBackendsPage(root) {
+    var card = el('div', 'card');
+    card.appendChild(el('div', 'note', '装哪个后端就能用哪个 agent。下载到本机用户目录（零 sudo），可随时更新或卸载；切换由各项目/DM 卡片选择。'));
+    var body = el('div'); body.style.marginTop = '6px';
+    card.appendChild(body);
+    root.appendChild(card);
+    renderBackendManager(body);
+  }
+  function renderDoctorPage(root) {
+    var card = el('div', 'card');
+    var h = el('h2'); h.appendChild(document.createTextNode('🩺 宿主机体检 '));
+    var right = el('span', 'right');
+    var btn = el('button', 'btn sm', '🔄 重新检测'); right.appendChild(btn); h.appendChild(right);
+    card.appendChild(h);
+    var body = el('div', 'note', '🔍 正在检测…');
+    card.appendChild(body);
+    btn.onclick = function () { loadHostDoctor(body); };
+    root.appendChild(card);
+    loadHostDoctor(body); // 进页即自动检测
+  }
+  function renderLogsPage(root) {
+    var card = el('div', 'card');
+    var h = el('h2'); h.appendChild(document.createTextNode('📜 实时日志 '));
     var lstatus = el('span', 'right note', logState.status); lstatus.id = 'logStatus';
-    lh.appendChild(lstatus); logCard.appendChild(lh);
-    var logbox = el('div'); logbox.id = 'logbox'; logCard.appendChild(logbox);
-    logCard.appendChild(el('div', 'note', '当日文件日志 SSE 实时跟随；切 Tab 不断连。'));
-    right.appendChild(logCard);
+    h.appendChild(lstatus); card.appendChild(h);
+    var logbox = el('div', 'tall'); logbox.id = 'logbox'; card.appendChild(logbox);
+    card.appendChild(el('div', 'note', '当日文件日志 SSE 实时跟随；切到别的页不断连，回来把缓冲挂回。'));
+    root.appendChild(card);
     mountLogBox(logbox);
-
-    cols.appendChild(left); cols.appendChild(right);
-    root.appendChild(cols);
   }
 
   function renderDaemon(box) {
@@ -1051,63 +1202,110 @@ ${UI_PURE_JS}
     });
   }
 
-  // ── 🧠 后端管理卡（按 agentFamily 分组：已装✅/未装⬇️下载/external 手动）──────
+  // ── 🧠 后端管理（按 agentFamily 分组；每后端一张富信息行：版本/状态 + 下载/更新/卸载）──
+  function refreshBackends() {
+    loadCatalog().then(function () { if (parseRoute(location.hash).tab === 'backends' || parseRoute(location.hash).tab === 'overview') renderRoute(); });
+  }
   function renderBackendManager(box) {
     box.textContent = '';
-    box.className = 'note';
     if (!catalog) {
-      box.textContent = '加载中…';
-      loadCatalog().then(function (c) { if (c && parseRoute(location.hash).tab === 'overview') renderBackendManager(box); });
+      box.appendChild(el('div', 'note', '加载中…'));
+      loadCatalog().then(function (c) { if (c && parseRoute(location.hash).tab === 'backends') renderBackendManager(box); });
       return;
     }
-    box.className = '';
-    box.appendChild(el('div', 'note', '当前全局默认后端：' + catalog.defaultBackend + '（项目未显式选择时路由到它）'));
     groupBackends(catalog.entries).forEach(function (grp) {
-      var g = el('div', 'bk-group');
-      var gh = el('div', 'gh', familyName(grp.family));
-      g.appendChild(gh);
-      var sub = el('div', 'bk-sub');
-      grp.entries.forEach(function (e) { sub.appendChild(renderBackendManagerRow(e, box)); });
-      g.appendChild(sub);
-      box.appendChild(g);
+      var gh = el('div', null, familyName(grp.family));
+      gh.style.cssText = 'margin:16px 0 2px;font-size:12px;font-weight:600;letter-spacing:.4px;color:var(--text-3);text-transform:uppercase';
+      box.appendChild(gh);
+      grp.entries.forEach(function (e) { box.appendChild(renderBackendManagerRow(e)); });
     });
   }
 
-  function renderBackendManagerRow(e, mgrBox) {
-    var row = el('div', 'mgr-row');
-    var grow = el('div', 'grow');
+  function renderBackendManagerRow(e) {
+    var item = el('div', 'bk-item');
+    item.appendChild(el('div', 'bk-ic', e.agentFamily === 'codex' ? '⚡' : e.agentFamily === 'claude' ? '◆' : '🧩'));
+    var main = el('div', 'bk-main');
     var tri = depTriState(e);
-    var head = el('div', 'statline');
-    var stateTag = tri.state === 'installed' ? 'tag green' : tri.state === 'downloadable' ? 'tag blue' : 'tag orange';
-    head.appendChild(el('span', null, e.displayName + (e.version ? ' ' + e.version : '') + (e.isDefault ? '（默认）' : '')));
-    head.appendChild(el('span', stateTag, tri.label));
-    head.appendChild(el('span', 'tag', e.access));
-    if (e.approxSizeMB) head.appendChild(el('span', 'tag', '约 ' + e.approxSizeMB + 'M'));
-    grow.appendChild(head);
-    if (e.blurb) grow.appendChild(el('div', 'note', e.blurb));
-    if (tri.action === 'manual' && e.hint) grow.appendChild(el('div', 'note', '装法：' + e.hint));
-    row.appendChild(grow);
+    var name = el('div', 'bk-name');
+    name.appendChild(document.createTextNode(e.displayName));
+    name.appendChild(el('span', tri.state === 'installed' ? 'tag green' : tri.state === 'downloadable' ? 'tag blue' : 'tag orange', tri.label));
+    if (e.isDefault) name.appendChild(el('span', 'tag', '默认'));
+    main.appendChild(name);
+    var bits = [e.access];
+    var shownVer = e.installedVersion || e.version;
+    // version 串可能已含名字（codex 的 "codex-cli 0.139.0"）→ 只对纯版本号补 "v" 前缀。
+    if (shownVer) bits.push(/^\\d/.test(shownVer) ? 'v' + shownVer : shownVer);
+    if (e.approxSizeMB) bits.push('约 ' + e.approxSizeMB + 'M');
+    var meta = el('div', 'bk-meta', bits.join(' · '));
+    main.appendChild(meta);
+    if (e.blurb) main.appendChild(el('div', 'note', e.blurb));
+    if (tri.action === 'manual' && e.hint) main.appendChild(el('div', 'note', '装法：' + e.hint));
+    item.appendChild(main);
 
+    var actions = el('div', 'bk-actions');
+    item.appendChild(actions);
     if (tri.action === 'download') {
-      var dl = el('button', 'btn primary', '⬇️ 下载' + (e.approxSizeMB ? '（约 ' + e.approxSizeMB + 'M）' : ''));
-      dl.onclick = function () { startBackendInstall(e, row, dl); };
-      row.appendChild(dl);
+      var dl = el('button', 'btn primary sm', '⬇️ 下载' + (e.approxSizeMB ? '（约 ' + e.approxSizeMB + 'M）' : ''));
+      dl.onclick = function () { startBackendInstall(e, item, dl, 'install'); };
+      actions.appendChild(dl);
+    } else if (e.depState === 'installed' && e.canUninstall) {
+      var upd = el('button', 'btn sm', '🔄 检查更新');
+      upd.onclick = function () { checkBackendUpdate(e, item, upd); };
+      actions.appendChild(upd);
+      var rm = el('button', 'btn danger sm', '🗑️ 卸载');
+      rm.onclick = function () { askUninstallBackend(e); };
+      actions.appendChild(rm);
     }
-    return row;
+    return item;
   }
 
-  // 后端按需安装：POST /api/backends/:id/install 的 SSE（{type:'log'} → done/error）。
-  function startBackendInstall(entry, row, btn) {
-    btn.className = 'btn primary disabled'; btn.disabled = true; btn.textContent = '⏳ 安装中…';
+  // 「检查更新」：GET /version → 有新版则把按钮变成「更新到 vX」（点了走 update SSE）。
+  function checkBackendUpdate(e, item, btn) {
+    btn.disabled = true; btn.className = 'btn sm disabled'; btn.textContent = '🔍 查询中…';
+    fetch('/api/backends/' + encodeURIComponent(e.id) + '/version').then(function (r) { return r.json(); }).then(function (v) {
+      if (v.hasUpdate && v.latest) {
+        btn.className = 'btn primary sm'; btn.disabled = false; btn.textContent = '🔄 更新到 v' + v.latest;
+        btn.onclick = function () { startBackendInstall(e, item, btn, 'update'); };
+        toast('🆕 有新版 v' + v.latest + '（当前 v' + (v.installed || '?') + '）');
+      } else {
+        btn.textContent = '✅ 已是最新' + (v.installed ? ' v' + v.installed : (v.latest ? ' v' + v.latest : ''));
+        setTimeout(function () { btn.className = 'btn sm'; btn.disabled = false; btn.textContent = '🔄 检查更新'; btn.onclick = function () { checkBackendUpdate(e, item, btn); }; }, 2600);
+      }
+    }).catch(function () { btn.className = 'btn sm'; btn.disabled = false; btn.textContent = '🔄 检查更新'; toast('❌ 版本查询失败（网络/registry）'); });
+  }
+
+  function askUninstallBackend(e) {
+    confirmDialog({
+      title: '🗑️ 卸载「' + e.displayName + '」？',
+      lines: [
+        '将删除用户私装目录里的该后端依赖' + (e.approxSizeMB ? '（约 ' + e.approxSizeMB + 'M）' : '') + '。',
+        '随时可再点「下载」装回。正在用它的项目记得改回其它后端。',
+      ],
+      danger: true, confirmLabel: '确认卸载',
+      onConfirm: function () {
+        fetch('/api/backends/' + encodeURIComponent(e.id), { method: 'DELETE' })
+          .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+          .then(function (resp) {
+            if (resp.status === 200) { toast('✅ ' + (resp.body.message || '已卸载')); refreshBackends(); }
+            else if (resp.status === 501) toast('⏳ ' + (resp.body.message || '需要 daemon 在跑'));
+            else toast('❌ ' + (resp.body.message || ('HTTP ' + resp.status)));
+          }).catch(function () { toast('❌ 请求失败'); });
+      },
+    });
+  }
+
+  // 按需安装/更新：POST /api/backends/:id/(install|update) 的 SSE（{type:'log'} → done/error）。
+  function startBackendInstall(entry, item, btn, mode) {
+    var isUpd = mode === 'update';
+    btn.className = 'btn primary sm disabled'; btn.disabled = true; btn.textContent = isUpd ? '⏳ 更新中…' : '⏳ 安装中…';
     var bar = el('div', 'progress'); var fill = el('div'); bar.appendChild(fill);
-    row.appendChild(bar);
+    item.appendChild(bar);
     var tail = el('div', 'insttail');
-    row.appendChild(tail);
+    item.appendChild(tail);
     var lines = 0;
-    // 224M 下载没有真进度百分比 —— 用「日志行数」做一个观感进度（封顶 92% 等 done）。
     function bump() { lines++; var pct = Math.min(92, 8 + lines * 4); fx.width(fill, pct); }
 
-    fetch('/api/backends/' + encodeURIComponent(entry.id) + '/install', {
+    fetch('/api/backends/' + encodeURIComponent(entry.id) + '/' + (isUpd ? 'update' : 'install'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
     }).then(function (resp) {
       if (!resp.body || !resp.body.getReader) { tail.textContent = '（浏览器不支持流式读取，请改用终端安装）'; return; }
@@ -1120,18 +1318,18 @@ ${UI_PURE_JS}
           buf += dec.decode(chunk.value, { stream: true });
           var parts = buf.split('\\n\\n');
           buf = parts.pop();
-          parts.forEach(function (block) { handleInstallBlock(block, tail, fill, btn, entry, bump); });
+          parts.forEach(function (block) { handleInstallBlock(block, tail, fill, btn, entry, bump, isUpd); });
           return pump();
         });
       }
       return pump();
     }).catch(function () {
-      btn.className = 'btn primary'; btn.disabled = false; btn.textContent = '⬇️ 重试';
-      tail.textContent += '\\n❌ 安装请求失败';
+      btn.className = 'btn primary sm'; btn.disabled = false; btn.textContent = isUpd ? '🔄 重试更新' : '⬇️ 重试';
+      tail.textContent += '\\n❌ 请求失败';
     });
   }
 
-  function handleInstallBlock(block, tail, fill, btn, entry, bump) {
+  function handleInstallBlock(block, tail, fill, btn, entry, bump, isUpd) {
     var msg = parseSseDataBlock(block);
     if (!msg) return;
     if (msg.type === 'log') {
@@ -1140,15 +1338,14 @@ ${UI_PURE_JS}
       tail.scrollTop = tail.scrollHeight;
     } else if (msg.type === 'done') {
       fx.width(fill, 100);
-      btn.textContent = '✅ 已安装'; btn.className = 'btn disabled';
-      toast('✅ 「' + entry.displayName + '」安装完成');
-      // 刷新 catalog（depState 转 installed）→ 重渲后端管理卡。
-      loadCatalog().then(function () { if (parseRoute(location.hash).tab === 'overview') renderRoute(); });
+      btn.textContent = isUpd ? '✅ 已更新' : '✅ 已安装'; btn.className = 'btn sm disabled';
+      toast('✅ 「' + entry.displayName + '」' + (isUpd ? '更新' : '安装') + '完成');
+      refreshBackends();
     } else if (msg.type === 'error') {
-      btn.className = 'btn primary'; btn.disabled = false; btn.textContent = '⬇️ 重试';
+      btn.className = 'btn primary sm'; btn.disabled = false; btn.textContent = isUpd ? '🔄 重试更新' : '⬇️ 重试';
       var hint = msg.code === 'not_wired_yet'
         ? '需要 daemon 在跑（当前为只读预览）'
-        : msg.code === 'aborted' ? '已取消' : (msg.message || '安装失败');
+        : msg.code === 'aborted' ? '已取消' : (msg.message || '失败');
       tail.textContent += (tail.textContent ? '\\n' : '') + '❌ ' + hint;
       toast('❌ ' + hint);
     }
@@ -1922,15 +2119,18 @@ ${UI_PURE_JS}
   // ── 启动 ─────────────────────────────────────────────────────────────────
   $('drawerMask').onclick = closeDrawer;
   $('confirmMask').onclick = function (e) { if (e.target === $('confirmMask')) $('confirmMask').classList.remove('open'); };
+  var hb = $('hamburger'); if (hb) hb.onclick = openSidebar;
+  var scrim = $('sideScrim'); if (scrim) scrim.onclick = closeSidebar;
   startLogStream();
   loadCatalog();
   loadState();
   loadDaemon();
   renderRoute();
-  // 一次性首屏入场：白色产品头部从上滑入（仅首次，5s 刷新不重放）。
+  // 一次性首屏入场：侧栏淡入 + 顶栏从上滑入（仅首次，5s 刷新不重放）。
   if (fx.on) {
     try {
-      window.gsap.from('.appbar', { autoAlpha: 0, y: -14, duration: 0.45, clearProps: 'transform,opacity,visibility' });
+      window.gsap.from('.sidebar', { autoAlpha: 0, x: -16, duration: 0.5, clearProps: 'transform,opacity,visibility' });
+      window.gsap.from('.topbar', { autoAlpha: 0, y: -12, duration: 0.45, delay: 0.05, clearProps: 'transform,opacity,visibility' });
     } catch (e) {}
   }
   setInterval(loadState, 5000);  // /api/state 5s 刷新

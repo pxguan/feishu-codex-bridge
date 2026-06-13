@@ -48,6 +48,11 @@ describe('parseRoute —— hash 路由（overview / bot）', () => {
   it('未知 hash 兜底总览', () => {
     expect(pure.parseRoute('#whatever')).toEqual({ tab: 'overview' });
   });
+  it('系统分页 #backends/#doctor/#logs → 对应 tab', () => {
+    expect(pure.parseRoute('#backends')).toEqual({ tab: 'backends' });
+    expect(pure.parseRoute('#doctor')).toEqual({ tab: 'doctor' });
+    expect(pure.parseRoute('#logs')).toEqual({ tab: 'logs' });
+  });
 });
 
 describe('depTriState —— 后端依赖三态', () => {
