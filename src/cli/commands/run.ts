@@ -38,11 +38,84 @@ export async function runRun(botName?: string): Promise<void> {
   // No selector: bring up the active set. 0/1 → inline (preserve the simple
   // single-process path, incl. first-run onboarding); ≥2 → supervisor.
   const active = activeBots(await loadBots());
+  // 零 bot + 非交互（典型：用户把一句话发给 codex/claude，它非交互地 run，没 TTY 没法
+  // 终端扫码）→ 起「引导控制台」：不连任何 bot，只挂可写 Web 控制台让用户在浏览器里扫码
+  // 创建第一个机器人（registerBotByQr 自给自足，不需要在跑的 bot）。TTY 仍走终端扫码向导。
+  if (active.length === 0 && !process.stdout.isTTY) {
+    await runOnboardingConsole();
+    return;
+  }
   if (active.length > 1) {
     await runSupervisor(active);
     return;
   }
   await runSingle(active[0]?.name);
+}
+
+/**
+ * 零 bot 引导守护：还没有任何机器人时，不报错退出，而是只起一个**可写**的 Web 控制台，
+ * 用户在浏览器里扫码创建第一个机器人即可（registerBotByQr 不依赖任何在跑的 bot）。创建后
+ * 重启 daemon（空注册表→首 bot 自动成为 current/active）该 bot 即上线。这是「一句话安装」
+ * 落地体验的关键：codex/claude 非交互地起好它 + 打印网址，用户全程在浏览器里点完。
+ */
+async function runOnboardingConsole(): Promise<void> {
+  let releaseLock: () => void;
+  try {
+    releaseLock = acquireSingleInstanceLock('__onboarding__');
+  } catch (err) {
+    if (err instanceof BridgeAlreadyRunningError) {
+      console.error(`✗ ${err.message}`);
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
+  recordServicePid();
+  const startedAt = Date.now();
+  const webConsole = await mountWebConsole(
+    createAdminService({
+      daemonStartedAt: startedAt,
+      // 引导态没有 bot → 不注入 executeWrite/liveStatus；但全局能力齐备：扫码建 bot
+      // （registerBotByQr 自给自足）、按需下载后端、重启/升级。
+      restartDaemon: () => spawnDaemonControl('restart'),
+      applyUpdate: () => spawnDaemonControl('update'),
+      installBackend: installBackendDep,
+    }),
+  );
+  if (!webConsole) {
+    console.error('✗ Web 控制台未能启动，无法进入引导（端口被占用？）。');
+    releaseLock();
+    process.exitCode = 1;
+    return;
+  }
+  console.log('\n还没有配置任何飞书机器人 —— 已进入「引导控制台」，到浏览器里扫码创建第一个：');
+  if (process.stdout.isTTY) {
+    console.log(`\n🌐 ${webConsole.url}`);
+    console.log('   仅本机可访问（127.0.0.1）；URL 含 token 勿外传。\n');
+  } else {
+    console.log(
+      `\n🌐 Web 控制台已启动（127.0.0.1:${webConsole.port}）。运行 ` +
+        '`feishu-codex-bridge web` 获取带 token 的登录链接，在浏览器里扫码创建机器人；建完重启即上线。\n',
+    );
+  }
+  log.info('run', 'onboarding-console-up', { port: webConsole.port });
+
+  let stopping = false;
+  const stop = (sig: NodeJS.Signals): void => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`\n收到 ${sig}，正在退出引导控制台…`);
+    void (webConsole.close() ?? Promise.resolve())
+      .catch(() => undefined)
+      .finally(() => {
+        releaseLock();
+        process.exit(0);
+      });
+  };
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(sig, () => stop(sig));
+  }
+  await new Promise<never>(() => {});
 }
 
 /** Run a single bot inline in this process. `botName` undefined → the implicit

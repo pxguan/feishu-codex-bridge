@@ -468,6 +468,12 @@ export const UI_HTML = `<!doctype html>
     font-size: 13px; display: none; z-index: 20; max-width: 80vw;
   }
   .empty { color: var(--text-3); text-align: center; padding: 18px 0; }
+  /* 首次使用欢迎 hero（零 bot 着陆：一句话装好桥后到这里扫码建第一个机器人）。 */
+  .firstrun { text-align: center; padding: 26px 16px 22px; }
+  .firstrun .fr-emoji { font-size: 40px; line-height: 1; }
+  .firstrun .fr-title { font-size: 16px; font-weight: 600; margin: 12px 0 6px; color: var(--text); }
+  .firstrun .fr-sub { font-size: 13px; color: var(--text-2); max-width: 420px; margin: 0 auto 16px; line-height: 1.7; }
+  .firstrun .fr-cta { font-size: 14px; padding: 9px 26px; box-shadow: 0 4px 12px rgba(22,93,255,.28); }
   #wizMask, #confirmMask {
     position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; z-index: 30;
     overflow-y: auto; padding: 40px 16px;
@@ -902,8 +908,16 @@ ${UI_PURE_JS}
   function renderBots(box, countEl) {
     box.textContent = '';
     if (!state || state.bots.length === 0) {
-      box.className = 'empty';
-      box.textContent = '还没有机器人。点上方「➕ 添加机器人」接入。';
+      // 首次使用欢迎 hero：一句话装好桥后落到这里，醒目引导扫码建第一个机器人（全程浏览器）。
+      box.className = '';
+      var hero = el('div', 'firstrun');
+      hero.appendChild(el('div', 'fr-emoji', '🚀'));
+      hero.appendChild(el('div', 'fr-title', '欢迎！还差最后一步：创建你的第一个飞书机器人'));
+      hero.appendChild(el('div', 'fr-sub', '点下面的按钮，用飞书扫码即可创建并授权——全程在这个网页里完成，不用碰终端。'));
+      var cta = el('button', 'btn primary fr-cta', '➕ 扫码创建第一个机器人');
+      cta.onclick = function () { openWizard(); };
+      hero.appendChild(cta);
+      box.appendChild(hero);
       if (countEl) countEl.textContent = '';
       return;
     }
@@ -1787,7 +1801,17 @@ ${UI_PURE_JS}
     });
     w.appendChild(ul);
     w.appendChild(el('div', 'note', '提示：私聊机器人发任意消息即可唤出私聊管理台；Web 控制台与私聊卡片共享同一套设置，双端实时一致。'));
+    // 新建的机器人要等 daemon 重启、被 supervisor 接管后才真正上线（尤其「引导控制台」是
+    // 零 bot 起的，得重启才会连上这个新 bot）。给一条醒目提示 + 一键重启（确认弹窗里会说明
+    // 重启会短暂打断其它在跑的机器人）。
+    var liveTip = el('div', 'note');
+    liveTip.style.cssText = 'margin-top:10px;padding:10px 12px;background:var(--blue-tint);border-radius:8px;color:var(--text-2)';
+    liveTip.textContent = '⚡ 让它上线：新机器人需重启 daemon 后由后台接管。点下面「重启使其上线」即可（首次创建时重启很安全，不影响别的机器人）。';
+    w.appendChild(liveTip);
     var actions = el('div', 'actions');
+    var restart = el('button', 'btn', '🔁 重启使其上线');
+    restart.onclick = askRestart;
+    actions.appendChild(restart);
     actions.appendChild(el('div', 'grow'));
     var done = el('button', 'btn primary', '完成并进入该机器人 →');
     done.onclick = function () { var id = wizBotId; closeWizard(); if (id) go({ tab: 'bot', botId: id }); };
