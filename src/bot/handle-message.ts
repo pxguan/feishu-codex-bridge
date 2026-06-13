@@ -71,7 +71,8 @@ import {
   buildAddAllowedCard,
   buildAdminsCard,
   buildAllowlistCard,
-  buildBackendCard,
+  buildBackendDetectingCard,
+  buildBackendPickerCard,
   buildDmMenuCard,
   buildDoctorCard,
   buildGroupSettingsCard,
@@ -89,6 +90,7 @@ import {
   tierLabel,
   DM,
   GS,
+  type BackendProbeRow,
   type DoctorInfo,
 } from '../card/dm-cards';
 import {
@@ -289,6 +291,34 @@ export function validateBackendSwitch(opts: {
     }
   }
   return null;
+}
+
+/** 单个后端 doctor 探测的超时兜底（ms）：探测要 spawn CLI，未安装/卡死时不能
+ * 拖住检测卡——超时按「探测没跑成」（probe undefined）渲染为不可用。 */
+export const BACKEND_PROBE_TIMEOUT_MS = 3000;
+
+/**
+ * 🧠 后端检测的纯探测（exported for tests）：并行对全部后端 doctor({force})，
+ * 单个超时（Promise.race 兜底）/抛错都归一成 probe undefined——检测结果卡按
+ * 不可用渲染，绝不放行。输入是后端实例的最小切面，注册表里有什么测什么，
+ * 新后端注册即自动出现在结果卡上。
+ */
+export async function probeBackends(
+  backends: readonly Pick<AgentBackend, 'id' | 'displayName' | 'supportedModes' | 'doctor'>[],
+  timeoutMs = BACKEND_PROBE_TIMEOUT_MS,
+): Promise<BackendProbeRow[]> {
+  return Promise.all(
+    backends.map(async (be) => {
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      });
+      const probe = await Promise.race([be.doctor({ force: true }).catch(() => undefined), timeout]).finally(() =>
+        clearTimeout(timer),
+      );
+      return { id: be.id, name: be.displayName, probe, supportedModes: be.supportedModes };
+    }),
+  );
 }
 
 interface ActiveState {
@@ -495,9 +525,9 @@ export function createOrchestrator(
    * routed yet (status card, /usage, models prewarm, resume-picker pick) keep
    * using it directly — identical to the pre-registry behavior. */
   const backend = backendFor();
-  /** 注册表内全部后端（id + 展示名）—— 🧠 后端选择卡的动态选项源，绝不硬编码。 */
-  const backendChoices = (): { id: string; name: string }[] =>
-    backendIds().map((id) => ({ id, name: backendFor(id).displayName }));
+  /** 并行体检注册表全部后端（🧠 后端检测结果卡的数据源；{@link probeBackends}
+   * 的注册表套壳——绝不硬编码后端列表，新后端注册即自动出现）。 */
+  const probeAllBackends = (): Promise<BackendProbeRow[]> => probeBackends(backendIds().map((id) => backendFor(id)));
   /** 后端 id → 展示名（项目设置卡）。手编 projects.json 写了未知 id 时原样显示。 */
   const backendDisplayName = (id?: string): string => {
     try {
@@ -2406,34 +2436,68 @@ export function createOrchestrator(
         );
       })();
     })
-    // 🧠 后端：打开选择卡（注册表动态列出，下拉+提交，复用 🔐 权限的表单模式）。
+    // 🧠 后端：检测式单点切换，两段式。点击当下就并行 doctor 全部注册后端（单个
+    // 3s 超时，probeBackends），settle 窗口一过立即 patch「🔍 检测中」轻量中间态
+    // （用户瞬间看到反应，不再是 ~744ms 毫无动静）；检测完原地刷成结果卡（可用项
+    // 一行一个「切换」按钮单点直达）。若 settle 时检测已出结果则直接上结果卡（不闪
+    // 中间态）。结果卡纯按钮不锁，「🔄 重新检测」就是再点本回调。
     .on(DM.backend, ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
       const name = typeof value.n === 'string' ? value.n : '';
-      patch(evt, async () => {
-        const p = await getProjectByName(name);
-        return p ? buildBackendCard(p, backendChoices()) : buildDmMenuCard();
-      });
+      const probing = probeAllBackends(); // 点击即开测，与 settle 窗口并行
+      void (async () => {
+        try {
+          await new Promise((r) => setTimeout(r, CARD_SETTLE_MS));
+          const p = await getProjectByName(name);
+          if (!p) {
+            await updateManagedCard(channel, evt.messageId, buildDmMenuCard());
+            return;
+          }
+          const PENDING = Symbol('pending');
+          const first = await Promise.race([probing, Promise.resolve<typeof PENDING>(PENDING)]);
+          let msgId = evt.messageId;
+          let rows: BackendProbeRow[];
+          if (first === PENDING) {
+            // 检测未完 → 先上中间态。孤儿卡（重启后无实体映射）自愈成新卡，后续
+            // 结果更新指向新卡（与 settleUpdate 的 fallbackChatId 同语义）。
+            const detecting = buildBackendDetectingCard(p);
+            const ok = await updateManagedCard(channel, msgId, detecting);
+            if (!ok) msgId = (await sendManagedCard(channel, evt.chatId, detecting)).messageId;
+            rows = await probing;
+          } else {
+            rows = first;
+          }
+          const picker = buildBackendPickerCard(p, rows);
+          const ok = await updateManagedCard(channel, msgId, picker);
+          if (!ok) await sendManagedCard(channel, evt.chatId, picker);
+          log.info('console', 'backend-detect', {
+            project: name,
+            backends: rows.map((r) => `${r.id}:${r.probe?.ok ? 'ok' : 'x'}`).join(','),
+          });
+        } catch (err) {
+          log.fail('console', err, { phase: 'backend-detect' });
+        }
+      })();
     })
-    // 提交后端切换：校验（注册表 → doctor 探活 → 权限档支持面，见
-    // validateBackendSwitch）通过才写 Project.backend。**不驱逐活跃会话**：
-    // SessionRecord.backend 让已有话题会话仍走原后端，新话题才用新值（resolveThread
-    // 按记录路由的既有语义，卡上已注明）。表单卡提交后锁 card_id，结果（项目设置卡
-    // / 带原因的拒绝卡）发**新卡**，旧表单留痕——同 🔐 权限的提交模式。
+    // 切换（检测结果卡「切换」按钮单点直达，value.b 直接带目标后端 id）：校验
+    // （注册表 → doctor 探活 → 权限档支持面，见 validateBackendSwitch）通过才写
+    // Project.backend。**不驱逐活跃会话**：SessionRecord.backend 让已有话题会话
+    // 仍走原后端，新话题才用新值（resolveThread 按记录路由的既有语义，卡上已注明）。
+    // 按钮卡不锁 card_id：成功 patch 回项目设置卡（附「✅ 已切到」提示行），拒绝则
+    // patch 回带原因的检测结果卡（重新探测渲染三态）。旧版下拉表单卡的提交仍带
+    // formValue，兜底读之——老卡 card_id 已锁，patch 失败自动走 fallback 发新卡。
     .on(DM.backendSubmit, ({ evt, value, formValue }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
       const name = typeof value.n === 'string' ? value.n : '';
-      const target = selectValue(formValue, 'backend');
-      void (async () => {
+      const target = typeof value.b === 'string' ? value.b : selectValue(formValue, 'backend');
+      patch(evt, async () => {
         const p = await getProjectByName(name);
-        if (!p || !target) return;
+        if (!p || !target) return buildDmMenuCard();
         const registered = backendIds();
-        // doctor({force}) 看「现在」的状态：未装 CLI / SDK 不可用的后端在这里拦住，
-        // 而不是切过去之后每条消息报错。全程异步（卡片回调里绝不能 spawnSync）。
+        // doctor({force}) 看「现在」的状态：检测卡渲染后环境可能已变（卸载/登出），
+        // 写盘前再探一次，带与检测同款的超时兜底。全程异步（回调里绝不 spawnSync）。
         const probe = registered.includes(target)
-          ? await backendFor(target)
-              .doctor({ force: true })
-              .catch(() => undefined)
+          ? (await probeBackends([backendFor(target)]))[0]?.probe
           : undefined;
         const reason = validateBackendSwitch({
           target,
@@ -2444,21 +2508,17 @@ export function createOrchestrator(
         });
         if (reason) {
           log.info('console', 'backend-denied', { project: name, target, reason });
-          await sendManagedCard(channel, evt.chatId, buildBackendCard(p, backendChoices(), reason)).catch((e) =>
-            log.fail('console', e, { phase: 'backend-denied' }),
-          );
-          return;
+          return buildBackendPickerCard(p, await probeAllBackends(), reason);
         }
         await updateProject(name, { backend: target });
         log.info('console', 'backend', { project: name, backend: target });
-        const fresh = await getProjectByName(name); // 写后回读，卡片与盘上一致
-        if (!fresh) return;
-        await sendManagedCard(
-          channel,
-          evt.chatId,
-          buildProjectSettingsCard(fresh, backendDisplayName(fresh.backend)),
-        ).catch((e) => log.fail('console', e, { phase: 'backend-result' }));
-      })();
+        const fresh = (await getProjectByName(name)) ?? { ...p, backend: target }; // 写后回读，卡片与盘上一致
+        return buildProjectSettingsCard(
+          fresh,
+          backendDisplayName(fresh.backend),
+          `✅ 已切到 **${backendDisplayName(fresh.backend)}** · 新话题生效`,
+        );
+      });
     });
 
   /**

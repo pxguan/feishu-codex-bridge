@@ -8,7 +8,7 @@ import {
   type AppConfig,
 } from '../config/schema';
 import { defaultNoMention, effectiveGuestMode, effectiveMode, type Project } from '../project/registry';
-import { DEFAULT_BACKEND_ID, type PermissionMode } from '../agent/types';
+import { DEFAULT_BACKEND_ID, type BackendProbe, type PermissionMode } from '../agent/types';
 import type { SessionRecord } from '../bot/session-store';
 import { labelScope } from '../config/scopes';
 import { summarizeEventDiagnosis, type EventDiagnosis } from '../utils/event-diagnosis';
@@ -72,7 +72,9 @@ export const DM = {
   // 🔐 权限：codex 沙箱档位（管理员档 + 普通用户档）+ 联网，做成下拉表单（选+提交）
   permission: 'dm.proj.perm',
   permissionSubmit: 'dm.proj.perm.submit',
-  // 🧠 后端：项目级 agent 后端选择（注册表动态列出），下拉+提交（同 🔐 权限模式）
+  // 🧠 后端：项目级 agent 后端选择（注册表动态列出）。backend = 打开/重新检测
+  // （两段式：检测中 → 检测结果卡），backendSubmit = 结果卡「切换」按钮单点直达
+  // （value.b 直接带目标后端 id，不再是下拉表单提交）
   backend: 'dm.proj.backend',
   backendSubmit: 'dm.proj.backend.submit',
 } as const;
@@ -895,34 +897,89 @@ export function buildPermissionCard(p: Pick<Project, 'name' | 'mode' | 'guestMod
   );
 }
 
+/** 单个后端的检测结果（🧠 后端检测结果卡的一行）。`probe` undefined = 探测没
+ * 跑成/超时，按不可用渲染——绝不放行。`supportedModes` 同
+ * {@link AgentBackend.supportedModes}（undefined ⇒ 全档支持）。 */
+export interface BackendProbeRow {
+  id: string;
+  name: string;
+  probe?: BackendProbe;
+  supportedModes?: readonly PermissionMode[];
+}
+
 /**
- * 🧠 后端选择卡（DM「项目设置 → 🧠 后端」）。下拉+提交，复用 🔐 权限的表单模式
- * （selectMenu 表单收值、提交时才读、不锁卡；提交后 card_id 锁定，结果发新卡留痕）。
- * `backends` 由调用方从注册表动态取（id + displayName）——绝不硬编码后端列表。
- * 切换只影响**新话题**：已有话题会话按 SessionRecord.backend 仍走原后端（既有
- * 语义，见 resolveThread 的按记录路由），所以提交 handler 不驱逐活跃会话。
+ * 🧠 后端检测中间态（DM「项目设置 → 🧠 后端」第一段）。点击后立即 patch 这张
+ * 轻量卡（让用户瞬间看到反应），后台并行 doctor 全部注册后端，完成后原地刷成
+ * {@link buildBackendPickerCard}。
  */
-export function buildBackendCard(
-  p: Pick<Project, 'name' | 'backend'>,
-  backends: { id: string; name: string }[],
+export function buildBackendDetectingCard(p: Pick<Project, 'name'>): CardObject {
+  return card(
+    [
+      md(`**🧠 后端** · ${p.name}`),
+      md('🔍 正在检测本机可用后端…'),
+      note('对每个已注册后端做环境体检（最多约 3 秒），完成后这张卡会自动刷新。'),
+    ],
+    { header: { title: '🧠 后端', template: 'turquoise' } },
+  );
+}
+
+/**
+ * 🧠 后端检测结果卡（第二段）：每个注册后端一行，三态渲染——
+ *   可用 → ✅ + 一个「切换」按钮单点直达（value 直接带目标后端 id `b`，落
+ *         {@link DM.backendSubmit} 复用既有校验+写盘逻辑）；
+ *   当前 → 标注「✓ 使用中」，无按钮；
+ *   不可用（探测失败/超时）→ ❌ 灰字附 doctor hint，无按钮；
+ *   可用但权限档不支持（如 claude 系仅 full）→ 灰字提前告知「需完全访问档」，
+ *         无按钮（提前告知而非点了才拒；backendSubmit 的硬校验不变）。
+ * 纯按钮不锁卡，可反复 🔄 重新检测 / 切换。`rows` 由调用方按注册表动态探测——
+ * 绝不硬编码后端列表（新后端注册即自动出现）。
+ */
+export function buildBackendPickerCard(
+  p: Pick<Project, 'name' | 'backend' | 'mode' | 'guestMode'>,
+  rows: BackendProbeRow[],
   error?: string,
 ): CardObject {
   const current = p.backend ?? DEFAULT_BACKEND_ID;
-  const options: SelectOption[] = backends.map((b) => ({
-    label: `${b.name}${b.id === DEFAULT_BACKEND_ID ? '（默认）' : ''}`,
-    value: b.id,
-  }));
+  const tiers = [...new Set([effectiveMode(p), effectiveGuestMode(p)])];
   const elements: CardElement[] = [];
   if (error) elements.push(md(`❌ **切换失败**：${error}`));
   elements.push(
     md(`**🧠 后端** · ${p.name}`),
-    note('本项目用哪个 agent 后端跑。**切换只对新话题生效；已有话题会话仍走原后端**（按会话记录路由）。'),
-    form('backend', [
-      selectMenu({ name: 'backend', placeholder: '选择后端', options, initial: current }),
-      actions([submitButton('✅ 切换后端', { a: DM.backendSubmit, n: p.name }, 'primary', 'submit_backend')]),
+    note('已检测本机各后端的可用状态，点「切换」单点直达。**切换只对新话题生效；已有话题会话仍走原后端**（按会话记录路由）。'),
+    hr(),
+  );
+  for (const row of rows) {
+    const ok = row.probe?.ok === true;
+    const ver = row.probe?.version ? ` ${row.probe.version}` : '';
+    const def = row.id === DEFAULT_BACKEND_ID ? '（默认）' : '';
+    const label = `${ok ? '✅' : '❌'} **${row.name}**${ver}${def}`;
+    if (row.id === current) {
+      elements.push(md(`${label} · ✓ 使用中`));
+      if (!ok) elements.push(note(row.probe?.hint ?? '环境探测失败（未安装、未登录或探测超时）'));
+      continue;
+    }
+    if (!ok) {
+      elements.push(md(label), note(row.probe?.hint ?? '环境探测失败（未安装、未登录或探测超时）'));
+      continue;
+    }
+    const unsupported = row.supportedModes ? tiers.filter((t) => !row.supportedModes!.includes(t)) : [];
+    if (unsupported.length > 0) {
+      elements.push(
+        md(label),
+        note(
+          `需 ${row.supportedModes!.map(tierLabel).join(' / ')} 权限档（本项目当前 ${tiers.map(tierLabel).join(' / ')}）—— 先在「🔐 权限」调整后才能切换`,
+        ),
+      );
+      continue;
+    }
+    elements.push(actions([md(label), button('切换', { a: DM.backendSubmit, n: p.name, b: row.id }, 'primary')]));
+  }
+  elements.push(
+    hr(),
+    actions([
+      button('🔄 重新检测', { a: DM.backend, n: p.name }),
+      button('⬅️ 返回设置', { a: DM.projectSettings, n: p.name }),
     ]),
-    note('提交时会先体检目标后端（未安装 / 不可用会拒绝）；部分后端仅支持特定权限档，不满足会拒绝并说明原因。'),
-    actions([button('⬅️ 返回设置', { a: DM.projectSettings, n: p.name })]),
   );
   return card(elements, { header: { title: '🧠 后端', template: 'blue' } });
 }
@@ -932,6 +989,7 @@ export function buildBackendCard(
  * 🔐 权限 + 🧠 后端 + 免@ 开关 + 响应白名单入口，以后的项目级设置项往这里加。
  * 纯按钮（不锁卡）。各按钮携带项目名 n（DM 里点，不能靠 evt.chatId 取项目）。
  * `backendName` = 当前后端的展示名（调用方从注册表解析）；缺省回退到原始 id。
+ * `notice` = 卡顶提示行（如后端切换成功的「✅ 已切到 xxx · 新话题生效」）。
  */
 export function buildProjectSettingsCard(
   project: Pick<
@@ -939,12 +997,14 @@ export function buildProjectSettingsCard(
     'name' | 'kind' | 'noMention' | 'origin' | 'cwd' | 'mode' | 'guestMode' | 'network' | 'autoCompact' | 'backend'
   >,
   backendName?: string,
+  notice?: string,
 ): CardObject {
   const kind = project.kind ?? 'multi';
   const noMention = project.noMention ?? defaultNoMention(project);
   const autoCompact = project.autoCompact ?? true;
   return card(
     [
+      ...(notice ? [md(notice)] : []),
       md(`**项目设置** · ${project.name}`),
       note(`${kindLabel(kind)}${project.cwd ? `   ·   📂 \`${project.cwd}\`` : ''}`),
       hr(),
