@@ -33,10 +33,10 @@ describe('ui.ts UI_PURE_JS 内联进 UI_HTML（同一份字符串，零漂移）
 });
 
 describe('parseRoute —— hash 路由（overview / bot）', () => {
-  it('空 hash → 总览', () => {
-    expect(pure.parseRoute('')).toEqual({ tab: 'overview' });
+  it('空 hash → 首页', () => {
+    expect(pure.parseRoute('')).toEqual({ tab: 'home' });
   });
-  it('#overview → 总览', () => {
+  it('#overview → 仪表盘', () => {
     expect(pure.parseRoute('#overview')).toEqual({ tab: 'overview' });
   });
   it('#bot/<appId> → 该 bot（解 encodeURIComponent）', () => {
@@ -45,8 +45,8 @@ describe('parseRoute —— hash 路由（overview / bot）', () => {
   it('appId 含特殊字符走 decodeURIComponent', () => {
     expect(pure.parseRoute('#bot/' + encodeURIComponent('cli_a/b c'))).toEqual({ tab: 'bot', botId: 'cli_a/b c' });
   });
-  it('未知 hash 兜底总览', () => {
-    expect(pure.parseRoute('#whatever')).toEqual({ tab: 'overview' });
+  it('未知 hash 兜底首页', () => {
+    expect(pure.parseRoute('#whatever')).toEqual({ tab: 'home' });
   });
   it('系统分页 #backends/#doctor/#logs → 对应 tab', () => {
     expect(pure.parseRoute('#backends')).toEqual({ tab: 'backends' });
