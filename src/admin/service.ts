@@ -728,6 +728,14 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
     async uninstallBackend(id): Promise<{ ok: boolean; message: string }> {
       const entry = catalogById(id);
       if (!entry) return { ok: false, message: `未知后端「${id}」` };
+      if (entry.dep.kind === 'external-cli') {
+        // codex 等外部 CLI 是你系统自管的（全局 npm / Codex.app / CODEX_BIN），桥只用不卸，
+        // 删了会破坏运行中的会话。引导用户自行处置，绝不替删。
+        return {
+          ok: false,
+          message: `「${entry.displayName}」是你本机自管的全局 CLI（不是桥下载的包），无法在这里卸载。如需移除，请自行 \`npm uninstall -g\` 或卸载 Codex.app。`,
+        };
+      }
       if (!entry.dep.pkg || !isInstallable(entry)) {
         return { ok: false, message: `「${entry.displayName}」不是可一键管理的按需后端，无法卸载。` };
       }
