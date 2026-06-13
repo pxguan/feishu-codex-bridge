@@ -186,6 +186,17 @@ export interface AdminService {
    * （无 daemon 在跑）抛 {@link NotWiredYetError}（HTTP 501）。
    */
   restartDaemon(): Promise<void>;
+  /**
+   * 启动后台服务（service install = 注册自启 + 拉起）。给只读预览用——预览态下
+   * daemon 没在跑，注入 {@link AdminServiceDeps.startDaemon}（detached helper）把它
+   * 装起来。未注入（如 daemon 进程自身，本就在跑）抛 {@link NotWiredYetError}（501）。
+   */
+  startDaemon(): Promise<void>;
+  /**
+   * 停止后台服务（service uninstall = 停进程 + 移除自启），与 CLI `stop` 同义。走
+   * detached helper（不能在 web 进程里停自己）。只读预览（无 daemon）未注入抛 NotWiredYetError。
+   */
+  stopDaemon(): Promise<void>;
   /** 检查 npm 上有无新版（current / latest / hasUpdate / dev）。绝不抛错（latest=null 兜底）。 */
   checkUpdate(): Promise<UpdateCheck>;
   /**
@@ -398,6 +409,10 @@ export interface AdminServiceDeps {
   restartDaemon?: () => void;
   /** 升级（npm i -g + 重启）的执行器（detached helper）。缺省同上抛 NotWiredYetError。 */
   applyUpdate?: () => void;
+  /** 启动后台服务的执行器（detached helper，service install）。只读预览注入，缺省抛 NotWiredYetError。 */
+  startDaemon?: () => void;
+  /** 停止后台服务的执行器（detached helper，service uninstall）。daemon 进程注入，缺省抛 NotWiredYetError。 */
+  stopDaemon?: () => void;
   /**
    * 按需后端依赖的安装执行器（npm-ondemand → 用户私装目录）。daemon 进程注入
    * {@link installBackendDep}（它 owns runtime，装完即能解析加载）；只读预览进程
@@ -778,6 +793,18 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       deps.restartDaemon();
     },
 
+    async startDaemon(): Promise<void> {
+      // 只读预览注入 spawnDaemonControl('start')；daemon 进程自身在跑、无需「启动」→ 未注入 501。
+      if (!deps.startDaemon) throw new NotWiredYetError('▶️ 启动 daemon');
+      deps.startDaemon();
+    },
+
+    async stopDaemon(): Promise<void> {
+      // daemon 进程注入 spawnDaemonControl('stop')（detached，停自己安全）；只读预览无 daemon → 501。
+      if (!deps.stopDaemon) throw new NotWiredYetError('⏹ 停止 daemon');
+      deps.stopDaemon();
+    },
+
     checkUpdate(): Promise<UpdateCheck> {
       return checkUpdateImpl().catch(() => ({
         current: bridgeVersion(),
@@ -929,8 +956,14 @@ async function probeAllBackends(): Promise<AdminBackendStatus[]> {
 }
 
 /** 只读预览（独立 `web` 进程，daemon 未跑）：无写执行器、状态靠锁文件探测。 */
-export function createReadonlyAdminService(): AdminService {
-  return createAdminService();
+/**
+ * 只读预览用的 AdminService：项目写 / 重启 / 升级 / 后端装卸全部缺省（抛 NotWiredYetError
+ * → 501）。唯一例外是 {@link AdminServiceDeps.startDaemon}——预览态下 daemon 没在跑，
+ * 「启动」是预览唯一该能做的宿主级动作（detached helper 把 service 装起来，与预览进程脱钩），
+ * 故允许调用方注入。其余 deps 一律不放行，保持「只读」语义。
+ */
+export function createReadonlyAdminService(deps: Pick<AdminServiceDeps, 'startDaemon'> = {}): AdminService {
+  return createAdminService({ startDaemon: deps.startDaemon });
 }
 
 function isAlive(pid: number): boolean {

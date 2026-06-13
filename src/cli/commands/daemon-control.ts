@@ -39,10 +39,43 @@ export async function runDaemonControl(action: string): Promise<void> {
       await doRestart('restart');
       return;
     }
+    if (action === 'start') {
+      await doStart();
+      return;
+    }
+    if (action === 'stop') {
+      await doStop();
+      return;
+    }
     log.warn('daemon-control', 'unknown-action', { action });
   } catch (err) {
     log.fail('daemon-control', err, { phase: action });
   }
+}
+
+/**
+ * start：把后台服务装好并拉起（service install = launchd 写 plist + bootstrap）。
+ * 由只读预览进程触发——预览本身没在跑 daemon，detached helper 把 service 装起来即可。
+ * 已在跑就当幂等（install 内部 bootout+bootstrap 重建，等价重启）。
+ */
+async function doStart(): Promise<void> {
+  await getServiceAdapter().install();
+  log.info('daemon-control', 'start-issued', {});
+}
+
+/**
+ * stop：停掉后台服务并移除自启（service uninstall = bootout + rm plist），与 CLI
+ * `stop` 同义。在 web 进程里不能直停自己（会杀掉正响应这条 HTTP 的事件循环）→ 走
+ * detached helper：本 daemon 被 bootout 杀掉后，helper 仍存活把 uninstall 走完。
+ */
+async function doStop(): Promise<void> {
+  if (!isServiceRunning()) {
+    // 没有 service manager 托管的实例（前台 run / 手动起）→ 没有可停的后台服务。
+    log.info('daemon-control', 'stop-skipped-no-service', {});
+    return;
+  }
+  await getServiceAdapter().uninstall();
+  log.info('daemon-control', 'stop-issued', {});
 }
 
 async function doUpdate(): Promise<void> {

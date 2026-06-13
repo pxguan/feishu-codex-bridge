@@ -2,6 +2,7 @@ import { createReadonlyAdminService } from '../../admin/service';
 import { readWebConsole } from '../../web/discovery';
 import { createWebServer, DEFAULT_WEB_PORT } from '../../web/server';
 import { openUrl } from '../../utils/open-url';
+import { spawnDaemonControl } from './daemon-control';
 
 /**
  * `feishu-codex-bridge web [--port]` —— 本机 Web 控制台。
@@ -34,7 +35,10 @@ export async function runWeb(opts: { port?: number } = {}): Promise<void> {
     return;
   }
 
-  const service = createReadonlyAdminService();
+  // 只读预览唯一放行的宿主级动作：「启动 daemon」。detached helper 装好后台服务并
+  // 拉起（与本预览进程脱钩）；本预览仍持有 51847 → daemon 退化到临时端口，起来后用户
+  // 重开 `web` 即短路到 daemon 的可写控制台（见 readWebConsole 命中分支）。
+  const service = createReadonlyAdminService({ startDaemon: () => spawnDaemonControl('start') });
   const web = createWebServer({ service });
 
   let url: string;

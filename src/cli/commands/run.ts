@@ -79,6 +79,7 @@ async function runOnboardingConsole(): Promise<void> {
       // （registerBotByQr 自给自足）、按需下载后端、重启/升级。
       restartDaemon: () => spawnDaemonControl('restart'),
       applyUpdate: () => spawnDaemonControl('update'),
+      stopDaemon: () => spawnDaemonControl('stop'),
       installBackend: installBackendDep,
       uninstallBackend: uninstallBackendDep,
     }),
@@ -201,9 +202,10 @@ async function runSingle(botName?: string): Promise<void> {
               }
             : undefined,
         daemonStartedAt: startedAt,
-        // 重启 / 升级走 detached helper：本进程被 service stop 杀掉后由 helper 续命。
+        // 重启 / 升级 / 停止走 detached helper：本进程被 service stop 杀掉后由 helper 续命。
         restartDaemon: () => spawnDaemonControl('restart'),
         applyUpdate: () => spawnDaemonControl('update'),
+        stopDaemon: () => spawnDaemonControl('stop'),
         // 按需后端安装在 daemon 进程内直跑（owns runtime，装完即能解析加载）。
         installBackend: installBackendDep,
         uninstallBackend: uninstallBackendDep,

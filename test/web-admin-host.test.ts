@@ -6,7 +6,7 @@ import { addProject } from '../src/project/registry';
 import { upsertSession } from '../src/bot/session-store';
 import { setSecret, listSecretIds } from '../src/config/keystore';
 import { secretKeyForApp } from '../src/config/schema';
-import { createAdminService, NotWiredYetError } from '../src/admin/service';
+import { createAdminService, createReadonlyAdminService, NotWiredYetError } from '../src/admin/service';
 
 // 临时目录隔离 ~/.feishu-codex-bridge（同 web-admin-service.test 的做法）。
 vi.mock('../src/config/paths', async () => {
@@ -141,6 +141,30 @@ describe('AdminService · restartDaemon / applyUpdate（detached helper 注入�
     await svc.applyUpdate();
     expect(restart).toHaveBeenCalledTimes(1);
     expect(update).toHaveBeenCalledTimes(1);
+  });
+
+  it('startDaemon / stopDaemon：无注入 → NotWiredYetError；有注入 → 触发对应 helper', async () => {
+    const bare = createAdminService();
+    await expect(bare.startDaemon()).rejects.toBeInstanceOf(NotWiredYetError);
+    await expect(bare.stopDaemon()).rejects.toBeInstanceOf(NotWiredYetError);
+    const start = vi.fn();
+    const stop = vi.fn();
+    const svc = createAdminService({ startDaemon: start, stopDaemon: stop });
+    await svc.startDaemon();
+    await svc.stopDaemon();
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('createReadonlyAdminService：只放行 startDaemon（停止 daemon 时唯一该能做的宿主级动作），stop/restart/update 仍 501', async () => {
+    const start = vi.fn();
+    const svc = createReadonlyAdminService({ startDaemon: start });
+    await svc.startDaemon();
+    expect(start).toHaveBeenCalledTimes(1);
+    // 其余生命周期动作在只读态不放行
+    await expect(svc.stopDaemon()).rejects.toBeInstanceOf(NotWiredYetError);
+    await expect(svc.restartDaemon()).rejects.toBeInstanceOf(NotWiredYetError);
+    await expect(svc.applyUpdate()).rejects.toBeInstanceOf(NotWiredYetError);
   });
 
   it('checkUpdate：复用 service/update（mock）→ hasUpdate', async () => {

@@ -229,7 +229,7 @@ export function resolveCliBinPath(): string {
   return resolve(distDir, '..', 'bin', 'feishu-codex-bridge.mjs');
 }
 
-export type DaemonControlAction = 'restart' | 'update';
+export type DaemonControlAction = 'restart' | 'update' | 'start' | 'stop';
 
 /**
  * 构建 detached helper 的 spawn 命令（纯函数，exported for tests）：用当前 Node

@@ -1232,9 +1232,9 @@ ${UI_PURE_JS}
     // 🛰️ daemon + 升级
     var daemonCard = el('div', 'card');
     var dh = el('h2'); dh.appendChild(document.createTextNode('🛰️ 后台 daemon'));
-    var dright = el('span', 'right');
-    var restartBtn = el('button', 'btn sm', '🔁 重启'); restartBtn.onclick = askRestart;
-    dright.appendChild(restartBtn); dh.appendChild(dright);
+    // 生命周期按钮按运行态由 renderDaemon 动态填充（运行中→重启/停止；未运行→启动）。
+    var dright = el('span', 'right'); dright.id = 'daemonActions';
+    dh.appendChild(dright);
     daemonCard.appendChild(dh);
     var daemonBody = el('div', 'note', '加载中…'); daemonBody.id = 'daemonBody';
     daemonCard.appendChild(daemonBody);
@@ -1547,12 +1547,23 @@ ${UI_PURE_JS}
 
   function renderDaemon(box) {
     box.textContent = '';
+    var acts = $('daemonActions');
+    if (acts) acts.textContent = '';
     var d = daemon;
     if (!d) { box.textContent = '加载中…'; return; }
     if (!d.supported) {
       box.appendChild(el('div', null, '⚠️ 本平台不支持后台服务'));
       box.appendChild(el('div', 'note', '用 feishu-codex-bridge run 前台运行；重启请在终端 Ctrl+C 后重跑。'));
       return;
+    }
+    // 生命周期按钮（运行中 → 重启 + 停止；未运行 → 启动）。「更新并重启」在下方版本区按需出现。
+    if (acts) {
+      if (d.running) {
+        var rb = el('button', 'btn sm', '🔁 重启'); rb.onclick = askRestart; acts.appendChild(rb);
+        var sb = el('button', 'btn sm danger', '⏹ 停止'); sb.style.marginLeft = '6px'; sb.onclick = askStop; acts.appendChild(sb);
+      } else {
+        var pb = el('button', 'btn sm primary', '▶️ 启动'); pb.onclick = askStart; acts.appendChild(pb);
+      }
     }
     var line = el('div', 'statline');
     if (d.running) line.appendChild(el('span', 'tag green', '✅ 运行中' + (d.pid ? ' · pid ' + d.pid : '')));
@@ -1580,10 +1591,10 @@ ${UI_PURE_JS}
     if (u.hasUpdate && u.latest) {
       box.appendChild(el('div', null, '🆕 有新版 v' + u.latest + '（当前 v' + u.current + '）'));
       var row = el('div', 'statline');
-      var up = el('button', 'btn primary', '⬆️ 升级到 v' + u.latest);
+      var up = el('button', 'btn primary', '⬆️ 更新并重启 · v' + u.latest);
       up.onclick = function () { askUpdate(u.latest); };
       row.appendChild(up);
-      row.appendChild(el('span', 'note', '默认只检测不自动升级；点上方按钮手动升级。'));
+      row.appendChild(el('span', 'note', '默认只检测不自动升级；点上方按钮装最新版并自动重启。'));
       box.appendChild(row);
     } else {
       box.appendChild(el('div', 'note', '✅ 已是最新版 v' + u.current + (u.latest ? '' : '（最新版查询失败，可稍后重试）')));
@@ -1601,15 +1612,40 @@ ${UI_PURE_JS}
       onConfirm: function () { postAction('/api/daemon/restart', '重启'); },
     });
   }
+  function askStart() {
+    confirmDialog({
+      title: '▶️ 启动后台 daemon？',
+      lines: [
+        '将把 bridge 注册为后台服务并拉起（开机自启、崩溃自动拉起）。',
+        'daemon 起来后，重开 feishu-codex-bridge web 即进入可写控制台。',
+        '（本只读预览仍占着 51847，daemon 会换个端口起 —— 故需重开 web 切过去。）',
+      ],
+      confirmLabel: '确认启动',
+      onConfirm: function () { postAction('/api/daemon/start', '启动'); },
+    });
+  }
+  function askStop() {
+    confirmDialog({
+      title: '⏹ 停止后台 daemon？',
+      danger: true,
+      lines: [
+        '将停止 daemon 并移除开机自启（与 CLI stop 一致）。',
+        '所有群将无响应，直到你重新「启动」或运行 feishu-codex-bridge start。',
+        '本控制台由 daemon 提供 —— 停止后会断开连接（属正常，不是出错）。',
+      ],
+      confirmLabel: '确认停止',
+      onConfirm: function () { postAction('/api/daemon/stop', '停止'); },
+    });
+  }
   function askUpdate(latest) {
     confirmDialog({
-      title: '⬆️ 升级到 v' + latest + '？',
+      title: '⬆️ 更新并重启到 v' + latest + '？',
       lines: [
-        '将执行 npm i -g 安装最新版，完成后自动重启 daemon。',
+        '将执行 npm i -g 安装最新版，完成后自动重启 daemon 加载新代码。',
         '重启期间所有群短暂无响应；正在进行的会话会被优雅关闭。',
       ],
-      confirmLabel: '确认升级',
-      onConfirm: function () { postAction('/api/update', '升级'); },
+      confirmLabel: '确认更新',
+      onConfirm: function () { postAction('/api/update', '更新'); },
     });
   }
   // 202 = 已发起（detached helper 接管）；501 = 只读预览（无 daemon）。

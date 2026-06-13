@@ -189,6 +189,12 @@ function stubService(): AdminService {
     async restartDaemon() {
       throw new NotWiredYetError('🔁 重启 daemon');
     },
+    async startDaemon() {
+      throw new NotWiredYetError('▶️ 启动 daemon');
+    },
+    async stopDaemon() {
+      throw new NotWiredYetError('⏹ 停止 daemon');
+    },
     async checkUpdate() {
       return { current: '0.3.11', latest: '0.4.0', hasUpdate: true, dev: false };
     },
@@ -562,6 +568,18 @@ describe('web server · daemon 生命周期 / 升级 / 宿主机体检', () => {
 
   it('POST /api/daemon/restart：只读预览 stub 抛 NotWiredYetError → 501', async () => {
     const res = await authed('/api/daemon/restart', { method: 'POST' });
+    expect(res.status).toBe(501);
+    expect((await jsonOf(res)).error).toBe('not_wired_yet');
+  });
+
+  it('POST /api/daemon/start：未注入 startDaemon 的 stub 抛 NotWiredYetError → 501', async () => {
+    const res = await authed('/api/daemon/start', { method: 'POST' });
+    expect(res.status).toBe(501);
+    expect((await jsonOf(res)).error).toBe('not_wired_yet');
+  });
+
+  it('POST /api/daemon/stop：未注入 stopDaemon 的 stub 抛 NotWiredYetError → 501', async () => {
+    const res = await authed('/api/daemon/stop', { method: 'POST' });
     expect(res.status).toBe(501);
     expect((await jsonOf(res)).error).toBe('not_wired_yet');
   });

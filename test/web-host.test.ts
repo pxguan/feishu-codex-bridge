@@ -75,6 +75,19 @@ describe('host · buildDaemonControlCommand（detached helper 命令构建，只
     expect(args).toEqual(['/pkg/bin/x.mjs', '__daemon-control', 'update']);
   });
 
+  it('start / stop：同样只是固定 action 形参（service install / uninstall 的 detached 执行）', () => {
+    expect(buildDaemonControlCommand('start', '/pkg/bin/x.mjs', '/usr/bin/node').args).toEqual([
+      '/pkg/bin/x.mjs',
+      '__daemon-control',
+      'start',
+    ]);
+    expect(buildDaemonControlCommand('stop', '/pkg/bin/x.mjs', '/usr/bin/node').args).toEqual([
+      '/pkg/bin/x.mjs',
+      '__daemon-control',
+      'stop',
+    ]);
+  });
+
   it('缺省 binPath/nodePath 时回退到当前 Node 与解析出的 bin（绝对路径）', () => {
     const { command, args } = buildDaemonControlCommand('restart');
     expect(command).toBe(process.execPath);

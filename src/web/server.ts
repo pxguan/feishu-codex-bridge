@@ -192,6 +192,42 @@ export function createWebServer(opts: WebServerOptions): WebServer {
       return;
     }
 
+    // POST /api/daemon/start —— 启动后台服务（只读预览注入；detached helper service install）。
+    if (req.method === 'POST' && pathName === '/api/daemon/start') {
+      try {
+        await opts.service.startDaemon();
+        sendJson(res, 202, {
+          ok: true,
+          message: '启动已发起：daemon 将在数秒内由服务管理器拉起。起来后重开 `web` 即进入可写控制台。',
+        });
+      } catch (err) {
+        if (err instanceof NotWiredYetError) {
+          sendJson(res, 501, { error: 'not_wired_yet', message: err.message });
+          return;
+        }
+        throw err;
+      }
+      return;
+    }
+
+    // POST /api/daemon/stop —— 停止后台服务并移除自启（detached helper service uninstall）。
+    if (req.method === 'POST' && pathName === '/api/daemon/stop') {
+      try {
+        await opts.service.stopDaemon();
+        sendJson(res, 202, {
+          ok: true,
+          message: '停止已发起：daemon 将在数秒内退出（本控制台随之断开，属正常）。',
+        });
+      } catch (err) {
+        if (err instanceof NotWiredYetError) {
+          sendJson(res, 501, { error: 'not_wired_yet', message: err.message });
+          return;
+        }
+        throw err;
+      }
+      return;
+    }
+
     if (req.method === 'GET' && pathName === '/api/update/check') {
       sendJson(res, 200, await opts.service.checkUpdate());
       return;
