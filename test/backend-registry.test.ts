@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_BACKEND_ID, backendIds, createBackend } from '../src/agent';
 import { CodexAppServerBackend } from '../src/agent/codex-appserver/backend';
 import { ClaudeSdkBackend, sanitizeClaudeModel } from '../src/agent/claude-sdk/backend';
+import { AcpBackend } from '../src/agent/acp/backend';
 
 describe('agent backend registry', () => {
   it('defaults to the codex app-server backend (zero-arg call = legacy path)', () => {
@@ -27,6 +28,15 @@ describe('agent backend registry', () => {
   it('backendIds lists every registered backend', () => {
     expect(backendIds()).toContain('codex-appserver');
     expect(backendIds()).toContain('claude-sdk');
+    expect(backendIds()).toContain('claude-acp');
+  });
+
+  it('claude-acp 解析到 AcpBackend（订阅·ACP），仅 full 档（细节见 acp-backend.test）', () => {
+    const be = createBackend('claude-acp');
+    expect(be).toBeInstanceOf(AcpBackend);
+    expect(be.id).toBe('claude-acp');
+    expect(be.displayName).toBe('Claude（订阅·ACP）');
+    expect(be.supportedModes).toEqual(['full']);
   });
 });
 
