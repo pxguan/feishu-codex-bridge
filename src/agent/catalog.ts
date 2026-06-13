@@ -1,4 +1,4 @@
-import type { PermissionMode } from './types';
+import { DEFAULT_BACKEND_ID, type PermissionMode } from './types';
 
 /**
  * 后端 catalog —— 后端的「元数据 + 管理面驱动」单一真源（依赖类型/体积/检测/安装/
@@ -134,4 +134,25 @@ export function catalogByFamily(family: AgentFamily): BackendCatalogEntry[] {
 /** catalog 声明的全部后端 id（index.ts 的 backendIds 从此派生 → catalog 是单一注册入口）。 */
 export function catalogBackendIds(): string[] {
   return BACKEND_CATALOG.map((e) => e.id);
+}
+
+/**
+ * 新建项目时「可选后端」（飞书新建/绑定卡的后端下拉数据源）。规则（产品定）：
+ *   ① codex（DEFAULT_BACKEND_ID）始终可选 —— 它是 external-cli 基线（全局 codex / Codex.app），
+ *      isBackendEntryInstalled 对 external-cli 恒 false，但作为默认后端必须始终能选；
+ *   ② 其余后端「已下载」才列（isInstalled 注入，本模块不碰文件系统、便于单测）；
+ *   ③ 再按项目权限档过滤：后端 supportedModes 不含该档则剔除（claude 系仅 full，
+ *      外部群 qa 档下自然不出现）。
+ * 卡片里下不了后端 → 未下载的直接不显示，引导去 Web「后端 Agent」页下载。
+ */
+export function projectCreatableBackends(
+  mode: PermissionMode,
+  isInstalled: (entry: BackendCatalogEntry) => boolean,
+): BackendCatalogEntry[] {
+  return BACKEND_CATALOG.filter((e) => {
+    const installed = e.id === DEFAULT_BACKEND_ID || isInstalled(e);
+    if (!installed) return false;
+    if (e.supportedModes && !e.supportedModes.includes(mode)) return false;
+    return true;
+  });
 }

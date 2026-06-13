@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   buildBackendDetectingCard,
   buildBackendPickerCard,
+  buildNewProjectDoneCard,
+  buildNewProjectFormCard,
   buildProjectSettingsCard,
   DM,
   type BackendProbeRow,
@@ -197,6 +199,42 @@ describe('buildProjectSettingsCard 的 🧠 后端区块', () => {
     const first = JSON.stringify((card.body as { elements: unknown[] }).elements[0]);
     expect(first).toContain('已切到');
     expect(first).toContain('新话题生效');
+  });
+});
+
+describe('buildNewProjectFormCard 的后端选择（创建时选定）', () => {
+  const two = [
+    { label: 'Codex App Server', value: 'codex-appserver' },
+    { label: 'Claude（SDK）', value: 'claude-sdk' },
+  ];
+
+  it('多个可选后端 → 渲染 select_static 下拉（name=backend，预选第一个 codex）+ 固定文案', () => {
+    const json = JSON.stringify(buildNewProjectFormCard({ backends: two }));
+    expect(json).toContain('select_static');
+    expect(json).toContain('claude-sdk');
+    expect(json).toContain('固定不可切换');
+    // 预选默认 codex
+    expect(json).toContain('"initial_option":"codex-appserver"');
+  });
+
+  it('仅一个可选后端（只有 codex）→ 不出下拉，改静态文案显示默认后端名', () => {
+    const json = JSON.stringify(buildNewProjectFormCard({ backends: [two[0]!] }));
+    expect(json).not.toContain('select_static');
+    expect(json).toContain('Codex App Server');
+  });
+
+  it('未传 backends → 不渲染后端选择块（向后兼容）', () => {
+    const json = JSON.stringify(buildNewProjectFormCard({}));
+    expect(json).not.toContain('select_static');
+    expect(json).not.toContain('后端 Agent');
+  });
+
+  it('完成卡显示选定后端（按 id 解析展示名；缺省回退默认 codex 名）', () => {
+    const withSdk = JSON.stringify(
+      buildNewProjectDoneCard({ name: 'P', cwd: '/x', kind: 'multi', origin: 'created', backend: 'claude-sdk' } as never),
+    );
+    expect(withSdk).toContain('🧠');
+    expect(withSdk).toContain('Claude'); // claude-sdk 的展示名含 Claude
   });
 });
 

@@ -19,6 +19,9 @@ export interface CreateProjectInput {
   kind?: 'multi' | 'single';
   /** permission tier (default 'full' for self-created projects). */
   mode?: PermissionMode;
+  /** agent backend chosen at creation (fixed afterwards — no switching). When
+   *  omitted, runtime falls back to DEFAULT_BACKEND_ID (codex). */
+  backend?: string;
   /** allow the sandboxed shell to reach the network (default false). */
   network?: boolean;
 }
@@ -36,6 +39,8 @@ export interface JoinGroupInput {
   kind?: 'multi' | 'single';
   /** permission tier (default 'qa' — read-only — for joined external groups). */
   mode?: PermissionMode;
+  /** agent backend chosen at bind time (fixed afterwards — no switching). */
+  backend?: string;
   /** allow the sandboxed shell to reach the network (default false). */
   network?: boolean;
 }
@@ -104,10 +109,11 @@ export async function createProject(channel: LarkChannel, input: CreateProjectIn
     kind: input.kind ?? 'multi',
     origin: 'created',
     mode: input.mode ?? 'full',
+    backend: input.backend || undefined,
     network: input.network ?? false,
   };
   await addProject(project);
-  log.info('project', 'create', { name, chatId, cwd, blank, mode: project.mode });
+  log.info('project', 'create', { name, chatId, cwd, blank, mode: project.mode, backend: project.backend });
 
   // 4. group announcement (top banner) + onboarding (welcome card / Pin / tab),
   //    both best-effort — a group is usable even if these fail.
@@ -144,10 +150,11 @@ export async function joinExistingGroup(channel: LarkChannel, input: JoinGroupIn
     origin: 'joined',
     addedBy: input.addedBy,
     mode: input.mode ?? 'qa',
+    backend: input.backend || undefined,
     network: input.network ?? false,
   };
   await addProject(project);
-  log.info('project', 'join', { name, chatId: input.chatId, cwd, blank, kind: project.kind, mode: project.mode });
+  log.info('project', 'join', { name, chatId: input.chatId, cwd, blank, kind: project.kind, mode: project.mode, backend: project.backend });
 
   // Onboarding only (no announcement / Pin / tab — see onboardGroup's joined
   // branch); best-effort, the binding holds even if the welcome card fails.

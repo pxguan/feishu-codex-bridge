@@ -9,6 +9,7 @@ import {
 } from '../config/schema';
 import { defaultNoMention, effectiveGuestMode, effectiveMode, type Project } from '../project/registry';
 import { DEFAULT_BACKEND_ID, type BackendProbe, type PermissionMode } from '../agent/types';
+import { catalogById } from '../agent/catalog';
 import type { SessionRecord } from '../bot/session-store';
 import { labelScope } from '../config/scopes';
 import { summarizeEventDiagnosis, type EventDiagnosis } from '../utils/event-diagnosis';
@@ -476,22 +477,44 @@ export function buildDoctorCard(i: DoctorInfo): CardObject {
   );
 }
 
-/** Interactive new-project form: project name + optional CWD, submit/cancel. */
-export function buildNewProjectFormCard(opts: { name?: string; cwd?: string; error?: string } = {}): CardObject {
+/**
+ * Interactive new-project form: project name + optional CWD + **backend picker**
+ * + submit/cancel. The backend is chosen here, at creation, and fixed afterwards
+ * (no switching). `backends` lists only the downloaded + permission-compatible
+ * options (computed by the handler via {@link projectCreatableBackends}); when
+ * just one (codex baseline), it's shown as a static note instead of a dropdown.
+ */
+export function buildNewProjectFormCard(
+  opts: { name?: string; cwd?: string; error?: string; backends?: SelectOption[] } = {},
+): CardObject {
   const elements = [];
   if (opts.error) elements.push(md(`❌ **创建失败**：${opts.error}`));
+  const backends = opts.backends ?? [];
+  const formItems: CardElement[] = [
+    input({ name: 'name', label: '项目名', placeholder: 'my-app', value: opts.name, required: true }),
+    input({ name: 'cwd', label: '文件夹路径（选填，留空自动新建）', placeholder: '/Users/you/code/my-app', value: opts.cwd }),
+  ];
+  if (backends.length > 1) {
+    formItems.push(
+      note('🧠 后端 Agent（创建后**固定不可切换**；未下载的不在列表 → 去 Web「后端 Agent」页下载）'),
+      selectMenu({ name: 'backend', placeholder: '选择后端 Agent', options: backends, initial: backends[0]?.value }),
+    );
+  } else if (backends.length === 1) {
+    formItems.push(
+      note(`🧠 后端 Agent：**${backends[0]!.label}**（创建后固定。下载更多后端到 Web「后端 Agent」页即可在此选择）`),
+    );
+  }
+  formItems.push(
+    note('选群类型(直接点对应按钮创建)：👥 多话题群 = @我开话题、每话题独立会话；💬 单会话群 = 整群一个会话、连续上下文。'),
+    actions([
+      submitButton('👥 创建·多话题群', { a: DM.newProjectSubmit, kind: 'multi' }, 'primary', 'submit_multi'),
+      submitButton('💬 创建·单会话群', { a: DM.newProjectSubmit, kind: 'single' }, 'primary', 'submit_single'),
+    ]),
+    actions([button('⬅️ 菜单', { a: DM.menu })]),
+  );
   elements.push(
     md('填项目名（必填）。**文件夹路径留空** = 自动在默认位置新建一个空白项目；**填绝对路径** = 用电脑上已有的文件夹。'),
-    form('new_project', [
-      input({ name: 'name', label: '项目名', placeholder: 'my-app', value: opts.name, required: true }),
-      input({ name: 'cwd', label: '文件夹路径（选填，留空自动新建）', placeholder: '/Users/you/code/my-app', value: opts.cwd }),
-      note('选群类型(直接点对应按钮创建)：👥 多话题群 = @我开话题、每话题独立会话；💬 单会话群 = 整群一个会话、连续上下文。'),
-      actions([
-        submitButton('👥 创建·多话题群', { a: DM.newProjectSubmit, kind: 'multi' }, 'primary', 'submit_multi'),
-        submitButton('💬 创建·单会话群', { a: DM.newProjectSubmit, kind: 'single' }, 'primary', 'submit_single'),
-      ]),
-      actions([button('⬅️ 菜单', { a: DM.menu })]),
-    ]),
+    form('new_project', formItems),
   );
   return card(elements, { header: { title: '➕ 新建项目', template: 'turquoise' } });
 }
@@ -504,22 +527,34 @@ export function buildNewProjectFormCard(opts: { name?: string; cwd?: string; err
  * handler binds *this* group instead of creating a new one.
  */
 export function buildJoinGroupFormCard(
-  opts: { chatId: string; name?: string; cwd?: string; error?: string },
+  opts: { chatId: string; name?: string; cwd?: string; error?: string; backends?: SelectOption[] },
 ): CardObject {
   const elements: CardElement[] = [];
   if (opts.error) elements.push(md(`❌ **绑定失败**：${opts.error}`));
+  const backends = opts.backends ?? [];
+  const formItems: CardElement[] = [
+    input({ name: 'name', label: '项目名', placeholder: 'my-app', value: opts.name, required: true }),
+    input({ name: 'cwd', label: '文件夹路径（选填，留空自动新建）', placeholder: '/Users/you/code/my-app', value: opts.cwd }),
+  ];
+  if (backends.length > 1) {
+    formItems.push(
+      note('🧠 后端 Agent（绑定后**固定不可切换**；外部群默认只读档，仅列支持该档且已下载的后端）'),
+      selectMenu({ name: 'backend', placeholder: '选择后端 Agent', options: backends, initial: backends[0]?.value }),
+    );
+  } else if (backends.length === 1) {
+    formItems.push(note(`🧠 后端 Agent：**${backends[0]!.label}**（绑定后固定）`));
+  }
+  formItems.push(
+    note('选群类型(直接点对应按钮创建)：👥 多话题群 = @我开话题、每话题独立会话；💬 单会话群 = 整群一个会话、连续上下文（默认不免@）。'),
+    actions([
+      submitButton('👥 绑定·多话题群', { a: DM.joinGroupSubmit, kind: 'multi', chatId: opts.chatId }, 'primary', 'submit_multi'),
+      submitButton('💬 绑定·单会话群', { a: DM.joinGroupSubmit, kind: 'single', chatId: opts.chatId }, 'primary', 'submit_single'),
+    ]),
+  );
   elements.push(
     md('我已被加入这个群。填一下要绑定的项目信息即可开始用。'),
     md('项目名默认用群名，可改。**文件夹路径留空** = 自动新建空白项目；**填绝对路径** = 用电脑上已有的文件夹。'),
-    form('join_group', [
-      input({ name: 'name', label: '项目名', placeholder: 'my-app', value: opts.name, required: true }),
-      input({ name: 'cwd', label: '文件夹路径（选填，留空自动新建）', placeholder: '/Users/you/code/my-app', value: opts.cwd }),
-      note('选群类型(直接点对应按钮创建)：👥 多话题群 = @我开话题、每话题独立会话；💬 单会话群 = 整群一个会话、连续上下文（默认不免@）。'),
-      actions([
-        submitButton('👥 绑定·多话题群', { a: DM.joinGroupSubmit, kind: 'multi', chatId: opts.chatId }, 'primary', 'submit_multi'),
-        submitButton('💬 绑定·单会话群', { a: DM.joinGroupSubmit, kind: 'single', chatId: opts.chatId }, 'primary', 'submit_single'),
-      ]),
-    ]),
+    form('join_group', formItems),
   );
   return card(elements, { header: { title: '🔗 绑定已有群', template: 'turquoise' } });
 }
@@ -531,9 +566,10 @@ export function buildNewProjectDoneCard(p: Project): CardObject {
   const joined = (p.origin ?? 'created') === 'joined';
   const verb = joined ? '已绑定群' : '已创建项目';
   const title = joined ? '🔗 绑定已有群' : '➕ 新建项目';
+  const backendName = catalogById(p.backend ?? DEFAULT_BACKEND_ID)?.displayName ?? p.backend ?? DEFAULT_BACKEND_ID;
   const elements: CardElement[] = [
     md(`✅ ${verb} **${p.name}**${p.blank ? ' _(空白项目)_' : ''}`),
-    note(`📂 \`${p.cwd}\`   ·   ${kindLabel(p.kind)}`),
+    note(`📂 \`${p.cwd}\`   ·   ${kindLabel(p.kind)}   ·   🧠 ${backendName}`),
     md(p.chatId ? '👉 去群里 **@我** 干活。' : '发我任意消息可再次打开管理台。'),
   ];
   if (p.chatId)

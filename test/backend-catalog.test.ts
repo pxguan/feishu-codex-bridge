@@ -8,6 +8,7 @@ import {
   catalogById,
   catalogByFamily,
   isInstallable,
+  projectCreatableBackends,
 } from '../src/agent/catalog';
 import { backendIds, createBackend } from '../src/agent';
 import {
@@ -76,6 +77,27 @@ describe('catalog ↔ REGISTRY 配对（防漏注册）', () => {
   it('catalogByFamily 分组：codex 1 条 / claude 2 条', () => {
     expect(catalogByFamily('codex').map((e) => e.id)).toEqual(['codex-appserver']);
     expect(catalogByFamily('claude').map((e) => e.id).sort()).toEqual(['claude-acp', 'claude-sdk']);
+  });
+});
+
+describe('projectCreatableBackends —— 飞书新建/绑定卡的「可选后端」过滤（创建时选定）', () => {
+  const ids = (mode: 'qa' | 'write' | 'full', inst: (e: { id: string }) => boolean) =>
+    projectCreatableBackends(mode, inst).map((e) => e.id);
+
+  it('codex 是默认基线 → 即便都「未下载」也始终可选（external-cli 不参与下载判定）', () => {
+    expect(ids('full', () => false)).toEqual(['codex-appserver']);
+  });
+
+  it('full 档 + 全已下载 → codex + claude 两条都在（claude 系 supportedModes 含 full）', () => {
+    expect(ids('full', () => true).sort()).toEqual(['claude-acp', 'claude-sdk', 'codex-appserver']);
+  });
+
+  it('qa 档（外部群）→ 只剩 codex：claude 系仅支持 full，不含 qa 被档位过滤掉', () => {
+    expect(ids('qa', () => true)).toEqual(['codex-appserver']);
+  });
+
+  it('按「已下载」过滤：只有 claude-sdk 装了 → codex(默认) + claude-sdk，claude-acp 不显示', () => {
+    expect(ids('full', (e) => e.id === 'claude-sdk').sort()).toEqual(['claude-sdk', 'codex-appserver']);
   });
 });
 

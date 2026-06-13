@@ -6,8 +6,10 @@ import type {
   NormalizedMessage,
   ReactionEvent,
 } from '@larksuiteoapi/node-sdk';
-import { DEFAULT_BACKEND_ID, backendIds, createBackend } from '../agent';
+import { DEFAULT_BACKEND_ID, backendIds, createBackend, isBackendEntryInstalled } from '../agent';
+import { projectCreatableBackends } from '../agent/catalog';
 import type { AgentBackend, AgentInput, AgentRun, AgentThread, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
+import type { SelectOption } from '../card/cards';
 import {
   createAdminWriteExecutor,
   performBackendSwitch,
@@ -257,6 +259,20 @@ function selectValue(formValue: Record<string, unknown> | undefined, name: strin
 /** Narrow an arbitrary string to a PermissionMode, else undefined. */
 function asTier(v: string | undefined): PermissionMode | undefined {
   return v === 'qa' || v === 'write' || v === 'full' ? v : undefined;
+}
+
+/**
+ * 新建/绑定项目卡的后端下拉选项：只列「已下载 且 该权限档支持」的后端（codex 基线
+ * 始终在；未下载的不显示——卡片里下不了，去 Web「后端 Agent」页下）。新建默认档
+ * 'full'、绑定外部群默认档 'qa'，过滤面随之不同（claude 系仅 full，qa 下自然只剩 codex）。
+ */
+function backendOptionsFor(mode: PermissionMode): SelectOption[] {
+  return projectCreatableBackends(mode, isBackendEntryInstalled).map((e) => ({ label: e.displayName, value: e.id }));
+}
+/** 把卡片提交的 backend 收成安全值：必须是注册表里的 id，否则丢弃（落回默认 codex），防伪造。 */
+function safeBackendId(formValue: Record<string, unknown> | undefined): string | undefined {
+  const v = selectValue(formValue, 'backend');
+  return v && backendIds().includes(v) ? v : undefined;
 }
 
 // 后端切换校验 + 探测已抽到管理面共享层（admin/ops.ts）——DM 回调与 Web 控制台
@@ -1886,29 +1902,31 @@ export function createOrchestrator(
       if (dmAdmin(evt.operator?.openId)) freshMenu(evt);
     })
     .on(DM.newProject, ({ evt }) => {
-      if (dmAdmin(evt.operator?.openId)) patch(evt, buildNewProjectFormCard());
+      if (dmAdmin(evt.operator?.openId)) patch(evt, buildNewProjectFormCard({ backends: backendOptionsFor('full') }));
     })
     .on(DM.newProjectSubmit, ({ evt, formValue, value }) => {
       const op = evt.operator?.openId;
       if (!dmAdmin(op)) return;
       const name = String((formValue?.name as string) ?? '').trim();
       const cwdIn = String((formValue?.cwd as string) ?? '').trim();
+      const backend = safeBackendId(formValue);
       const kind: 'multi' | 'single' = value.kind === 'single' ? 'single' : 'multi';
+      const backends = backendOptionsFor('full');
       // A submitted form locks its card_id (its buttons — retry/返回 on an error
       // re-render — stop firing, and an in-place update no-ops). So the result
       // goes to a *fresh* card; the submitted form stays above as a 留痕. Detach
       // so the submit callback acks immediately (createProject is slow).
       void (async () => {
         let result;
-        if (!name) result = buildNewProjectFormCard({ cwd: cwdIn, error: '项目名不能为空' });
-        else if (!op) result = buildNewProjectFormCard({ name, cwd: cwdIn, error: '无法识别操作者身份' });
+        if (!name) result = buildNewProjectFormCard({ cwd: cwdIn, error: '项目名不能为空', backends });
+        else if (!op) result = buildNewProjectFormCard({ name, cwd: cwdIn, error: '无法识别操作者身份', backends });
         else {
           try {
-            const p = await createProject(channel, { name, ownerOpenId: op, existingPath: cwdIn || undefined, kind });
-            log.info('console', 'new-project', { name: p.name, blank: p.blank });
+            const p = await createProject(channel, { name, ownerOpenId: op, existingPath: cwdIn || undefined, kind, backend });
+            log.info('console', 'new-project', { name: p.name, blank: p.blank, backend: p.backend });
             result = buildNewProjectDoneCard(p);
           } catch (err) {
-            result = buildNewProjectFormCard({ name, cwd: cwdIn, error: err instanceof Error ? err.message : String(err) });
+            result = buildNewProjectFormCard({ name, cwd: cwdIn, error: err instanceof Error ? err.message : String(err), backends });
           }
         }
         await sendManagedCard(channel, evt.chatId, result).catch((e) =>
@@ -1922,23 +1940,25 @@ export function createOrchestrator(
       const name = String((formValue?.name as string) ?? '').trim();
       const cwdIn = String((formValue?.cwd as string) ?? '').trim();
       const chatId = typeof value.chatId === 'string' ? value.chatId : '';
+      const backend = safeBackendId(formValue);
       const kind: 'multi' | 'single' = value.kind === 'single' ? 'single' : 'multi';
+      const backends = backendOptionsFor('qa'); // 外部群默认只读档
       // Same fresh-card pattern as DM.newProjectSubmit: a submitted form locks
       // its card_id, so the result goes to a new card while the form stays above
       // as a 留痕. Detached so the click acks immediately (join is slow).
       void (async () => {
         let result;
         if (!chatId)
-          result = buildJoinGroupFormCard({ chatId: '', name, cwd: cwdIn, error: '缺少群标识，请重新从进群通知里打开绑定卡' });
-        else if (!name) result = buildJoinGroupFormCard({ chatId, cwd: cwdIn, error: '项目名不能为空' });
-        else if (!op) result = buildJoinGroupFormCard({ chatId, name, cwd: cwdIn, error: '无法识别操作者身份' });
+          result = buildJoinGroupFormCard({ chatId: '', name, cwd: cwdIn, error: '缺少群标识，请重新从进群通知里打开绑定卡', backends });
+        else if (!name) result = buildJoinGroupFormCard({ chatId, cwd: cwdIn, error: '项目名不能为空', backends });
+        else if (!op) result = buildJoinGroupFormCard({ chatId, name, cwd: cwdIn, error: '无法识别操作者身份', backends });
         else {
           try {
-            const p = await joinExistingGroup(channel, { name, chatId, addedBy: op, existingPath: cwdIn || undefined, kind });
-            log.info('console', 'join-group', { name: p.name, blank: p.blank });
+            const p = await joinExistingGroup(channel, { name, chatId, addedBy: op, existingPath: cwdIn || undefined, kind, backend });
+            log.info('console', 'join-group', { name: p.name, blank: p.blank, backend: p.backend });
             result = buildNewProjectDoneCard(p);
           } catch (err) {
-            result = buildJoinGroupFormCard({ chatId, name, cwd: cwdIn, error: err instanceof Error ? err.message : String(err) });
+            result = buildJoinGroupFormCard({ chatId, name, cwd: cwdIn, error: err instanceof Error ? err.message : String(err), backends });
           }
         }
         await sendManagedCard(channel, evt.chatId, result).catch((e) =>
@@ -3490,7 +3510,7 @@ export function createOrchestrator(
       await sendManagedCard(
         channel,
         op,
-        buildJoinGroupFormCard({ chatId: evt.chatId, name }),
+        buildJoinGroupFormCard({ chatId: evt.chatId, name, backends: backendOptionsFor('qa') }),
         undefined,
         false,
         'open_id',
