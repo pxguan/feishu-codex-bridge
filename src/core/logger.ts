@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
 import { open, readdir, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { paths } from '../config/paths';
 
@@ -51,8 +52,20 @@ function todayKey(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** 测试环境探测（vitest 自带 VITEST 环境变量；NODE_ENV=test 兜其他 runner）。
+ * 每次调用现读 env 而非模块加载时定格——个别测试会临时改 NODE_ENV。 */
+function inTestEnv(): boolean {
+  return Boolean(process.env.VITEST) || process.env.NODE_ENV === 'test';
+}
+
+/** 测试环境的日志落盘目录（exported for the regression test）。vitest 跑单测时
+ * 大量 mock 触发的 error/warn 若写进生产日志 ~/.feishu-codex-bridge/logs/，会
+ * 淹没真实告警（e2e 实测三批污染）。改道临时目录而不是禁用：文件 sink 的代码
+ * 路径仍被完整执行，且测试可以断言落盘行为。 */
+export const TEST_LOGS_DIR = join(tmpdir(), 'feishu-codex-bridge-test-logs');
+
 function logsDir(): string {
-  return join(paths.appDir, 'logs');
+  return inTestEnv() ? TEST_LOGS_DIR : join(paths.appDir, 'logs');
 }
 
 function getStream(): WriteStream | null {
