@@ -405,7 +405,7 @@ export const UI_HTML = `<!doctype html>
   .nav-item.add .ic { color: var(--accent); }
   .nav-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
   .nav-dot.on { background: var(--green); box-shadow: 0 0 0 3px var(--green-tint); }
-  .nav-dot.off { background: #44464d; }
+  .nav-dot.off { background: #e0922f; box-shadow: 0 0 0 3px rgba(224,146,47,.15); }
   .nav-badge { margin-left: auto; font-size: 11px; background: var(--panel); border: 1px solid var(--border); color: var(--text-3); border-radius: 20px; padding: 0 6px; }
   .side-foot { padding: 8px 10px 2px; border-top: 1px solid var(--border); margin-top: 6px; font-size: 11.5px; color: var(--text-3); display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
   .main { margin-left: 236px; flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -423,7 +423,7 @@ export const UI_HTML = `<!doctype html>
     background: var(--panel); color: var(--text-2); border: 1px solid var(--border);
     border-radius: 6px; padding: 3px 10px; font-size: 11.5px; white-space: nowrap;
   }
-  .content { padding: 26px 28px 64px; max-width: 1120px; width: 100%; }
+  .content { padding: 26px 28px 64px; width: 100%; }
   .page-head { margin: 2px 0 22px; }
   .page-head h1 { font-size: 28px; margin: 0 0 6px; font-weight: 700; letter-spacing: -.6px; }
   .page-head p { margin: 0; color: var(--text-2); font-size: 14px; }
@@ -911,7 +911,7 @@ ${UI_PURE_JS}
     return s;
   }
   function familyName(f) { return f === 'codex' ? 'Codex' : f === 'claude' ? 'Claude' : f; }
-  function botTitle(b) { return (b.running ? '🟢 ' : '⚪ ') + (b.botName || b.name); }
+  function botTitle(b) { return (b.running ? '🟢 ' : '🟠 ') + (b.botName || b.name); }
 
   function fmtUptime(ms) {
     if (typeof ms !== 'number') return '—';
@@ -973,7 +973,7 @@ ${UI_PURE_JS}
     if (r.tab === 'backends') return { t: '后端 Agent', s: '按需下载 / 更新 / 卸载 agent 后端' };
     if (r.tab === 'doctor') return { t: '宿主机体检', s: '本机后端环境与运行时信息' };
     if (r.tab === 'logs') return { t: '实时日志', s: '当日文件日志 SSE 实时跟随' };
-    return { t: '仪表盘', s: '全局总览 · 机器人 / 后端 / daemon' };
+    return { t: '仪表盘', s: '全局总览 · 机器人 / 后端 / Feishu Bridge' };
   }
 
   // ── 路由：单 #tabContent 按 hash 清空重渲 ───────────────────────────────────
@@ -1035,7 +1035,7 @@ ${UI_PURE_JS}
     foot.textContent = '';
     var online = !!(daemon && daemon.running);
     foot.appendChild(el('span', 'nav-dot ' + (online ? 'on' : 'off')));
-    foot.appendChild(el('span', null, (online ? 'daemon 运行中' : 'daemon 未运行') + ' · v' + ((state && state.version) || '?')));
+    foot.appendChild(el('span', null, (online ? 'Feishu Bridge 运行中' : 'Feishu Bridge 未运行') + ' · v' + ((state && state.version) || '?')));
   }
   function renderTopbar(r) {
     var crumb = $('crumb');
@@ -1115,7 +1115,7 @@ ${UI_PURE_JS}
     var hero = el('div', 'home-hero');
     var eb = el('div', 'home-eyebrow');
     eb.appendChild(el('span', 'pulse'));
-    eb.appendChild(el('span', null, (daemon && daemon.running) ? 'DAEMON 运行中 · 127.0.0.1' : '本机控制台 · 127.0.0.1'));
+    eb.appendChild(el('span', null, (daemon && daemon.running) ? 'Feishu Bridge 运行中 · 127.0.0.1' : '本机控制台 · 127.0.0.1'));
     hero.appendChild(eb);
     var title = el('div', 'home-title');
     title.appendChild(document.createTextNode('Codex '));
@@ -1209,7 +1209,7 @@ ${UI_PURE_JS}
 
     // KPI 磁贴行
     var kpis = el('div', 'kpis');
-    kpis.appendChild(kpiTile('server', 'daemon', daemonOn ? '运行中' : '未运行',
+    kpis.appendChild(kpiTile('server', 'Feishu Bridge', daemonOn ? '运行中' : '未运行',
       daemonOn && daemon.uptimeMs !== undefined ? '已运行 ' + fmtUptime(daemon.uptimeMs) : (daemon && daemon.platformName) || '后台服务', daemonOn));
     kpis.appendChild(kpiTile('bot', '在线机器人', s.online + ' / ' + s.total, s.active + ' 个在活跃集'));
     kpis.appendChild(kpiTile('folder', '项目总数', String(s.projects), '跨全部机器人'));
@@ -1217,21 +1217,18 @@ ${UI_PURE_JS}
     root.appendChild(kpis);
     if (!catalog) loadCatalog().then(function () { if (parseRoute(location.hash).tab === 'overview') renderRoute(); });
 
-    var grid = el('div', 'grid-2');
-    var left = el('div'); var right = el('div');
-
-    // 🤖 机器人
+    // 🤖 机器人（与下方 Feishu Bridge 卡上下排布，各自占满宽度）
     var botsCard = el('div', 'card');
     var bh = el('h2'); bh.appendChild(document.createTextNode('🤖 机器人 '));
     var bcount = el('span', 'right note'); bh.appendChild(bcount);
     botsCard.appendChild(bh);
     var botsList = el('div'); botsCard.appendChild(botsList);
-    left.appendChild(botsCard);
+    root.appendChild(botsCard);
     renderBots(botsList, bcount);
 
     // 🛰️ daemon + 升级
     var daemonCard = el('div', 'card');
-    var dh = el('h2'); dh.appendChild(document.createTextNode('🛰️ 后台 daemon'));
+    var dh = el('h2'); dh.appendChild(document.createTextNode('🛰️ Feishu Bridge'));
     // 生命周期按钮按运行态由 renderDaemon 动态填充（运行中→重启/停止；未运行→启动）。
     var dright = el('span', 'right'); dright.id = 'daemonActions';
     dh.appendChild(dright);
@@ -1241,12 +1238,9 @@ ${UI_PURE_JS}
     daemonCard.appendChild(el('hr', 'hr'));
     var updateBody = el('div', 'note', '版本检查中…'); updateBody.id = 'updateBody';
     daemonCard.appendChild(updateBody);
-    right.appendChild(daemonCard);
+    root.appendChild(daemonCard);
     renderDaemon(daemonBody);
     loadUpdate(updateBody);
-
-    grid.appendChild(left); grid.appendChild(right);
-    root.appendChild(grid);
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -1547,7 +1541,11 @@ ${UI_PURE_JS}
 
   function renderDaemon(box) {
     box.textContent = '';
-    var acts = $('daemonActions');
+    // actions 容器在同卡片内（box 的父节点 = daemonCard）。用相对查找而非 document.getElementById：
+    // 仪表盘初次构建时整张卡片还没 append 进文档，getElementById 会扑空 → 生命周期按钮不画（曾导致
+    // 「启动/停止」按钮整体消失）。沿 box.parentNode 找即便脱离文档也命中。
+    var acts = (box && box.parentNode && box.parentNode.querySelector)
+      ? box.parentNode.querySelector('#daemonActions') : $('daemonActions');
     if (acts) acts.textContent = '';
     var d = daemon;
     if (!d) { box.textContent = '加载中…'; return; }
@@ -1567,10 +1565,17 @@ ${UI_PURE_JS}
     }
     var line = el('div', 'statline');
     if (d.running) line.appendChild(el('span', 'tag green', '✅ 运行中' + (d.pid ? ' · pid ' + d.pid : '')));
-    else line.appendChild(el('span', 'tag orange', d.installed ? '⚠️ 已安装但未在运行' : '⚪ 未安装为后台服务'));
+    else line.appendChild(el('span', 'tag orange', d.installed ? '🟠 已安装但未在运行' : '🟠 未后台启动'));
     line.appendChild(el('span', 'tag', d.platformName || '后台服务'));
-    line.appendChild(el('span', 'tag blue', 'v' + d.version));
     box.appendChild(line);
+    // 版本要醒目：大号数字独占一行（取代原来 statline 里那枚小 tag）。
+    var ver = el('div'); ver.style.cssText = 'margin-top:12px;display:flex;align-items:baseline;gap:9px';
+    var vnum = el('span'); vnum.style.cssText = 'font-size:27px;font-weight:700;letter-spacing:-.6px;color:var(--text)';
+    vnum.textContent = 'v' + d.version;
+    ver.appendChild(vnum);
+    var vlab = el('span'); vlab.style.cssText = 'font-size:12px;color:var(--text-3)'; vlab.textContent = 'Feishu Bridge 版本';
+    ver.appendChild(vlab);
+    box.appendChild(ver);
     if (d.uptimeMs !== undefined && d.running) box.appendChild(el('div', 'note', '已运行 ' + fmtUptime(d.uptimeMs)));
     if (d.selfHosted) box.appendChild(el('div', 'note', '⚠️ 手动运行，未注册为开机自启 —— 关机/登出后不会自动拉起。运行 feishu-codex-bridge install 注册为后台服务。'));
     if (d.lastExit !== undefined && d.lastExit !== '0') box.appendChild(el('div', 'note', '上次退出码：' + d.lastExit));
@@ -1602,7 +1607,7 @@ ${UI_PURE_JS}
   }
   function askRestart() {
     confirmDialog({
-      title: '🔁 重启后台 daemon？',
+      title: '🔁 重启 Feishu Bridge？',
       lines: [
         '重启期间所有群短暂无响应（通常数秒）。',
         '正在进行的 codex 会话会被优雅关闭并在重启后可继续。',
@@ -1614,11 +1619,11 @@ ${UI_PURE_JS}
   }
   function askStart() {
     confirmDialog({
-      title: '▶️ 启动后台 daemon？',
+      title: '▶️ 启动 Feishu Bridge？',
       lines: [
         '将把 bridge 注册为后台服务并拉起（开机自启、崩溃自动拉起）。',
-        'daemon 起来后，重开 feishu-codex-bridge web 即进入可写控制台。',
-        '（本只读预览仍占着 51847，daemon 会换个端口起 —— 故需重开 web 切过去。）',
+        'Feishu Bridge 起来后，重开 feishu-codex-bridge web 即进入可写控制台。',
+        '（本只读预览仍占着 51847，Feishu Bridge 会换个端口起 —— 故需重开 web 切过去。）',
       ],
       confirmLabel: '确认启动',
       onConfirm: function () { postAction('/api/daemon/start', '启动'); },
@@ -1626,12 +1631,12 @@ ${UI_PURE_JS}
   }
   function askStop() {
     confirmDialog({
-      title: '⏹ 停止后台 daemon？',
+      title: '⏹ 停止 Feishu Bridge？',
       danger: true,
       lines: [
-        '将停止 daemon 并移除开机自启（与 CLI stop 一致）。',
+        '将停止 Feishu Bridge 并移除开机自启（与 CLI stop 一致）。',
         '所有群将无响应，直到你重新「启动」或运行 feishu-codex-bridge start。',
-        '本控制台由 daemon 提供 —— 停止后会断开连接（属正常，不是出错）。',
+        '本控制台由 Feishu Bridge 提供 —— 停止后会断开连接（属正常，不是出错）。',
       ],
       confirmLabel: '确认停止',
       onConfirm: function () { postAction('/api/daemon/stop', '停止'); },
@@ -1641,7 +1646,7 @@ ${UI_PURE_JS}
     confirmDialog({
       title: '⬆️ 更新并重启到 v' + latest + '？',
       lines: [
-        '将执行 npm i -g 安装最新版，完成后自动重启 daemon 加载新代码。',
+        '将执行 npm i -g 安装最新版，完成后自动重启 Feishu Bridge 加载新代码。',
         '重启期间所有群短暂无响应；正在进行的会话会被优雅关闭。',
       ],
       confirmLabel: '确认更新',
@@ -1654,7 +1659,7 @@ ${UI_PURE_JS}
       .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
       .then(function (resp) {
         if (resp.status === 202) toast('✅ ' + (resp.body.message || (label + '已发起')));
-        else if (resp.status === 501) toast('⏳ ' + (resp.body.message || (label + '需要 daemon 在跑（当前为只读预览）')));
+        else if (resp.status === 501) toast('⏳ ' + (resp.body.message || (label + '需要 Feishu Bridge 在跑（当前为只读预览）')));
         else toast('❌ ' + (resp.body.message || ('HTTP ' + resp.status)));
       })
       .catch(function () { toast('❌ 请求失败'); });
@@ -1678,7 +1683,7 @@ ${UI_PURE_JS}
       return;
     }
     box.className = '';
-    if (countEl) countEl.textContent = '共 ' + state.bots.length + ' 个 · 绿点=在线';
+    if (countEl) countEl.textContent = '共 ' + state.bots.length + ' 个';
     state.bots.forEach(function (b) {
       var row = el('div', 'bot-row');
       var grow = el('div', 'grow');
@@ -1696,6 +1701,13 @@ ${UI_PURE_JS}
         (b.running ? '运行中' + (b.pid ? ' · pid ' + b.pid : '') : '未在运行') +
         ' · ' + ((b.projects && b.projects.length) || 0) + ' 个项目'));
       row.appendChild(grow);
+      // 已启用 ≠ 已上线：加进活跃集了，但 Feishu Bridge 没在跑就不会真正连上。明确提示别误会。
+      if (b.active && daemon && !daemon.running) {
+        var warn = el('span', 'tag orange', '⚠️ Feishu Bridge 未运行');
+        warn.title = '已加入活跃集，但 Feishu Bridge 没在跑 —— 去仪表盘「启动」后这个机器人才真正上线。';
+        warn.style.marginRight = '8px';
+        row.appendChild(warn);
+      }
       var sw = el('button', 'btn' + (b.active ? ' primary' : ''), b.active ? '✅ 已启用' : '⛔ 已停用');
       sw.title = b.active ? '点一下停用（退出活跃集）' : '点一下启用（加入活跃集）';
       sw.onclick = function () { toggleBotEnabled(b); };
@@ -1775,7 +1787,7 @@ ${UI_PURE_JS}
           .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
           .then(function (resp) {
             if (resp.status === 200) { toast('✅ ' + (resp.body.message || '已卸载')); refreshBackends(); }
-            else if (resp.status === 501) toast('⏳ ' + (resp.body.message || '需要 daemon 在跑'));
+            else if (resp.status === 501) toast('⏳ ' + (resp.body.message || '需要 Feishu Bridge 在跑'));
             else toast('❌ ' + (resp.body.message || ('HTTP ' + resp.status)));
           }).catch(function () { toast('❌ 请求失败'); });
       },
@@ -1832,7 +1844,7 @@ ${UI_PURE_JS}
     } else if (msg.type === 'error') {
       btn.className = 'btn primary sm'; btn.disabled = false; btn.textContent = isUpd ? '🔄 重试更新' : '⬇️ 重试';
       var hint = msg.code === 'not_wired_yet'
-        ? '需要 daemon 在跑（当前为只读预览）'
+        ? '需要 Feishu Bridge 在跑（当前为只读预览）'
         : msg.code === 'aborted' ? '已取消' : (msg.message || '失败');
       tail.textContent += (tail.textContent ? '\\n' : '') + '❌ ' + hint;
       toast('❌ ' + hint);
@@ -2044,7 +2056,7 @@ ${UI_PURE_JS}
       body: JSON.stringify(body || {}),
     }).then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
       .then(function (resp) {
-        if (resp.status === 501) toast('⏳ ' + (resp.body.message || '写操作需要 daemon 在跑（当前为只读预览）'));
+        if (resp.status === 501) toast('⏳ ' + (resp.body.message || '写操作需要 Feishu Bridge 在跑（当前为只读预览）'));
         else if (resp.status === 200) { toast('✅ 已保存'); loadState(); }
         else toast('❌ ' + (resp.body.message || ('HTTP ' + resp.status)));
       })
@@ -2436,11 +2448,11 @@ ${UI_PURE_JS}
       w.appendChild(checkItem('spin', 'bridge 运行中', '长连接' + (conn.connection ? '（' + conn.connection + '）' : '建立中…')));
     } else {
       var cmd = el('div');
-      cmd.appendChild(el('div', 'note', '该机器人尚未被 daemon 拉起。把它加入活跃集后重启 daemon 即可生效：'));
+      cmd.appendChild(el('div', 'note', '该机器人尚未被 Feishu Bridge 拉起。把它加入活跃集后重启 Feishu Bridge 即可生效：'));
       cmd.appendChild(copyRow('feishu-codex-bridge bot use ' + (wizBotId || '<appId>')));
       cmd.appendChild(copyRow('feishu-codex-bridge start'));
-      cmd.appendChild(el('div', 'note', '（已在跑单 bot 的 run 进程不会被打断；上面的命令只影响 daemon 拉起的活跃集。）'));
-      w.appendChild(checkItem('⚪', '长连接未建立', '需要 daemon 拉起这个 bot', cmd));
+      cmd.appendChild(el('div', 'note', '（已在跑单 bot 的 run 进程不会被打断；上面的命令只影响 Feishu Bridge 拉起的活跃集。）'));
+      w.appendChild(checkItem('🟠', '长连接未建立', '需要 Feishu Bridge 拉起这个 bot', cmd));
     }
     var ev = s.event || { state: 'unchecked' };
     if (ev.state === 'ok') {
@@ -2511,7 +2523,7 @@ ${UI_PURE_JS}
     // 重启会短暂打断其它在跑的机器人）。
     var liveTip = el('div', 'note');
     liveTip.style.cssText = 'margin-top:10px;padding:10px 12px;background:var(--blue-tint);border-radius:8px;color:var(--text-2)';
-    liveTip.textContent = '⚡ 让它上线：新机器人需重启 daemon 后由后台接管。点下面「重启使其上线」即可（首次创建时重启很安全，不影响别的机器人）。';
+    liveTip.textContent = '⚡ 让它上线：新机器人需重启 Feishu Bridge 后由后台接管。点下面「重启使其上线」即可（首次创建时重启很安全，不影响别的机器人）。';
     w.appendChild(liveTip);
     var actions = el('div', 'actions');
     var restart = el('button', 'btn', '🔁 重启使其上线');
