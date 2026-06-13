@@ -33,8 +33,8 @@ export const UI_PURE_JS = `
   function parseRoute(hash) {
     var h = (hash || '').replace(/^#/, '');
     if (h.indexOf('bot/') === 0) return { tab: 'bot', botId: decodeURIComponent(h.slice(4)) };
-    if (h === 'overview' || h === 'backends' || h === 'doctor' || h === 'logs') return { tab: h };
-    return { tab: 'home' }; // 空 hash / 未知 → 首页（炫技 hero）
+    if (h === 'overview' || h === 'backends' || h === 'doctor' || h === 'logs' || h === 'home') return { tab: h };
+    return { tab: 'overview' }; // 空 hash / 未知 → 仪表盘（控制台落地页；营销首页仅 #home 直链可达）
   }
 
   // ── 后端依赖三态（catalog entry → 渲染语义）─────────────────────────────────
@@ -970,7 +970,7 @@ ${UI_PURE_JS}
   function routeTitle(r) {
     if (r.tab === 'home') return { t: '首页', s: 'Codex Bridge 总览' };
     if (r.tab === 'bot') { var b = botOf(r.botId); return { t: (b ? botTitle(b) : '机器人'), s: '单机器人 · 项目 / 接入诊断' }; }
-    if (r.tab === 'backends') return { t: '后端管理', s: '按需下载 / 更新 / 卸载 agent 后端' };
+    if (r.tab === 'backends') return { t: '后端 Agent', s: '按需下载 / 更新 / 卸载 agent 后端' };
     if (r.tab === 'doctor') return { t: '宿主机体检', s: '本机后端环境与运行时信息' };
     if (r.tab === 'logs') return { t: '实时日志', s: '当日文件日志 SSE 实时跟随' };
     return { t: '仪表盘', s: '全局总览 · 机器人 / 后端 / daemon' };
@@ -1016,16 +1016,15 @@ ${UI_PURE_JS}
     nav.textContent = '';
     var r = parseRoute(location.hash);
     nav.appendChild(el('div', 'nav-sec', '概览'));
-    nav.appendChild(navItem({ icon: 'home', label: '首页', on: r.tab === 'home', onClick: function () { go({ tab: 'home' }); } }));
     nav.appendChild(navItem({ icon: 'grid', label: '仪表盘', on: r.tab === 'overview', onClick: function () { go({ tab: 'overview' }); } }));
-    nav.appendChild(el('div', 'nav-sec', '机器人'));
+    nav.appendChild(el('div', 'nav-sec', '工作区'));
     var bots = (state && state.bots) || [];
     bots.forEach(function (b) {
       nav.appendChild(navItem({ icon: 'bot', label: botTitle(b), on: r.tab === 'bot' && r.botId === b.appId, dot: !!b.running, onClick: function () { go({ tab: 'bot', botId: b.appId }); } }));
     });
     nav.appendChild(navItem({ icon: 'add', label: '添加机器人', add: true, onClick: function () { openWizard(); } }));
-    nav.appendChild(el('div', 'nav-sec', '系统'));
-    nav.appendChild(navItem({ icon: 'backend', label: '后端管理', on: r.tab === 'backends', onClick: function () { go({ tab: 'backends' }); } }));
+    nav.appendChild(el('div', 'nav-sec', '配置'));
+    nav.appendChild(navItem({ icon: 'backend', label: '后端 Agent', on: r.tab === 'backends', onClick: function () { go({ tab: 'backends' }); } }));
     nav.appendChild(navItem({ icon: 'doctor', label: '宿主机体检', on: r.tab === 'doctor', onClick: function () { go({ tab: 'doctor' }); } }));
     nav.appendChild(navItem({ icon: 'logs', label: '实时日志', on: r.tab === 'logs', onClick: function () { go({ tab: 'logs' }); } }));
     renderSidebarFoot();
@@ -1076,8 +1075,8 @@ ${UI_PURE_JS}
     diag = null; diagBotId = null; bkDetailId = null;
     closeDrawer(); closeSidebar();
     if (route.tab === 'bot') location.hash = '#bot/' + encodeURIComponent(route.botId);
-    else if (route.tab === 'overview' || route.tab === 'backends' || route.tab === 'doctor' || route.tab === 'logs') location.hash = '#' + route.tab;
-    else location.hash = '#home';
+    else if (route.tab === 'backends' || route.tab === 'doctor' || route.tab === 'logs' || route.tab === 'home') location.hash = '#' + route.tab;
+    else location.hash = '#overview';
   }
   window.addEventListener('hashchange', function () { diag = null; diagBotId = null; closeDrawer(); closeSidebar(); renderRoute(); });
 
