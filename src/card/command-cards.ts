@@ -40,30 +40,61 @@ export interface ModelCardState {
   note?: string;
 }
 
-/** The `/model` card: pick model + reasoning effort for the current session. */
+/**
+ * The `/model` card —— **按后端能力自适应**，对齐 Codex 的诚实体验：
+ *   - 只在「当前模型真的有 supportedEfforts」时才显示 effort 下拉。旧版在 effort 为空
+ *     时回退成假的 low/medium/high，于是 claude-sdk / claude-acp（都 supportedEfforts:[]、
+ *     运行期忽略 effort）也显示一个**点了没用的 effort 下拉** —— 这正是用户说的「和
+ *     Codex 不一致」。
+ *   - 只在「有多个可见模型」时才显示模型下拉（单模型如 ACP 用文字呈现，不给一个只有
+ *     一项的下拉）。
+ *   - 既不能切模型也不能调 effort（ACP）→ 纯信息卡 + 明确「此后端不支持在此切换」。
+ * 这样三后端都用同一张卡，能调的给控件、不能调的给清晰说明（不静默、不造假）。
+ */
 export function buildModelCard(state: ModelCardState): CardObject {
   const visible = state.models.filter((m) => !m.hidden);
   const cur = state.models.find((m) => m.id === state.model);
-  const efforts = cur?.supportedEfforts.length ? cur.supportedEfforts : (['low', 'medium', 'high'] as ReasoningEffort[]);
-  const elements = [
-    md('🧠 **模型 / 推理强度**'),
-    note('选择后下一轮生效'),
-    hr(),
-    actions([
-      selectStatic({
-        actionId: MC.model,
-        placeholder: '选择模型',
-        initial: state.model,
-        options: visible.map((m) => ({ label: m.displayName, value: m.id })),
-      }),
-      selectStatic({
-        actionId: MC.effort,
-        placeholder: 'effort',
-        initial: state.effort,
-        options: efforts.map((e) => ({ label: `effort：${EFFORT_LABEL[e]}`, value: e })),
-      }),
-    ]),
-  ];
+  const efforts = cur?.supportedEfforts ?? [];
+  const canPickModel = visible.length > 1;
+  const canPickEffort = efforts.length > 0;
+  const curLabel = cur?.displayName ?? state.model;
+
+  const elements: CardElement[] = [md('🧠 **模型 / 推理强度**')];
+
+  if (canPickModel || canPickEffort) {
+    elements.push(note('选择后下一轮生效'), hr());
+    const controls: CardElement[] = [];
+    if (canPickModel) {
+      controls.push(
+        selectStatic({
+          actionId: MC.model,
+          placeholder: '选择模型',
+          initial: state.model,
+          options: visible.map((m) => ({ label: m.displayName, value: m.id })),
+        }),
+      );
+    }
+    if (canPickEffort) {
+      controls.push(
+        selectStatic({
+          actionId: MC.effort,
+          placeholder: 'effort',
+          initial: state.effort,
+          options: efforts.map((e) => ({ label: `effort：${EFFORT_LABEL[e]}`, value: e })),
+        }),
+      );
+    }
+    elements.push(actions(controls));
+    // 只有一个维度可调时，给另一维度一句说明（避免「为什么只有一个下拉」的困惑）。
+    if (canPickModel && !canPickEffort) {
+      elements.push(note('该后端不调节推理强度（思考由模型自动调度，无 Codex 那样的 effort 档）'));
+    }
+  } else {
+    // 既不能切模型也不能调 effort（如 claude-acp）→ 信息卡，明确「此后端不支持」。
+    elements.push(hr(), md(`当前模型：**${curLabel}**`));
+    elements.push(note('该后端不支持在此切换模型或推理强度 —— 由订阅版 Claude Code 自身配置决定。'));
+  }
+
   if (state.note) elements.push(note(state.note));
   return card(elements, { summary: '模型设置' });
 }
