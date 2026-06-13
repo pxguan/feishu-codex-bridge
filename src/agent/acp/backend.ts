@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { Readable, Writable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
 import type * as acp from '@agentclientprotocol/sdk';
-import { spawnProcess } from '../../platform/spawn';
+import { spawnProcess, killProcessGroup } from '../../platform/spawn';
 import { log } from '../../core/logger';
 import { loadConfig } from '../../config/store';
 import { getAcpCommand } from '../../config/schema';
@@ -310,6 +310,10 @@ class AcpThread implements AgentThread {
     await (nativeHelperFixOnce ??= fixNativeHelperPerms().catch(() => undefined));
     const child = spawnProcess(this.server.command, this.server.args, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      // POSIX：自成进程组，close 时整组杀。claude-pty-acp 的 bin 用 `npx tsx` 起
+      // （npx→tsx→node→claude 一棵树），npm/npx 不转发信号给孙子——只 kill child
+      // 外壳会把 node/claude 留成孤儿（实测过满地 claude-pty-acp 孤儿树）。
+      detached: !IS_WIN,
     });
     this.child = child;
     log.info('agent', 'acp-spawn', {
@@ -522,12 +526,9 @@ class AcpThread implements AgentThread {
     } catch {
       // already closed
     }
-    try {
-      // claude-pty-acp 的 SIGTERM handler 会连带杀掉子 claude + 清理 socket。
-      this.child?.kill('SIGTERM');
-    } catch {
-      // already dead
-    }
+    // 整组杀：child 是 `npx tsx` 外壳，单 kill 它到不了 node→claude 孙子（会留孤儿）。
+    // detached 起的进程组用负 pid 一锅端；SIGTERM 给优雅窗口、超时 SIGKILL。
+    await killProcessGroup(this.child?.pid, () => this.childExited);
   }
 }
 
@@ -619,7 +620,7 @@ async function handshakeProbe(server: AcpServerCommand, location: string): Promi
   let child: ChildProcess | undefined;
   try {
     const sdk = await import('@agentclientprotocol/sdk');
-    child = spawnProcess(server.command, server.args, { stdio: ['pipe', 'pipe', 'ignore'] });
+    child = spawnProcess(server.command, server.args, { stdio: ['pipe', 'pipe', 'ignore'], detached: !IS_WIN });
     child.on('error', () => undefined); // ENOENT 等 → initialize 超时归一处理
     if (!child.stdin || !child.stdout) throw new Error('子进程缺少 stdio 管道');
     const stream = sdk.ndJsonStream(
@@ -651,11 +652,9 @@ async function handshakeProbe(server: AcpServerCommand, location: string): Promi
       hint: `命令已找到但 ACP 握手失败：${errMsg(err)}（确认它是一个 ACP server；必要时在配置 preferences.acpCommand 修正）`,
     };
   } finally {
-    try {
-      child?.kill('SIGTERM');
-    } catch {
-      // already dead
-    }
+    // 探活只 initialize（不 newSession，无 claude 子进程），但 server 仍是 npx→tsx→node
+    // 三层——整组杀，别每次「检测」都漏 tsx/node 孤儿。fire-and-forget（doctor 不等回收）。
+    void killProcessGroup(child?.pid, () => child?.exitCode != null, { graceMs: 2000 });
   }
 }
 
