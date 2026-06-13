@@ -107,13 +107,66 @@ export const UI_HTML = `<!doctype html>
     font-size: 13px; display: none; z-index: 20; max-width: 80vw;
   }
   .empty { color: var(--text-2); text-align: center; padding: 18px 0; }
+  /* ── 添加机器人向导（day-0：bot 连上前 DM 卡片不存在，只能从这里手填密钥）── */
+  .add-bot-tab {
+    border: 1px solid rgba(255,255,255,.55); color: #fff; background: transparent;
+    border-radius: 999px; padding: 3px 14px; font-size: 13px; cursor: pointer;
+  }
+  .add-bot-tab:hover { background: rgba(255,255,255,.18); }
+  #wizMask {
+    position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; z-index: 30;
+    overflow-y: auto; padding: 40px 16px;
+  }
+  #wizMask.open { display: block; }
+  .wiz {
+    background: var(--card); border-radius: var(--radius); max-width: 560px; margin: 0 auto;
+    padding: 22px 24px 26px; box-shadow: 0 12px 40px rgba(0,0,0,.2);
+  }
+  .wiz h3 { margin: 0 0 4px; font-size: 17px; }
+  .wiz .steps { display: flex; gap: 6px; margin: 12px 0 16px; }
+  .wiz .step {
+    flex: 1; text-align: center; font-size: 12px; color: var(--text-2);
+    border-top: 3px solid var(--border); padding-top: 6px;
+  }
+  .wiz .step.on { color: var(--blue); border-top-color: var(--blue); font-weight: 600; }
+  .wiz .step.done { color: var(--green); border-top-color: var(--green); }
+  .wiz label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px; }
+  .wiz input[type=text], .wiz input[type=password] {
+    width: 100%; border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; font-size: 13px; font-family: inherit;
+  }
+  .wiz input:focus { outline: 0; border-color: var(--blue); }
+  .wiz .radio-row { display: flex; gap: 16px; margin: 6px 0; font-size: 13px; }
+  .wiz .actions { display: flex; gap: 10px; margin-top: 18px; align-items: center; }
+  .wiz .actions .grow { flex: 1; }
+  .check-item {
+    display: flex; align-items: flex-start; gap: 10px; padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .check-item:last-child { border-bottom: 0; }
+  .check-item .ico { font-size: 16px; line-height: 1.5; width: 20px; flex: none; text-align: center; }
+  .check-item .body { flex: 1; min-width: 0; }
+  .check-item .body .t { font-weight: 600; font-size: 13.5px; }
+  .check-item .body .d { color: var(--text-2); font-size: 12px; margin-top: 2px; }
+  .spin {
+    display: inline-block; width: 13px; height: 13px; border: 2px solid var(--border);
+    border-top-color: var(--blue); border-radius: 50%; animation: spin .8s linear infinite;
+    vertical-align: -1px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .copybox {
+    display: flex; gap: 8px; align-items: center; background: #0e1117; color: #c9d1d9;
+    border-radius: 8px; padding: 8px 10px; margin: 6px 0;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .copybox code { flex: 1; min-width: 0; word-break: break-all; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="topbar">
     <h1>🤖 Codex Bridge 管理台</h1>
-    <span class="sub">Web 控制台 · 只读预览 · 仅本机（127.0.0.1）</span>
+    <span class="sub">全局控制台 · 仅本机（127.0.0.1）· 可添加机器人 / 体检 / 管理项目</span>
     <div class="bot-tabs" id="botTabs"></div>
   </div>
 
@@ -148,6 +201,10 @@ export const UI_HTML = `<!doctype html>
 
 <div class="drawer-mask" id="drawerMask"></div>
 <div class="drawer" id="drawer"></div>
+
+<!-- ➕ 添加机器人向导：内容由 JS 按步骤渲染（day-0 手填密钥 → checklist → 完成） -->
+<div id="wizMask"><div class="wiz" id="wizBody"></div></div>
+
 <div id="toast"></div>
 
 <script>
@@ -244,6 +301,10 @@ export const UI_HTML = `<!doctype html>
       };
       box.appendChild(t);
     });
+    // ➕ 添加机器人（day-0 入口）：始终可点——首装时没有任何 bot 也得能进向导。
+    var add = el('button', 'add-bot-tab', '➕ 添加机器人');
+    add.onclick = function () { openWizard(); };
+    box.appendChild(add);
   }
 
   function renderOverview() {
@@ -251,7 +312,16 @@ export const UI_HTML = `<!doctype html>
     box.textContent = '';
     box.className = '';
     var b = botOf(currentBot);
-    if (!b) { box.className = 'empty'; box.textContent = '还没有已注册的机器人。先在终端跑 feishu-codex-bridge run 完成扫码初始化。'; return; }
+    if (!b) {
+      box.className = 'empty';
+      box.textContent = '还没有已注册的机器人。';
+      var goWiz = el('button', 'btn primary', '➕ 添加机器人');
+      goWiz.style.marginTop = '10px';
+      goWiz.onclick = function () { openWizard(); };
+      box.appendChild(el('div', 'note', '已在开发者后台建好应用？点下方手填 App ID/Secret 接入；或在终端跑 feishu-codex-bridge run 扫码创建。'));
+      box.appendChild(goWiz);
+      return;
+    }
 
     var line1 = el('div', 'statline');
     line1.appendChild(el('span', null, '🤖 ' + (b.botName || b.name)));
@@ -486,6 +556,306 @@ export const UI_HTML = `<!doctype html>
         if (list.length > 50) topicBox.appendChild(el('div', null, '· …还有 ' + (list.length - 50) + ' 个话题'));
       })
       .catch(function () { topicBox.textContent = '⚠️ 话题加载失败'; });
+  }
+
+  // ── ➕ 添加机器人向导（day-0：bot 连上前飞书 DM 卡片不存在，只能从这里手填密钥）──
+  // 安全：appSecret 仅在 step1 提交时一次性放进 POST body（service 层探活后进
+  // 本机 keystore），绝不回显、绝不进任何 GET/轮询——下面 step≥2 全程不再持有它。
+  var wizStep = 1;          // 1=表单 2=checklist 3=完成
+  var wizBotId = null;      // 注册成功后拿到的 appId（checklist 轮询用）
+  var wizPoll = null;       // setup-status 轮询定时器
+  var openWizardBtnTenant = 'feishu';
+
+  function openWizard() {
+    wizStep = 1; wizBotId = null;
+    stopWizPoll();
+    $('wizMask').classList.add('open');
+    renderWizard();
+  }
+  function closeWizard() {
+    stopWizPoll();
+    $('wizMask').classList.remove('open');
+    loadState(); // 关向导后刷新 bot 列表（新注册的 bot 立即出现在标签里）
+  }
+  function stopWizPoll() {
+    if (wizPoll) { clearInterval(wizPoll); wizPoll = null; }
+  }
+
+  function wizStepBar(active) {
+    var bar = el('div', 'steps');
+    var labels = ['① 填密钥', '② 接入检测', '③ 完成'];
+    labels.forEach(function (lab, i) {
+      var n = i + 1;
+      var cls = 'step' + (n === active ? ' on' : (n < active ? ' done' : ''));
+      bar.appendChild(el('div', cls, lab));
+    });
+    return bar;
+  }
+
+  function renderWizard() {
+    if (wizStep === 1) return renderWizForm();
+    if (wizStep === 2) return renderWizChecklist();
+    return renderWizDone();
+  }
+
+  // ── ① 表单：appId / appSecret（密码型）/ 租户 ──────────────────────────────
+  function renderWizForm() {
+    var w = $('wizBody');
+    w.textContent = '';
+    w.appendChild(el('h3', null, '➕ 添加机器人'));
+    w.appendChild(el('div', 'note', '已在飞书开发者后台建好「自建应用」？把它的 App ID 与 App Secret 填进来即可接入。'));
+    w.appendChild(wizStepBar(1));
+
+    w.appendChild(el('label', null, 'App ID'));
+    var idIn = el('input');
+    idIn.type = 'text'; idIn.id = 'wizAppId'; idIn.placeholder = 'cli_xxxxxxxxxxxxxxxx';
+    idIn.autocomplete = 'off';
+    w.appendChild(idIn);
+    var idHint = el('div', 'note', '在开发者后台「凭证与基础信息」页可以找到（cli_ 开头）。');
+    w.appendChild(idHint);
+
+    w.appendChild(el('label', null, 'App Secret'));
+    var secIn = el('input');
+    secIn.type = 'password'; secIn.id = 'wizAppSecret'; secIn.placeholder = '••••••••••••••••';
+    secIn.autocomplete = 'new-password';
+    w.appendChild(secIn);
+    w.appendChild(el('div', 'note', '🔒 密钥仅用于一次性探活验证后，加密存储在本机 keystore（AES-256-GCM）；不回显、不进日志，绝不外发。'));
+
+    w.appendChild(el('label', null, '版本'));
+    var radioRow = el('div', 'radio-row');
+    [['feishu', '飞书（feishu.cn）'], ['lark', 'Lark（larksuite.com）']].forEach(function (pair) {
+      var lbl = el('label'); lbl.style.fontWeight = '400'; lbl.style.margin = '0';
+      var r = el('input'); r.type = 'radio'; r.name = 'wizTenant'; r.value = pair[0];
+      if (pair[0] === openWizardBtnTenant) r.checked = true;
+      r.onchange = function () {
+        // 保留已填的 id/secret，仅切租户后重渲染（更新「前往后台」深链）。
+        openWizardBtnTenant = pair[0];
+        var keepId = ($('wizAppId') || {}).value || '';
+        var keepSec = ($('wizAppSecret') || {}).value || '';
+        renderWizForm();
+        if ($('wizAppId')) $('wizAppId').value = keepId;
+        if ($('wizAppSecret')) $('wizAppSecret').value = keepSec;
+      };
+      lbl.appendChild(r); lbl.appendChild(document.createTextNode(' ' + pair[1]));
+      radioRow.appendChild(lbl);
+    });
+    w.appendChild(radioRow);
+
+    var deepLink = openWizardBtnTenant === 'lark'
+      ? 'https://open.larksuite.com/app'
+      : 'https://open.feishu.cn/app';
+    var dl = el('div', 'note');
+    var a = el('a', null, '前往开发者后台创建 / 查看应用 ↗');
+    a.href = deepLink; a.target = '_blank'; a.rel = 'noopener';
+    dl.appendChild(document.createTextNode('还没有应用？'));
+    dl.appendChild(a);
+    w.appendChild(dl);
+
+    var msg = el('div', 'note'); msg.id = 'wizFormMsg'; msg.style.color = 'var(--red)';
+    w.appendChild(msg);
+
+    var actions = el('div', 'actions');
+    var cancel = el('button', 'btn', '取消');
+    cancel.onclick = closeWizard;
+    var submit = el('button', 'btn primary', '验证并添加');
+    submit.id = 'wizSubmit';
+    submit.onclick = submitWizForm;
+    actions.appendChild(cancel);
+    actions.appendChild(el('div', 'grow'));
+    actions.appendChild(submit);
+    w.appendChild(actions);
+    setTimeout(function () { idIn.focus(); }, 50);
+  }
+
+  function submitWizForm() {
+    var appId = ($('wizAppId').value || '').trim();
+    var appSecret = ($('wizAppSecret').value || '').trim();
+    var msg = $('wizFormMsg');
+    msg.textContent = '';
+    if (!appId || !appSecret) { msg.textContent = 'App ID 与 App Secret 都要填。'; return; }
+    var btn = $('wizSubmit');
+    btn.textContent = '验证中…'; btn.className = 'btn primary disabled'; btn.disabled = true;
+    fetch('/api/bots', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appId: appId, appSecret: appSecret, tenant: openWizardBtnTenant }),
+    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (resp) {
+        // appSecret 用完即弃：清掉输入框，后续 checklist 全程不再持有它。
+        $('wizAppSecret').value = '';
+        if (resp.status === 201 && resp.body.ok) {
+          wizBotId = resp.body.bot.appId;
+          wizStep = 2;
+          renderWizard();
+          startWizPoll();
+        } else {
+          btn.textContent = '验证并添加'; btn.className = 'btn primary'; btn.disabled = false;
+          msg.textContent = '❌ ' + (resp.body.message || ('添加失败（HTTP ' + resp.status + '）'));
+        }
+      })
+      .catch(function () {
+        btn.textContent = '验证并添加'; btn.className = 'btn primary'; btn.disabled = false;
+        msg.textContent = '❌ 请求失败，请重试。';
+      });
+  }
+
+  // ── ② checklist：密钥 → 长连接 → 事件订阅（5s 轮询直到事件 ✅）────────────
+  var wizSetup = null;
+  function startWizPoll() {
+    stopWizPoll();
+    pollWizSetup();
+    wizPoll = setInterval(pollWizSetup, 5000);
+  }
+  function pollWizSetup() {
+    if (!wizBotId) return;
+    fetch('/api/bots/' + encodeURIComponent(wizBotId) + '/setup-status')
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        wizSetup = s;
+        if (wizStep === 2) renderWizChecklist();
+        // 事件已生效 → 停轮询（用户可手动「下一步」去完成页）。
+        if (s.event && s.event.state === 'ok') stopWizPoll();
+      })
+      .catch(function () { /* 下个周期重试 */ });
+  }
+
+  function checkItem(ico, title, desc, extra) {
+    var item = el('div', 'check-item');
+    var ic = el('div', 'ico'); ic.textContent = ''; item.appendChild(ic);
+    if (ico === 'spin') ic.appendChild(el('span', 'spin')); else ic.textContent = ico;
+    var body = el('div', 'body');
+    body.appendChild(el('div', 't', title));
+    if (desc) body.appendChild(el('div', 'd', desc));
+    if (extra) body.appendChild(extra);
+    item.appendChild(body);
+    return item;
+  }
+
+  function renderWizChecklist() {
+    var w = $('wizBody');
+    w.textContent = '';
+    w.appendChild(el('h3', null, '② 接入检测'));
+    w.appendChild(el('div', 'note', '机器人「' + (wizBotId || '') + '」已注册。下面逐项检测接入状态，事件订阅生效后即可去群里 @它。'));
+    w.appendChild(wizStepBar(2));
+
+    var s = wizSetup;
+    if (!s) {
+      w.appendChild(checkItem('spin', '正在检测…', '首次拉取约 2~3 秒'));
+      w.appendChild(wizChecklistActions(false));
+      return;
+    }
+
+    // 密钥有效
+    w.appendChild(checkItem(
+      s.credentials && s.credentials.ok ? '✅' : '❌',
+      '密钥有效',
+      s.credentials && s.credentials.ok ? '凭据探活通过' + (s.botName ? '（' + s.botName + '）' : '') : ('凭据校验失败：' + ((s.credentials && s.credentials.reason) || '未知'))
+    ));
+
+    // scope 缺失（密钥有效时才有意义）
+    if (s.credentials && s.credentials.ok && s.scopes) {
+      var miss = s.scopes.missingRequired;
+      if (miss === undefined) {
+        w.appendChild(checkItem('⚠️', '权限检测', '未能读取已授权权限（缺 application:app_version 等只读 scope 时会这样），可先继续。'));
+      } else if (miss.length === 0) {
+        w.appendChild(checkItem('✅', '必需权限齐全', '核心消息权限已全部授权'));
+      } else {
+        var grant = el('div', 'note');
+        var ga = el('a', null, '一键去授权页补齐这 ' + miss.length + ' 项 ↗');
+        ga.href = s.scopes.grantUrl; ga.target = '_blank'; ga.rel = 'noopener';
+        grant.appendChild(ga);
+        w.appendChild(checkItem('⚠️', '缺 ' + miss.length + ' 项必需权限', miss.join('、'), grant));
+      }
+    }
+
+    // 长连接在线
+    var conn = s.connection || {};
+    if (conn.running && conn.connection === 'connected') {
+      w.appendChild(checkItem('✅', '长连接在线', 'bridge 已连上飞书，可实时收发'));
+    } else if (conn.running) {
+      w.appendChild(checkItem('spin', 'bridge 运行中', '长连接' + (conn.connection ? '（' + conn.connection + '）' : '建立中…')));
+    } else {
+      var cmd = el('div');
+      cmd.appendChild(el('div', 'note', '该机器人尚未被 daemon 拉起。把它加入活跃集后重启 daemon 即可生效：'));
+      cmd.appendChild(copyRow('feishu-codex-bridge bot use ' + (wizBotId || '<appId>')));
+      cmd.appendChild(copyRow('feishu-codex-bridge start'));
+      cmd.appendChild(el('div', 'note', '（已在跑单 bot 的 run 进程不会被打断；上面的命令只影响 daemon 拉起的活跃集。）'));
+      w.appendChild(checkItem('⚪', '长连接未建立', '需要 daemon 拉起这个 bot', cmd));
+    }
+
+    // 事件订阅三态
+    var ev = s.event || { state: 'unchecked' };
+    if (ev.state === 'ok') {
+      w.appendChild(checkItem('✅', '事件订阅已生效', eventDiagText(ev)));
+    } else {
+      var evExtra = el('div');
+      evExtra.appendChild(el('div', 'note', ev.state === 'unchecked'
+        ? '（缺 application:app_version 只读 scope 或网络不通时无法自动检测；按下方深链手动核对「事件配置」。）'
+        : '去开发者后台「事件与回调」：事件配置改「长连接」→ 添加 im.message.receive_v1 → 应用发布里创建并发布版本。'));
+      var ea = el('a', null, '打开「事件与回调」配置页 ↗');
+      ea.href = s.eventConfigUrl; ea.target = '_blank'; ea.rel = 'noopener';
+      evExtra.appendChild(ea);
+      evExtra.appendChild(el('div', 'note', '配置好后无需手动刷新——本页每 5 秒自动复检，生效会变 ✅。'));
+      w.appendChild(checkItem(ev.state === 'unchecked' ? '⚠️' : 'spin',
+        ev.state === 'unchecked' ? '事件订阅未能自动检测' : '事件订阅尚未生效',
+        eventDiagText(ev), evExtra));
+    }
+
+    w.appendChild(wizChecklistActions(ev.state === 'ok'));
+  }
+
+  function wizChecklistActions(eventOk) {
+    var actions = el('div', 'actions');
+    var back = el('button', 'btn', '稍后再说');
+    back.onclick = closeWizard;
+    actions.appendChild(back);
+    actions.appendChild(el('div', 'grow'));
+    var next = el('button', 'btn' + (eventOk ? ' primary' : ''), eventOk ? '下一步' : '事件生效后再继续');
+    if (eventOk) { next.onclick = function () { wizStep = 3; stopWizPoll(); renderWizard(); }; }
+    else { next.className = 'btn disabled'; next.disabled = true; }
+    actions.appendChild(next);
+    return actions;
+  }
+
+  function copyRow(text) {
+    var row = el('div', 'copybox');
+    row.appendChild(el('code', null, text));
+    var btn = el('button', 'btn', '复制');
+    btn.onclick = function () {
+      var done = function () { toast('✅ 已复制'); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { toast('复制失败，请手动选中'); });
+      } else { toast('请手动选中复制'); }
+    };
+    row.appendChild(btn);
+    return row;
+  }
+
+  // ── ③ 完成页：引导去飞书建群 / 拉 bot ─────────────────────────────────────
+  function renderWizDone() {
+    var w = $('wizBody');
+    w.textContent = '';
+    w.appendChild(el('h3', null, '🎉 接入完成'));
+    w.appendChild(wizStepBar(3));
+    w.appendChild(el('div', 'note', '机器人「' + ((wizSetup && wizSetup.botName) || wizBotId || '') + '」已就绪，事件订阅已生效。'));
+    var ul = el('div'); ul.style.margin = '12px 0';
+    [
+      '① 在飞书里私聊这个机器人，点「➕ 新建项目」把一个目录绑成项目群；',
+      '② 或把机器人拉进一个已有群（需开「加入存量群」相关权限）自动绑定；',
+      '③ 然后在群里 @机器人 提需求，它就在绑定的目录里干活。',
+    ].forEach(function (line) {
+      var d = el('div'); d.style.padding = '4px 0'; d.textContent = line;
+      ul.appendChild(d);
+    });
+    w.appendChild(ul);
+    w.appendChild(el('div', 'note', '提示：私聊机器人发任意消息即可唤出私聊管理台；这里 Web 控制台与私聊卡片共享同一套设置，双端实时一致。'));
+
+    var actions = el('div', 'actions');
+    actions.appendChild(el('div', 'grow'));
+    var done = el('button', 'btn primary', '完成');
+    done.onclick = function () { currentBot = wizBotId; closeWizard(); };
+    actions.appendChild(done);
+    w.appendChild(actions);
   }
 
   // ── 日志 SSE ─────────────────────────────────────────────────────────────

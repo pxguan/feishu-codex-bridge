@@ -1,6 +1,6 @@
-import { rmSync } from 'node:fs';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { paths, useBotDir } from '../src/config/paths';
+import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { paths, botPaths, useBotDir } from '../src/config/paths';
 import { saveBots } from '../src/config/bots';
 import { addProject } from '../src/project/registry';
 import { upsertSession } from '../src/bot/session-store';
@@ -270,5 +270,129 @@ describe('createAdminService · daemon 进程内（executeWrite + liveStatus 注
     });
     const bots = await daemon.listBots();
     expect(bots.find((b) => b.appId === BOT_A)!.running).toBe(false);
+  });
+});
+
+describe('createAdminService · getSetupStatus（初始化 checklist 聚合）', () => {
+  // 真飞书 API 一律 mock（绝不打真网络）：token / bot-info / scopes / app_versions。
+  // 写一个带明文 secret 的完整 config.json（resolveAppSecret 直接吃明文）到 bot 目录。
+  const SETUP_BOT = 'cli_setupbot';
+
+  function writeCompleteConfig(tenant: 'feishu' | 'lark' = 'feishu'): void {
+    const dir = botPaths(SETUP_BOT).dir;
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      botPaths(SETUP_BOT).configFile,
+      JSON.stringify({ accounts: { app: { id: SETUP_BOT, secret: 'plain-secret', tenant } } }),
+    );
+  }
+
+  function stubFetch(opts: { grantedScopes: string[]; eventEvents: string[]; published?: boolean }): typeof fetch {
+    return (async (input: unknown): Promise<Response> => {
+      const u = String(input);
+      const json = (body: unknown): Response =>
+        new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      if (u.includes('/auth/v3/tenant_access_token/internal')) {
+        return json({ code: 0, tenant_access_token: 't-xyz' });
+      }
+      if (u.includes('/bot/v3/info')) {
+        return json({ code: 0, bot: { app_name: 'SetupBot', open_id: 'ou_bot' } });
+      }
+      if (u.includes('/application/v6/scopes')) {
+        return json({ data: { scopes: opts.grantedScopes.map((s) => ({ scope_name: s, grant_status: 1 })) } });
+      }
+      if (u.includes('/app_versions')) {
+        return json({
+          code: 0,
+          data: opts.published === false ? { items: [] } : { items: [{ version: '1.0.0', status: 1, events: opts.eventEvents }] },
+        });
+      }
+      throw new Error('unexpected fetch ' + u);
+    }) as unknown as typeof fetch;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  beforeAll(async () => {
+    await saveBots({
+      version: 1,
+      current: BOT_A,
+      bots: [
+        { name: 'alpha', appId: BOT_A, tenant: 'feishu', botName: '阿尔法', createdAt: 1, active: true },
+        { name: 'beta', appId: BOT_B, tenant: 'lark', createdAt: 2, active: false },
+        { name: 'setup', appId: SETUP_BOT, tenant: 'feishu', createdAt: 3, active: false },
+      ],
+    });
+  });
+
+  it('全绿：密钥有效 + scope 齐全 + 事件 ok（长连接靠锁文件探测，预览态 running=false）', async () => {
+    writeCompleteConfig();
+    // 授予全部必需 scope，且事件含 im.message.receive_v1 → ok。
+    vi.stubGlobal(
+      'fetch',
+      stubFetch({
+        grantedScopes: [
+          'im:message.group_at_msg:readonly',
+          'im:message.group_msg',
+          'im:message.p2p_msg:readonly',
+          'im:message:send_as_bot',
+          'im:message.pins:write_only',
+          'im:message.reactions:write_only',
+          'im:resource',
+          'im:chat:create',
+          'im:chat:update',
+          'im:chat.managers:write_only',
+          'im:chat.announcement:read',
+          'im:chat.announcement:write_only',
+          'im:chat.top_notice:write_only',
+          'im:chat.tabs:write_only',
+          'cardkit:card:write',
+        ],
+        eventEvents: ['im.message.receive_v1'],
+      }),
+    );
+    const svc = createReadonlyAdminService();
+    const s = await svc.getSetupStatus(SETUP_BOT);
+    expect(s.appId).toBe(SETUP_BOT);
+    expect(s.credentials.ok).toBe(true);
+    expect(s.botName).toBe('SetupBot');
+    expect(s.scopes.missingRequired).toEqual([]);
+    expect(s.scopes.grantUrl).toContain('/app/cli_setupbot/auth?q=');
+    expect(s.event.state).toBe('ok');
+    expect(s.connection.running).toBe(false); // 没锁文件 + 预览态
+    expect(s.eventConfigUrl).toContain('/app/cli_setupbot/event');
+  });
+
+  it('缺 scope + 事件未发布：missingRequired 非空、event=unpublished', async () => {
+    writeCompleteConfig();
+    vi.stubGlobal('fetch', stubFetch({ grantedScopes: ['im:resource'], eventEvents: [], published: false }));
+    const svc = createReadonlyAdminService();
+    const s = await svc.getSetupStatus(SETUP_BOT);
+    expect(s.credentials.ok).toBe(true);
+    expect((s.scopes.missingRequired ?? []).length).toBeGreaterThan(0);
+    expect(s.scopes.missingRequired).toContain('im:message:send_as_bot');
+    expect(s.event.state).toBe('unpublished');
+  });
+
+  it('配置缺失（未写 config.json）→ credentials.ok=false + event unchecked，绝不抛错', async () => {
+    rmSync(botPaths(SETUP_BOT).dir, { recursive: true, force: true });
+    const svc = createReadonlyAdminService();
+    const s = await svc.getSetupStatus(SETUP_BOT);
+    expect(s.credentials.ok).toBe(false);
+    expect(s.event.state).toBe('unchecked');
+    expect(s.scopes.grantUrl).toContain('/auth?q='); // 深链总归得给
+  });
+});
+
+describe('createAdminService · registerBot（委托共享注册函数）', () => {
+  it('registerBot 把 input 透传给共享注册逻辑并回结果（探活打真 API，这里只验证不抛 + 形状）', async () => {
+    // 不 mock 网络时 validateAppCredentials 会真发请求——给个明显非法的 appId 让它
+    // 在格式校验阶段就被 invalid_input 挡掉（绝不出网），验证委托链通即可。
+    const svc = createReadonlyAdminService();
+    const r = await svc.registerBot({ appId: '', appSecret: '' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('invalid_input');
   });
 });

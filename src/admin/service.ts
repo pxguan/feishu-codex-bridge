@@ -12,6 +12,13 @@ import { loadConfig } from '../config/store';
 import { isComplete } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
 import { diagnoseEventSubscription, type EventDiagnosis } from '../utils/event-diagnosis';
+import { validateAppCredentials } from '../utils/feishu-auth';
+import { buildScopeGrantUrl, buildEventConfigUrl } from '../config/scopes';
+import {
+  registerBotFromCredentials,
+  type RegisterBotResult,
+  type RegisterBotFailure,
+} from '../bot/register-bot';
 import { backendIds, createBackend, DEFAULT_BACKEND_ID } from '../agent';
 import type { PermissionMode } from '../agent/types';
 import { readRecentLogs } from '../core/logger';
@@ -74,6 +81,27 @@ export interface AdminService {
   listSessions(botId: string, projectName: string): Promise<AdminSession[]>;
   /** 最近文件日志尾部（JSON lines 文本）。 */
   tailLogs(opts?: { maxBytes?: number }): Promise<string>;
+
+  // ── Web 专属：初始化 / 添加机器人（day-0 场景，飞书 DM 卡片做不到）──────────
+  /**
+   * 直填 appId + appSecret 注册一个机器人：真探活验证密钥 → 进 keystore + bots.json
+   * 注册。这是 day-0 场景——bot 连上之前飞书 DM 卡片不存在，只能从 Web/CLI 手填。
+   * 与每项目写操作（switchBackend 等）不同：注册纯写宿主机级别的 keystore + 注册表，
+   * **不需要 daemon 在跑**（只读预览进程也能注册），所以无 NotWiredYetError 分支。
+   * 绝不 throw——失败落 {@link RegisterBotFailure}（HTTP 层按 code 映射 400/409）。
+   */
+  registerBot(input: {
+    appId: string;
+    appSecret: string;
+    tenant?: 'feishu' | 'lark';
+    desiredName?: string;
+  }): Promise<RegisterBotResult | RegisterBotFailure>;
+  /**
+   * 某 bot 的初始化 checklist 聚合三/四态：密钥有效（探活）/ 长连接在线 / 事件订阅
+   * 三态诊断（复用 M-7）/ 缺失 scope 清单 + 一键深链。向导页 5s 轮询它直到「事件已
+   * 生效」。绝不 throw——每段独立降级。
+   */
+  getSetupStatus(botId: string): Promise<AdminSetupStatus>;
 }
 
 /** 只读预览（daemon 未跑 / 独立 `web` 进程）里写方法统一抛它；HTTP 层映射 501。 */
@@ -160,6 +188,26 @@ export interface AdminBackendStatus {
   hint?: string;
   /** 全局默认后端（项目未显式选择时用它） */
   isDefault: boolean;
+}
+
+/** 添加机器人向导的 checklist 聚合（GET /api/bots/:appId/setup-status）。 */
+export interface AdminSetupStatus {
+  appId: string;
+  tenant: 'feishu' | 'lark';
+  botName?: string;
+  /** ① 密钥有效（tenant_access_token 探活）；undefined = 该 bot 配置缺失，没法探。 */
+  credentials: { ok: boolean; reason?: string };
+  /** ② bridge 长连接在线状态：running（进程在跑吗）+ connection（真实 WS，仅 daemon 内有）。 */
+  connection: { running: boolean; connection?: string };
+  /** ③ 事件订阅三态诊断（复用 M-7 event-diagnosis）。 */
+  event: EventDiagnosis;
+  /**
+   * ④ 必需 scope 中尚未授权的（undefined = 没查成；空 = 已齐全）+ 一键授权深链。
+   * grantUrl 始终给（预选全部 scope，缺啥点一次补齐）。
+   */
+  scopes: { missingRequired?: string[]; grantUrl: string };
+  /** 开发者后台「事件与回调」配置页深链（事件订阅没写 API，只能引导手动配 + 发版本）。 */
+  eventConfigUrl: string;
 }
 
 /** daemon/预览两种进程形态的差异全部收进这两个注入点；读路径完全同源。 */
@@ -342,6 +390,87 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
 
     tailLogs(opts?: { maxBytes?: number }): Promise<string> {
       return readRecentLogs({ maxBytes: opts?.maxBytes ?? 64 * 1024 });
+    },
+
+    registerBot(input): Promise<RegisterBotResult | RegisterBotFailure> {
+      // 纯写宿主机级 keystore + bots.json，与 daemon/预览进程形态无关——不走
+      // executeWrite，预览进程也能注册（day-0 的全部意义就在这里）。
+      return registerBotFromCredentials({
+        appId: input.appId,
+        appSecret: input.appSecret,
+        tenant: input.tenant === 'lark' ? 'lark' : 'feishu',
+        desiredName: input.desiredName,
+      });
+    },
+
+    async getSetupStatus(botId: string): Promise<AdminSetupStatus> {
+      const reg = await loadBots();
+      const entry = reg.bots.find((b) => b.appId === botId);
+      const tenant: 'feishu' | 'lark' = entry?.tenant ?? 'feishu';
+      const base: Pick<AdminSetupStatus, 'appId' | 'tenant' | 'botName' | 'eventConfigUrl'> = {
+        appId: botId,
+        tenant,
+        botName: entry?.botName,
+        eventConfigUrl: buildEventConfigUrl(botId, tenant),
+      };
+
+      // ② 长连接：真实状态优先（daemon 内），否则锁文件探测——绝不抛错。
+      const run = await runState(botId);
+
+      // 配置缺失（注册一半 / 损坏）→ 探活、事件、scope 都没法查，统一降级。
+      let cfg;
+      try {
+        cfg = await loadConfig(botPaths(botId).configFile);
+      } catch {
+        cfg = undefined;
+      }
+      if (!cfg || !isComplete(cfg)) {
+        return {
+          ...base,
+          credentials: { ok: false, reason: '配置缺失（该机器人尚未完成注册或文件损坏）' },
+          connection: { running: run.running, connection: run.connection },
+          event: { state: 'unchecked', reason: '配置缺失，无法诊断事件订阅' },
+          scopes: { grantUrl: buildScopeGrantUrl(botId, tenant) },
+        };
+      }
+
+      // ①③④ 都要密钥——解析一次，三段共用（探活拿 scope、事件诊断各打各的只读 API）。
+      let secret: string | undefined;
+      try {
+        secret = await resolveAppSecret(cfg);
+      } catch (err) {
+        return {
+          ...base,
+          credentials: { ok: false, reason: err instanceof Error ? err.message : String(err) },
+          connection: { running: run.running, connection: run.connection },
+          event: { state: 'unchecked', reason: '密钥不可解析' },
+          scopes: { grantUrl: buildScopeGrantUrl(botId, tenant) },
+        };
+      }
+
+      const { app } = cfg.accounts;
+      // ①+④ 探活同时拿 botName / missingScopes；③ 事件诊断并发。各自绝不抛错。
+      const [validation, event] = await Promise.all([
+        validateAppCredentials(app.id, secret, app.tenant).catch((err) => ({
+          ok: false as const,
+          reason: err instanceof Error ? err.message : String(err),
+        })),
+        diagnoseEventSubscription(app.id, secret, app.tenant).catch(
+          (err): EventDiagnosis => ({ state: 'unchecked', reason: err instanceof Error ? err.message : String(err) }),
+        ),
+      ]);
+
+      return {
+        ...base,
+        botName: validation.ok ? (validation.botName ?? entry?.botName) : entry?.botName,
+        credentials: validation.ok ? { ok: true } : { ok: false, reason: validation.reason },
+        connection: { running: run.running, connection: run.connection },
+        event,
+        scopes: {
+          missingRequired: validation.ok ? validation.missingScopes : undefined,
+          grantUrl: buildScopeGrantUrl(app.id, app.tenant),
+        },
+      };
     },
   };
 }
