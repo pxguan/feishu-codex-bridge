@@ -379,6 +379,21 @@ describe('web server · 只读 API', () => {
   it('GET /vendor/gsap.min.js：无 token → 401（静态资源同样过鉴权）', async () => {
     expect((await get('/vendor/gsap.min.js')).status).toBe(401);
   });
+
+  it('GET /vendor/logo.png：鉴权后 200 + image/png + 长缓存 + 真是 PNG（魔数）', async () => {
+    const res = await authed('/vendor/logo.png');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('image/png');
+    expect(res.headers.get('cache-control')).toContain('immutable');
+    const buf = Buffer.from(await res.arrayBuffer());
+    // PNG 魔数 89 50 4E 47 0D 0A 1A 0A
+    expect(buf.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+    expect(buf.length).toBeGreaterThan(10000); // ~27KB，确认不是空壳
+  });
+
+  it('GET /vendor/logo.png：无 token → 401（静态资源同样过鉴权）', async () => {
+    expect((await get('/vendor/logo.png')).status).toBe(401);
+  });
 });
 
 describe('web server · 写操作占位（只读预览：daemon 未跑）', () => {

@@ -9,9 +9,12 @@ import { NotWiredYetError, type AdminService } from '../admin/service';
 import { AdminWriteError } from '../admin/ops';
 import { UI_HTML } from './ui';
 import { GSAP_MIN_JS_BASE64 } from './vendor-gsap';
+import { LOGO_PNG_BASE64 } from './vendor-logo';
 
 /** vendored GSAP 解码一次（模块级，不每请求解码）；/vendor/gsap.min.js 路由直接吐这个 Buffer。 */
 const GSAP_MIN_JS = Buffer.from(GSAP_MIN_JS_BASE64, 'base64');
+/** vendored 品牌 logo（小猫 PNG）解码一次；/vendor/logo.png 路由直接吐这个 Buffer。 */
+const LOGO_PNG = Buffer.from(LOGO_PNG_BASE64, 'base64');
 
 /**
  * 本机 Web 控制台 HTTP 面（node:http，零新依赖）。
@@ -145,6 +148,16 @@ export function createWebServer(opts: WebServerOptions): WebServer {
         'Cache-Control': 'public, max-age=31536000, immutable',
       });
       res.end(GSAP_MIN_JS);
+      return;
+    }
+
+    // 本地自带的品牌 logo（小猫）—— 同 GSAP：不走外链、已过 cookie 鉴权、内容不可变长缓存。
+    if (req.method === 'GET' && pathName === '/vendor/logo.png') {
+      res.writeHead(200, {
+        'Content-Type': 'image/png',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+      });
+      res.end(LOGO_PNG);
       return;
     }
 

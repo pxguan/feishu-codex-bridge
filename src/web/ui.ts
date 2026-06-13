@@ -324,6 +324,7 @@ export const UI_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/vendor/logo.png">
 <title>Codex Bridge 管理台</title>
 <style>
   :root {
@@ -378,10 +379,11 @@ export const UI_HTML = `<!doctype html>
   }
   .side-brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 12px; }
   .side-logo {
-    width: 24px; height: 24px; border-radius: 7px; flex: none;
-    background: linear-gradient(135deg, var(--accent), #9a6cf2); color: #fff;
-    display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700;
+    width: 26px; height: 26px; border-radius: 7px; flex: none; overflow: hidden;
+    background: #fff; box-shadow: inset 0 0 0 1px var(--border);
+    display: flex; align-items: center; justify-content: center;
   }
+  .side-logo img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .side-brand-txt { display: flex; flex-direction: column; line-height: 1.2; }
   .side-brand-txt b { color: var(--text); font-size: 13.5px; font-weight: 600; letter-spacing: -.1px; }
   .side-brand-txt span { font-size: 11px; color: var(--text-3); }
@@ -711,7 +713,7 @@ export const UI_HTML = `<!doctype html>
   <!-- 左侧深色导航栏：品牌 + 分组导航（概览 / 机器人 / 系统）+ 底部版本与在线态 -->
   <aside class="sidebar" id="sidebar">
     <div class="side-brand">
-      <span class="side-logo">🤖</span>
+      <span class="side-logo"><img src="/vendor/logo.png" alt="Codex Bridge"></span>
       <div class="side-brand-txt"><b>Codex Bridge</b><span>本机控制台</span></div>
     </div>
     <nav class="side-nav" id="sideNav"></nav>
