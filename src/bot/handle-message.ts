@@ -1537,8 +1537,11 @@ export function createOrchestrator(
     project?: Project,
   ): Promise<void> {
     const noMention = project ? (project.noMention ?? defaultNoMention(project)) : true;
+    // 按本群项目的后端能力裁剪命令清单：claude-sdk/acp 不列 /goal、/compact、/resume
+    // （能力守卫会拒），避免「列了点了才发现不支持」。codex(capabilities undefined)=全列。
+    const caps = backendFor(project?.backend).capabilities;
     await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
-      await sendManagedCard(channel, msg.chatId, buildHelpCard(scope, noMention, isAdmin(cfg, msg.senderId)), msg.messageId, inThread).catch((err) =>
+      await sendManagedCard(channel, msg.chatId, buildHelpCard(scope, noMention, isAdmin(cfg, msg.senderId), caps), msg.messageId, inThread).catch((err) =>
         log.fail('card', err, { cmd: 'help', scope }),
       );
       log.info('card', 'help', { scope });

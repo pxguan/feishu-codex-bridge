@@ -220,43 +220,54 @@ function talkLine(noMention: boolean, tail: string): string {
     : `· **@我 + 内容** → ${tail}（本群默认需 @；\`/settings\` 可开启免@）`;
 }
 
+/** 后端能力（只取 /help 关心的三项）。undefined ⇒ 全支持（codex 不声明
+ * capabilities，约定 undefined=全能；claude-sdk/acp 显式标 false）。 */
+export interface HelpCaps {
+  goal?: boolean;
+  compact?: boolean;
+  resume?: boolean;
+}
+
 /** The `/help` card: commands available **right here** (this exact scope).
  * `noMention` is the group's effective 免@ state (`noMention ?? defaultNoMention`).
  * `isAdmin` gates the owner-only commands (`/settings`、`/resume`): non-admins
- * don't see them listed (they'd be denied anyway — see handle-message 的门控). */
-export function buildHelpCard(scope: HelpScope, noMention = true, isAdmin = false): CardObject {
+ * don't see them listed (they'd be denied anyway — see handle-message 的门控).
+ * `caps` 按会话后端能力裁剪：claude-sdk/claude-acp 不支持 /goal、/compact、/resume
+ * （能力守卫会拒），就不在速查卡里列出来——避免「列了点了才发现不支持」的不一致。
+ * 缺省（undefined 或不传）= 全列（codex 行为，向后兼容）。 */
+export function buildHelpCard(scope: HelpScope, noMention = true, isAdmin = false, caps?: HelpCaps): CardObject {
+  const showGoal = caps?.goal ?? true;
+  const showCompact = caps?.compact ?? true;
+  const showResume = caps?.resume ?? true;
+  const goalLine = '· `/goal <目标>` → 自主多轮跑到完成（卡上 ⏹ 终止 / 🎯 结束目标）';
+  const compactLine = '· `/compact` → 压缩上下文（释放空间）';
+
   const elements: CardElement[] = [];
   if (scope === 'single') {
-    const lines = [
-      talkLine(noMention, '交给我处理'),
-      '· `/goal <目标>` → 自主多轮跑到完成（卡上 ⏹ 终止 / 🎯 结束目标）',
-      '· `/model` → 切换模型 / 推理强度',
-      '· `/context` → 看上下文占比',
-      '· `/compact` → 压缩上下文（释放空间）',
-    ];
+    const lines = [talkLine(noMention, '交给我处理')];
+    if (showGoal) lines.push(goalLine);
+    lines.push('· `/model` → 切换模型 / 推理强度', '· `/context` → 看上下文占比');
+    if (showCompact) lines.push(compactLine);
     if (isAdmin) lines.push('· `/settings` → 群设置（免@ 开关）');
     lines.push('· `/help` → 这张速查卡');
     elements.push(md('💬 **单会话群** — 整群就是一个会话，上下文连续。'), hr(), md(lines.join('\n')));
   } else if (scope === 'topic') {
+    const lines = [talkLine(noMention, '继续当前会话')];
+    if (showGoal) lines.push(goalLine);
+    lines.push('· `/model` → 切换模型 / 推理强度', '· `/context` → 看上下文占比');
+    if (showCompact) lines.push(compactLine);
+    lines.push('· `/help` → 这张速查卡');
     elements.push(
       md('🧵 **话题内** — 每个话题是一个独立会话。'),
       hr(),
-      md(
-        `${talkLine(noMention, '继续当前会话')}\n` +
-          '· `/goal <目标>` → 自主多轮跑到完成（卡上 ⏹ 终止 / 🎯 结束目标）\n' +
-          '· `/model` → 切换模型 / 推理强度\n' +
-          '· `/context` → 看上下文占比\n' +
-          '· `/compact` → 压缩上下文（释放空间）\n' +
-          '· `/help` → 这张速查卡',
-      ),
+      md(lines.join('\n')),
       note('开新话题：回到主群区 @我 + 内容。'),
     );
   } else {
-    const lines = [
-      '· **@我 + 内容** → 开一个新话题并开始',
-      '· `/goal <目标>` → 自主多轮跑到完成（卡上 ⏹ 终止 / 🎯 结束目标）',
-    ];
-    if (isAdmin) lines.push('· `/resume` → 恢复历史会话', '· `/settings` → 群设置（免@ 开关）');
+    const lines = ['· **@我 + 内容** → 开一个新话题并开始'];
+    if (showGoal) lines.push(goalLine);
+    if (isAdmin && showResume) lines.push('· `/resume` → 恢复历史会话');
+    if (isAdmin) lines.push('· `/settings` → 群设置（免@ 开关）');
     lines.push('· `/model` → 需要在话题里用', '· `/help` → 这张速查卡');
     elements.push(md('👥 **主群区** — @我开话题，每个话题是独立会话。'), hr(), md(lines.join('\n')));
   }
