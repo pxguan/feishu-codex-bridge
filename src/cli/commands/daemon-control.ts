@@ -2,6 +2,7 @@ import { spawnProcess } from '../../platform/spawn';
 import { getServiceAdapter, isServiceRunning } from '../../service/adapter';
 import { installLatest, isDevSource } from '../../service/update';
 import { buildDaemonControlCommand, type DaemonControlAction } from '../../admin/host';
+import { readWebConsole } from '../../web/discovery';
 import { log } from '../../core/logger';
 
 /**
@@ -64,18 +65,101 @@ async function doStart(): Promise<void> {
 }
 
 /**
- * stop：停掉后台服务并移除自启（service uninstall = bootout + rm plist），与 CLI
- * `stop` 同义。在 web 进程里不能直停自己（会杀掉正响应这条 HTTP 的事件循环）→ 走
- * detached helper：本 daemon 被 bootout 杀掉后，helper 仍存活把 uninstall 走完。
+ * stop：停掉 daemon（两条路一起走，缺一不可）。在 web 进程里不能直停自己（会杀掉正
+ * 响应这条 HTTP 的事件循环）→ 走 detached helper：daemon 被杀后 helper 仍存活把
+ * 收尾走完。
+ *
+ * ① service manager 托管的 → uninstall（launchctl bootout + rm plist，连带移除自启）。
+ * ② **自托管 daemon**（手动 `run` / nohup / 引导控制台 / 多 bot supervisor，全都不在
+ *    service manager 里）→ 按 web-console.json 记的 pid 优雅停。**这是历史 bug：旧版
+ *    doStop 在 `!isServiceRunning()` 时直接 return，对自托管 daemon 完全 no-op——用户
+ *    在 Web 点「停止」毫无反应**。daemon 自己的 SIGTERM handler 会级联关闭所有 bot 子
+ *    进程 + 后端 app-server/ACP（不留孤儿），所以发 SIGTERM 即可，超时再 SIGKILL。
  */
 async function doStop(): Promise<void> {
-  if (!isServiceRunning()) {
-    // 没有 service manager 托管的实例（前台 run / 手动起）→ 没有可停的后台服务。
-    log.info('daemon-control', 'stop-skipped-no-service', {});
-    return;
+  const serviceWasRunning = isServiceRunning();
+  if (serviceWasRunning) {
+    await getServiceAdapter().uninstall();
+    log.info('daemon-control', 'stop-issued', {});
   }
-  await getServiceAdapter().uninstall();
-  log.info('daemon-control', 'stop-issued', {});
+  const self = await stopSelfHostedDaemon();
+  if (!serviceWasRunning && self === 'no-daemon') {
+    // service manager 没托管、也没探到在跑的自托管 daemon → 真的没东西可停。
+    log.info('daemon-control', 'stop-skipped-no-daemon', {});
+  }
+}
+
+/** process.kill(pid,0) 活性探测：ESRCH=不存在；EPERM=存在但本进程无权 signal（仍算活）。 */
+function pidAlive(pid: number, kill: KillFn): boolean {
+  try {
+    kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+const napDefault = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+type KillFn = (pid: number, signal: NodeJS.Signals | 0) => void;
+
+export interface StopSelfHostedDeps {
+  /** 读出当前在跑的 daemon 进程 pid（默认 web-console.json 的 pid——内嵌 web 的
+   *  daemon 就是 UI 显示「运行中」的那个，单 bot / supervisor / 引导态都写它）。 */
+  readDaemonPid?: () => number | undefined;
+  /** 注入 process.kill（测试用，绝不真杀）。 */
+  kill?: KillFn;
+  sleep?: (ms: number) => Promise<void>;
+  selfPid?: number;
+  /** SIGTERM 后等优雅退出的窗口（超时则 SIGKILL）。 */
+  graceMs?: number;
+  /** 活性轮询间隔。 */
+  pollMs?: number;
+}
+
+export type StopSelfHostedResult = 'no-daemon' | 'stopped' | 'force-killed';
+
+/**
+ * 停掉「自托管」daemon——它们不在 service manager 里，`launchctl bootout` 对其是空
+ * 操作（Web 点「停止」对这类 daemon no-op 的根因）。按 web-console.json 记的 pid 发
+ * SIGTERM 触发 daemon 自身的优雅退出（级联关闭所有 bot 子进程 + 后端 app-server/ACP，
+ * 不留孤儿），超时再 SIGKILL 兜底。依赖注入，便于单测，绝不真杀进程。
+ */
+export async function stopSelfHostedDaemon(deps: StopSelfHostedDeps = {}): Promise<StopSelfHostedResult> {
+  const readDaemonPid = deps.readDaemonPid ?? ((): number | undefined => readWebConsole()?.pid);
+  const kill: KillFn = deps.kill ?? ((p, s) => void process.kill(p, s));
+  const nap = deps.sleep ?? napDefault;
+  const selfPid = deps.selfPid ?? process.pid;
+  const graceMs = deps.graceMs ?? 8_000;
+  const pollMs = deps.pollMs ?? 250;
+
+  const pid = readDaemonPid();
+  // 没在跑、发现文件指向本 helper 自己（理论不会）、或那 pid 已死 → 没东西可停。
+  if (pid === undefined || pid === selfPid || !pidAlive(pid, kill)) return 'no-daemon';
+
+  try {
+    kill(pid, 'SIGTERM');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return 'no-daemon'; // 读到后、signal 前刚退
+    throw err;
+  }
+  log.info('daemon-control', 'self-hosted-sigterm', { pid });
+
+  for (let waited = 0; waited < graceMs; waited += pollMs) {
+    await nap(pollMs);
+    if (!pidAlive(pid, kill)) {
+      log.info('daemon-control', 'self-hosted-stopped', { pid });
+      return 'stopped';
+    }
+  }
+  // 优雅窗口内没退（卡死 / 忽略 SIGTERM）→ 强杀。
+  try {
+    kill(pid, 'SIGKILL');
+  } catch {
+    /* 期间已退 */
+  }
+  log.warn('daemon-control', 'self-hosted-force-killed', { pid });
+  return 'force-killed';
 }
 
 async function doUpdate(): Promise<void> {
