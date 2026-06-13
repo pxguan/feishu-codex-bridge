@@ -1011,9 +1011,9 @@ export function buildProjectSettingsCard(
       actions([button('🔐 权限', { a: DM.permission, n: project.name }, 'primary')]),
       note(`当前 ${permissionSummary(project)}　·　codex 沙箱可访问的范围（管理员 / 普通用户可分设）。`),
       hr(),
-      actions([button('🧠 后端', { a: DM.backend, n: project.name }, 'primary')]),
+      md('🧠 后端'),
       note(
-        `当前 ${backendName ?? project.backend ?? DEFAULT_BACKEND_ID}　·　本项目新话题用的 agent 后端；已有话题会话仍走原后端。`,
+        `当前 ${backendName ?? project.backend ?? DEFAULT_BACKEND_ID} 🔒　·　后端在**新建项目时选定**，运行时固定、不支持切换。如需更改，请删除该项目后用新后端重新创建。`,
       ),
       hr(),
       md('✋ 免@（不用 @ 也回复）'),

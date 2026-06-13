@@ -140,6 +140,14 @@ export async function performBackendSwitch(opts: {
 }): Promise<AdminWriteOutcome> {
   const p = await getProjectByName(opts.projectName);
   if (!p) return { ok: false, reason: `项目「${opts.projectName}」不存在` };
+  // 后端在新建项目时选定、运行时固定，不支持切换（防御式：UI 已撤切换入口，这里挡住
+  // 任何残留 IPC/HTTP 请求）。仅放行 legacy 项目（backend 未设）的一次性落地与同值 no-op。
+  if (p.backend && p.backend !== opts.target) {
+    return {
+      ok: false,
+      reason: '该项目的后端已在创建时选定，运行时固定、不支持切换。如需更改，请删除该项目后用新后端重新创建。',
+    };
+  }
   const registered = backendIds();
   const known = registered.includes(opts.target);
   const probe = known ? (await probeBackends([opts.backendFor(opts.target)]))[0]?.probe : undefined;

@@ -176,12 +176,13 @@ describe('probeBackends（并行 doctor + 单个超时兜底）', () => {
 describe('buildProjectSettingsCard 的 🧠 后端区块', () => {
   const base = { name: 'P', cwd: '/x', kind: 'multi' as const, origin: 'created' as const };
 
-  it('显示当前后端（缺省 = codex-appserver），按钮携带 dm.proj.backend', () => {
+  it('只读显示当前后端（缺省 = codex-appserver）+ 创建时锁定，不再有切换按钮', () => {
     const json = JSON.stringify(buildProjectSettingsCard(base));
     expect(json).toContain('🧠 后端');
-    expect(json).toContain(DM.backend);
     expect(json).toContain('codex-appserver'); // 缺省回退到默认 id
-    expect(json).toContain('已有话题会话仍走原后端');
+    expect(json).toContain('新建项目时选定'); // 锁定文案
+    // 去切换：后端区块不再有「打开后端选择卡」的按钮（dm.proj.backend）
+    expect(json).not.toContain(DM.backend);
   });
 
   it('调用方传入展示名时优先用展示名', () => {

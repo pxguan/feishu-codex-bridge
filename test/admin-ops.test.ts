@@ -177,11 +177,28 @@ describe('performBackendSwitch（注册表 → doctor 探活 → 档位支持面
     if (!r.ok) expect(r.reason).toContain('权限档');
   });
 
-  it('全过 → 写盘 + 写后回读', async () => {
+  it('全过 → 写盘 + 写后回读（legacy：backend 未设时一次性落地）', async () => {
     const r = await performBackendSwitch({ projectName: 'demo', target: 'claude-sdk', backendFor: () => fakeBackend() });
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.project.backend).toBe('claude-sdk');
     expect((await getProjectByName('demo'))?.backend).toBe('claude-sdk');
+  });
+
+  it('已设后端再切到异值 → 防御式拒绝「创建时选定，不支持切换」且不写盘', async () => {
+    // 模拟「创建时已选定 codex」的项目：先落地一个后端，再尝试切到别的。
+    await performBackendSwitch({ projectName: 'demo', target: 'codex-appserver', backendFor: () => fakeBackend() });
+    const r = await performBackendSwitch({ projectName: 'demo', target: 'claude-sdk', backendFor: () => fakeBackend() });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('不支持切换');
+    // 写盘未变：仍是创建时选定的 codex（防御拦截在 doctor/校验之前）。
+    expect((await getProjectByName('demo'))?.backend).toBe('codex-appserver');
+  });
+
+  it('已设后端切到同值 → no-op 放行（幂等，不算切换）', async () => {
+    await performBackendSwitch({ projectName: 'demo', target: 'codex-appserver', backendFor: () => fakeBackend() });
+    const r = await performBackendSwitch({ projectName: 'demo', target: 'codex-appserver', backendFor: () => fakeBackend() });
+    expect(r.ok).toBe(true);
+    expect((await getProjectByName('demo'))?.backend).toBe('codex-appserver');
   });
 });
 

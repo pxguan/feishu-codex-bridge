@@ -2045,10 +2045,14 @@ ${UI_PURE_JS}
     }));
     d.appendChild(el('hr', 'hr'));
 
-    // 🧠 后端 —— 按 agent 分组 picker（catalog 驱动；未装灰显「去总览下载」；档位不支持灰显）
+    // 🧠 后端（只读：创建时选定，运行时固定，不支持切换 —— 改后端需删项目重建）
     d.appendChild(el('div', null, '🧠 后端'));
-    d.appendChild(el('div', 'note', '当前 ' + p.backend + ' · 切换只对新话题生效；已有话题会话仍走原后端'));
-    renderBackendPicker(d, p);
+    var bkName = p.backend ? backendName(p.backend) : 'Codex App Server（默认）';
+    var bkRO = el('div', 'statline');
+    bkRO.appendChild(el('span', 'tag blue', '🧠 ' + bkName));
+    bkRO.appendChild(el('span', 'tag', '🔒 创建时锁定'));
+    d.appendChild(bkRO);
+    d.appendChild(el('div', 'note', '后端在新建项目时选定，运行时固定、不支持切换。如需更改，请删除该项目后用新后端重新创建。'));
     d.appendChild(el('hr', 'hr'));
 
     // ✋ 免@
@@ -2090,55 +2094,6 @@ ${UI_PURE_JS}
         if (list.length > 50) topicBox.appendChild(el('div', null, '· …还有 ' + (list.length - 50) + ' 个话题'));
       })
       .catch(function () { topicBox.textContent = '⚠️ 话题加载失败'; });
-  }
-
-  // 项目后端 picker：按 agent 分组（catalog）；未装的灰显 + 「去总览下载」；
-  // 档位不支持灰显（supportedModes 不含项目档）；已装可切走 /backend 写路由。
-  function renderBackendPicker(d, p) {
-    if (!catalog) {
-      d.appendChild(el('div', 'note', '（正在加载后端列表…）'));
-      loadCatalog().then(function () { if (drawerProject === p.name) renderDrawer(p.name); });
-      return;
-    }
-    groupBackends(catalog.entries).forEach(function (grp) {
-      var g = el('div', 'bk-group');
-      g.appendChild(el('div', 'gh', familyName(grp.family)));
-      var sub = el('div', 'bk-sub');
-      grp.entries.forEach(function (e) { sub.appendChild(renderPickerRow(e, p)); });
-      g.appendChild(sub);
-      d.appendChild(g);
-    });
-  }
-
-  function renderPickerRow(e, p) {
-    var row = el('div', 'backend-row');
-    var grow = el('div', 'grow');
-    var tri = depTriState(e);
-    var isCurrent = e.id === p.backend;
-    // 档位不支持：supportedModes 存在且不含项目两档之一（沿用 validateBackendSwitch 语义）。
-    var modes = e.supportedModes || null;
-    var modeBlocked = modes && (modes.indexOf(p.mode) < 0 || modes.indexOf(p.guestMode) < 0);
-    var label = e.displayName + (e.version ? ' ' + e.version : '');
-    grow.appendChild(el('div', null, label + (e.isDefault ? '（默认）' : '') + (isCurrent ? ' · ✓ 使用中' : '')));
-    var sub = el('div', 'note', e.access + (e.blurb ? ' · ' + e.blurb : ''));
-    grow.appendChild(sub);
-    if (tri.state !== 'installed') {
-      grow.appendChild(el('div', 'note', tri.action === 'download' ? '未安装 —— 去「📊 总览 › 🧠 后端管理」下载' : ('未安装 —— ' + (e.hint || '需手动安装'))));
-    } else if (modeBlocked) {
-      grow.appendChild(el('div', 'note', '该后端仅支持 ' + (modes || []).join('/') + ' 档；当前项目权限档不兼容，先调权限再切。'));
-    }
-    row.appendChild(grow);
-
-    if (tri.state === 'installed' && !isCurrent && !modeBlocked) {
-      var sw = el('button', 'btn primary', '切换');
-      sw.onclick = function () { postWrite('/api/project/' + encodeURIComponent(p.name) + '/backend', { backend: e.id }); };
-      row.appendChild(sw);
-    } else if (tri.state !== 'installed' && tri.action === 'download') {
-      var goDl = el('button', 'btn', '去下载');
-      goDl.onclick = function () { closeDrawer(); go({ tab: 'overview' }); };
-      row.appendChild(goDl);
-    }
-    return row;
   }
 
   // ════════════════════════════════════════════════════════════════════════════
