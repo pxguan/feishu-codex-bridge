@@ -109,16 +109,46 @@ export function buildRunCard(rc: RunCardState): CardObject {
 }
 
 /**
- * Live layout: reasoning panel, then tool panels, then ONE streamed answer
- * element, then footer + ⏹. Text blocks are concatenated into a single
- * {@link mdStream} element ({@link ANSWER_EID}) so the answer can be driven by
- * the element-level typewriter (cardElement.content) — that needs one stable,
- * append-only text element, which is incompatible with interleaving text and
- * tool panels. Tools therefore render above the answer (matching the terminal
- * fold), not inline between text runs.
+ * Live layout: ⏹ controls row pinned at the TOP, then reasoning panel, tool
+ * panels, ONE streamed answer element, footer. Text blocks are concatenated
+ * into a single {@link mdStream} element ({@link ANSWER_EID}) so the answer can
+ * be driven by the element-level typewriter (cardElement.content) — that needs
+ * one stable, append-only text element, which is incompatible with
+ * interleaving text and tool panels. Tools therefore render above the answer
+ * (matching the terminal fold), not inline between text runs.
+ *
+ * Controls-on-top rationale (e2e 实测痛点): with the row after the answer, a
+ * long streamed output keeps pushing ⏹ below the fold — the user can't reach
+ * it exactly when they want to stop. The card top never moves while the card
+ * grows downward, so the row stays reachable. The row is static across frames,
+ * so the pump's structureSig stays stable and answer growth still routes to
+ * the element typewriter; the {@link CONTROLS_EID} anchor (M-4 orphan
+ * self-heal deletes by element_id) is position-independent.
  */
 function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
   const elements: CardElement[] = [];
+
+  if (rc.cardKey && rc.goalControls) {
+    if (rc.goalEnding) {
+      // 结束目标 已触发:目标已解除,本轮输出完即停。仅留 ⏹ 终止(可再点掐断)。
+      elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')], CONTROLS_EID));
+      elements.push(noteMd('_🎯 目标已解除，本轮输出完成后停止_'));
+    } else {
+      // Goal: 终止 = clear goal + cut output now; 结束目标 = clear goal, let this
+      // turn finish, then stop (no auto-continue). Both routed by the card's msgId.
+      elements.push(
+        actions(
+          [
+            button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger'),
+            button('🎯 结束目标', { a: RC.endGoal, m: rc.cardKey }, 'default'),
+          ],
+          CONTROLS_EID,
+        ),
+      );
+    }
+  } else if (rc.cardKey && !rc.hideStop) {
+    elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')], CONTROLS_EID));
+  }
 
   const reasoning = reasoningContent(state);
   if (reasoning) elements.push(reasoningPanel(reasoning, state.reasoningActive));
@@ -142,27 +172,6 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
   if (answer) elements.push(mdStream(answer, ANSWER_EID));
 
   if (state.footer) elements.push(footerStatus(state.footer));
-  if (rc.cardKey && rc.goalControls) {
-    if (rc.goalEnding) {
-      // 结束目标 已触发:目标已解除,本轮输出完即停。仅留 ⏹ 终止(可再点掐断)。
-      elements.push(noteMd('_🎯 目标已解除，本轮输出完成后停止_'));
-      elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')], CONTROLS_EID));
-    } else {
-      // Goal: 终止 = clear goal + cut output now; 结束目标 = clear goal, let this
-      // turn finish, then stop (no auto-continue). Both routed by the card's msgId.
-      elements.push(
-        actions(
-          [
-            button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger'),
-            button('🎯 结束目标', { a: RC.endGoal, m: rc.cardKey }, 'default'),
-          ],
-          CONTROLS_EID,
-        ),
-      );
-    }
-  } else if (rc.cardKey && !rc.hideStop) {
-    elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')], CONTROLS_EID));
-  }
   // Context-usage gauge rides at the very bottom as a footnote (only at/above
   // the warn tier) so it never pushes the answer down.
   const gauge = gaugeEl(state);
