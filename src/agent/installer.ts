@@ -5,6 +5,7 @@ import { spawnProcess } from '../platform/spawn';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
 import { isBackendDepInstalled, isBackendBinInstalled } from './backend-loader';
+import { fixNativeHelperPerms } from './native-helpers';
 
 /**
  * 按需后端依赖的安装执行器（npm-ondemand 包，如 @anthropic-ai/claude-agent-sdk）。
@@ -216,6 +217,10 @@ export async function installBackendDep(
       tail: `${result.tail}\n\n安装后校验失败：「${bareName}」装好了但${opts?.binName ? '.bin 里找不到可执行' : '解析不到'}（可能半装/平台二进制缺失），已回滚。`,
     };
   }
+
+  // 治本：修 node-pty spawn-helper 的可执行位（npm 安装偶发丢 +x → ACP posix_spawnp
+  // failed）。在 verify 通过后跑——绝不抛错，不影响安装结果。
+  await fixNativeHelperPerms().catch(() => undefined);
 
   log.info('agent', 'backend-install-done', { pkg });
   return result;

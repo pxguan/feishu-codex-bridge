@@ -10,6 +10,7 @@ import { getAcpCommand } from '../../config/schema';
 import { bridgeVersion } from '../../core/version';
 import { BRIDGE_DEVELOPER_INSTRUCTIONS } from '../bridge-instructions';
 import { backendsBinPath } from '../backend-loader';
+import { fixNativeHelperPerms } from '../native-helpers';
 import type {
   AgentBackend,
   AgentCapabilities,
@@ -135,9 +136,62 @@ function notSupported(what: string): Error {
   return new Error(`ACP 后端暂不支持${what}（codex 专属能力，已按能力守卫拒绝）`);
 }
 
-function errMsg(err: unknown): string {
+/** 从 JSON-RPC 错误的 data 里抠出可读细节（claude-pty-acp 把真因放在 data.details，
+ *  例如 "posix_spawnp failed."——否则 -32603 全塌成无意义的 "Internal error"）。 */
+function extractDataDetails(data: unknown): string | undefined {
+  if (data == null) return undefined;
+  if (typeof data === 'string') return data || undefined;
+  if (typeof data === 'object') {
+    const d = data as { details?: unknown; message?: unknown };
+    if (typeof d.details === 'string' && d.details) return d.details;
+    if (typeof d.message === 'string' && d.message) return d.message;
+    try {
+      const s = JSON.stringify(data);
+      return s && s !== '{}' ? s : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 错误消息提取——绝不丢结构化字段。普通 Error 取 message；JSON-RPC 错误（含
+ * numeric code + data）额外带上 code 与 data.details，这样「Internal error」不再吞掉
+ * 真因（如 posix_spawnp failed）。这是 ACP「报错只剩 Internal error、日志也看不出」的
+ * 修复（配合 stderr 不再截断 200 字符）。
+ */
+export function errMsg(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const e = err as { message?: unknown; code?: unknown; data?: unknown };
+    const base = typeof e.message === 'string' && e.message ? e.message : err instanceof Error ? err.message : String(err);
+    const details = extractDataDetails(e.data);
+    const codeStr = typeof e.code === 'number' ? `code ${e.code}` : undefined;
+    const extra = [codeStr, details && !base.includes(details) ? details : undefined].filter(Boolean).join('；');
+    return extra ? `${base}（${extra}）` : base;
+  }
   return err instanceof Error ? err.message : String(err);
 }
+
+/** 把已知的底层故障映射成可操作中文提示（接在用户可见错误后；没命中返回空）。 */
+export function startupHint(raw: string): string {
+  if (/posix_spawnp failed/i.test(raw)) {
+    return (
+      '\n可能原因：node-pty 的 spawn-helper 丢了可执行位（已在安装/启动时自动 chmod 修复——' +
+      '若仍报错，重新下载 claude-acp 后端），或本机找不到可执行的 claude。'
+    );
+  }
+  if (/\bENOENT\b/i.test(raw)) {
+    return (
+      '\n找不到可执行文件：确认 claude 已安装且在 PATH 上。若你的 `claude` 是 shell 函数/别名' +
+      '（子进程看不到），把环境变量 CC_CLAUDE_BIN 指向真实 claude 二进制，或在项目偏好里设 acpCommand。'
+    );
+  }
+  return '';
+}
+
+/** node-pty spawn-helper 可执行位自愈：每进程只跑一次（首个 ACP 会话触发）。 */
+let nativeHelperFixOnce: Promise<void> | undefined;
 
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -251,6 +305,9 @@ class AcpThread implements AgentThread {
   /** Spawn the ACP server, handshake, and create/load the session. */
   async connect(): Promise<void> {
     const sdk = await import('@agentclientprotocol/sdk');
+    // 启动前自愈：修 node-pty spawn-helper 的可执行位（存量装坏的安装升级桥代码后无需
+    // 重装即可恢复——这是 ACP「posix_spawnp failed」的治本之一）。每进程只跑一次，绝不抛错。
+    await (nativeHelperFixOnce ??= fixNativeHelperPerms().catch(() => undefined));
     const child = spawnProcess(this.server.command, this.server.args, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -260,10 +317,12 @@ class AcpThread implements AgentThread {
       command: this.server.command,
       cwd: this.opts.cwd,
     });
-    // stdout 是协议通道；server 的日志全在 stderr —— drain（不读会反压卡死）。
+    // stdout 是协议通道；server 的日志全在 stderr —— drain（不读会反压卡死）。截断放宽到
+    // ~2000 字符：旧版 slice(0,200) 恰好把 JSON-RPC 错误体在「message」处切断，真因
+    // （posix_spawnp failed / 堆栈）全丢——诊断 ACP 故障时务必留全。
     child.stderr?.on('data', (d: Buffer) => {
       const line = d.toString('utf8').trim();
-      if (line) log.warn('agent', 'acp-stderr', { line: line.slice(0, 200) });
+      if (line) log.warn('agent', 'acp-stderr', { line: line.slice(0, 2000) });
     });
     child.on('exit', (code, signal) => {
       this.childExited = true;
@@ -321,9 +380,9 @@ class AcpThread implements AgentThread {
       }
     } catch (err) {
       await this.close().catch(() => undefined);
-      throw new Error(
-        `ACP 后端启动失败：${errMsg(err)}${this.resumeSessionId !== undefined ? '（待恢复的会话可能已不存在）' : ''}`,
-      );
+      const detail = errMsg(err);
+      const resumeNote = this.resumeSessionId !== undefined ? '（待恢复的会话可能已不存在）' : '';
+      throw new Error(`ACP 后端启动失败：${detail}${resumeNote}${startupHint(detail)}`);
     }
   }
 
