@@ -1310,6 +1310,7 @@ ${UI_PURE_JS}
   function renderBackendRow(e) {
     var tri = depTriState(e);
     var installed = e.depState === 'installed';
+    var extInstalled = installed && !e.canUninstall && !e.isDefault;
     var row = el('div', 'bka-row');
     row.onclick = function () { openBackendDetail(e.id); };
 
@@ -1330,7 +1331,7 @@ ${UI_PURE_JS}
     // 状态
     var stwrap = el('div');
     var pill = el('span', 'pill');
-    if (installed) { pill.appendChild(el('span', 'dot green')); pill.appendChild(el('span', null, e.isDefault ? '已装 · 在线' : '已下载')); }
+    if (installed) { pill.appendChild(el('span', 'dot green')); pill.appendChild(el('span', null, e.isDefault ? '已装 · 在线' : (extInstalled ? '外部已装' : '已下载'))); }
     else { pill.appendChild(el('span', 'dot gray')); var u = el('span', null, '未下载'); u.style.color = 'var(--text-3)'; pill.appendChild(u); }
     stwrap.appendChild(pill);
     row.appendChild(stwrap);
@@ -1375,9 +1376,13 @@ ${UI_PURE_JS}
         var miD = el('div', 'mi danger'); miD.innerHTML = icSvg('trash') + '<span>删除</span>';
         miD.onclick = function () { closeAllMenus(); askUninstallBackend(e); };
         menu.appendChild(miD);
-      } else {
+      } else if (e.isDefault) {
         var miX = el('div', 'mi disabled'); miX.innerHTML = icSvg('trash') + '<span>删除（内置）</span>';
         menu.appendChild(miX);
+      } else {
+        var miE = el('div', 'mi disabled'); miE.innerHTML = icSvg('trash') + '<span>删除（外部已装）</span>';
+        miE.title = '该后端在仓库/全局 node_modules 里被探到，非桥按需下载的副本，桥不托管、不在此删除。';
+        menu.appendChild(miE);
       }
       mb.onclick = function () { var open = menu.classList.contains('open'); closeAllMenus(); if (!open) menu.classList.add('open'); };
       act.appendChild(mb); act.appendChild(menu);
@@ -1394,6 +1399,8 @@ ${UI_PURE_JS}
   function renderBackendDetail(root, e) {
     var tri = depTriState(e);
     var installed = e.depState === 'installed';
+    // 探到已装、但既非内置(codex)又不在桥私装目录 → 仓库/全局 node_modules 的外部副本，桥不托管。
+    var extInstalled = installed && !e.canUninstall && !e.isDefault;
     var crumb = el('div', 'bka-crumb');
     var back = el('a', null, '← 全部后端 Agent'); back.onclick = backBackendList;
     crumb.appendChild(back);
@@ -1416,7 +1423,7 @@ ${UI_PURE_JS}
     else { sp2.appendChild(el('span', 'dot gray')); var off = el('span', null, '未下载'); off.style.color = 'var(--text-3)'; sp2.appendChild(off); }
     h2.appendChild(sp2);
     htxt.appendChild(h2);
-    htxt.appendChild(el('div', 'dsub', (e.isDefault ? '内置后端，随桥打包' : (installed ? '已下载到用户私装目录' : '尚未下载')) + (e.blurb ? ' · ' + e.blurb : '')));
+    htxt.appendChild(el('div', 'dsub', (e.isDefault ? '内置后端，随桥打包' : (extInstalled ? '仓库/全局 node_modules 已装 · 桥不托管' : (installed ? '已下载到用户私装目录' : '尚未下载'))) + (e.blurb ? ' · ' + e.blurb : '')));
     dh.appendChild(htxt);
     hcard.appendChild(dh);
     // 元信息四宫格
@@ -1424,7 +1431,7 @@ ${UI_PURE_JS}
     function mcell(k, v, mono) { var c = el('div'); c.appendChild(el('div', 'k', k)); c.appendChild(el('div', 'v' + (mono ? ' mono' : ''), v)); return c; }
     var shownVer = e.installedVersion || (installed ? e.version : '') || '—';
     meta.appendChild(mcell('家族', familyName(e.agentFamily)));
-    meta.appendChild(mcell('安装方式', e.isDefault ? '内置（随桥）' : (installed ? '按需下载' : '未下载')));
+    meta.appendChild(mcell('安装方式', e.isDefault ? '内置（随桥）' : (extInstalled ? '外部已装' : (installed ? '按需下载' : '未下载'))));
     meta.appendChild(mcell('版本', /^\\d/.test(shownVer) ? 'v' + shownVer : shownVer, true));
     meta.appendChild(mcell('体积', e.approxSizeMB ? (installed ? '约 ' : '约 ') + e.approxSizeMB + 'M' : '内置', true));
     hcard.appendChild(meta);
@@ -1464,7 +1471,7 @@ ${UI_PURE_JS}
     function kv(k, v, color) { var r = el('div', 'bka-kv'); r.appendChild(el('span', 'k', k)); var vv = el('span', 'v', v); if (color) vv.style.color = color; r.appendChild(vv); return r; }
     diagCard.appendChild(kv('可用性', installed ? '✓ 可用' : '未下载', installed ? 'var(--green)' : 'var(--text-3)'));
     diagCard.appendChild(kv('家族', familyName(e.agentFamily)));
-    diagCard.appendChild(kv('安装方式', e.isDefault ? '内置（不可删）' : (installed ? '用户私装目录' : '未下载')));
+    diagCard.appendChild(kv('安装方式', e.isDefault ? '内置（不可删）' : (extInstalled ? '外部 node_modules（桥不托管）' : (installed ? '用户私装目录' : '未下载'))));
     if (e.hint && !installed) diagCard.appendChild(el('div', 'bka-path', e.hint));
     right.appendChild(diagCard);
 
@@ -1499,9 +1506,13 @@ ${UI_PURE_JS}
         var rm = el('button', 'btn danger'); rm.style.cssText = 'width:100%;justify-content:center;border:1px solid var(--border-2)'; rm.textContent = '删除后端';
         rm.onclick = function () { askUninstallBackend(e); };
         box.appendChild(rm);
-      } else {
+      } else if (e.isDefault) {
         var dis = el('button', 'btn disabled'); dis.style.cssText = 'width:100%;justify-content:center'; dis.disabled = true; dis.textContent = '内置 · 不可删除';
         box.appendChild(dis);
+      } else {
+        var disE = el('button', 'btn disabled'); disE.style.cssText = 'width:100%;justify-content:center'; disE.disabled = true; disE.textContent = '外部已装 · 不在此删除';
+        box.appendChild(disE);
+        box.appendChild(el('div', 'note', '在仓库/全局 node_modules 里被探到（非桥按需下载到私装目录的副本），桥不托管、不在此删除。')).style.cssText = 'margin-top:8px;font-size:12px';
       }
     }
   }
