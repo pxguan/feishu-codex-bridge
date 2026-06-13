@@ -142,7 +142,7 @@ export const UI_HTML = `<!doctype html>
   </div>
 
   <div class="note" style="text-align:center">
-    数据每 5 秒自动刷新 · 写操作（🧠 后端切换 / 🔐 权限 / ✋ 免@ / 🗜️ 自动压缩）将在第二棒（daemon 进程内集成）开放，与飞书 DM 卡片共享同一服务层。
+    数据每 5 秒自动刷新 · 写操作（🧠 后端切换 / 🔐 权限 / ✋ 免@ / 🗜️ 自动压缩）与飞书 DM 卡片共享同一服务层；daemon 在跑时实时生效，只读预览（daemon 未跑）下不可写。
   </div>
 </div>
 
@@ -264,14 +264,27 @@ export const UI_HTML = `<!doctype html>
     var line2 = el('div', 'statline');
     if (b.running) {
       line2.appendChild(el('span', 'tag green', '✅ bridge 运行中 · pid ' + b.pid));
+      // 真实 WS 长连接状态：daemon 进程内（本进程 channel / 子进程 IPC）上报；
+      // 只读预览（锁文件探测）没有该字段，不渲染。
+      if (b.connection) {
+        var connOk = b.connection === 'connected';
+        line2.appendChild(el('span', 'tag ' + (connOk ? 'green' : 'orange'), '长连接 ' + connText(b.connection)));
+      }
     } else {
       line2.appendChild(el('span', 'tag orange', '⚠️ bridge 未在运行'));
       line2.appendChild(el('span', 'note', '终端执行 run / start 后这里显示实时状态'));
     }
     box.appendChild(line2);
-    var note = el('div', 'note', '版本 v' + state.version + ' · 快照 ' + new Date(state.generatedAt).toLocaleTimeString() +
-      ' · 长连接实时状态（connected / reconnecting）随第二棒 daemon 集成上线');
+    var note = el('div', 'note', '版本 v' + state.version + ' · 快照 ' + new Date(state.generatedAt).toLocaleTimeString());
     box.appendChild(note);
+  }
+
+  function connText(s) {
+    if (s === 'connected') return '✅ 已连接';
+    if (s === 'connecting') return '⏳ 连接中';
+    if (s === 'reconnecting') return '↻ 重连中';
+    if (s === 'disconnected') return '❌ 已断开';
+    return s;
   }
 
   function renderDiagnosis() {
@@ -329,7 +342,7 @@ export const UI_HTML = `<!doctype html>
     });
   }
 
-  // ── 项目详情抽屉（后端检测式选择 UI 静态版 + 第二棒接线提示）──────────────
+  // ── 项目详情抽屉（设置项写操作走与 DM 卡片同源的写路由）──────────────────
   function openDrawer(name) {
     drawerProject = name;
     renderDrawer(name);
@@ -350,7 +363,8 @@ export const UI_HTML = `<!doctype html>
     return null;
   }
 
-  // 写操作统一入口：POST → 当前一律 501（第二棒接线），把服务端 message 弹出来。
+  // 写操作统一入口：200 ✅ 已保存并刷新；501 = 只读预览（daemon 未跑）；
+  // 409 等其余 = 校验拒绝/出错，把服务端中文 message 弹出来。
   function postWrite(path, body) {
     fetch(path + '?bot=' + encodeURIComponent(currentBot), {
       method: 'POST',
@@ -358,7 +372,7 @@ export const UI_HTML = `<!doctype html>
       body: JSON.stringify(body || {}),
     }).then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
       .then(function (resp) {
-        if (resp.status === 501) toast('⏳ ' + (resp.body.message || '写操作将在第二棒（daemon 进程内集成）开放'));
+        if (resp.status === 501) toast('⏳ ' + (resp.body.message || '写操作需要 daemon 在跑（当前为只读预览）'));
         else if (resp.status === 200) { toast('✅ 已保存'); loadState(); }
         else toast('❌ ' + (resp.body.message || ('HTTP ' + resp.status)));
       })
@@ -407,7 +421,7 @@ export const UI_HTML = `<!doctype html>
     }));
     d.appendChild(el('hr', 'hr'));
 
-    // 🧠 后端 —— 检测式选择 UI 的静态版（探测结果来自 🩺 诊断；切换 = 第二棒）
+    // 🧠 后端 —— 检测式选择 UI（探测结果来自 🩺 诊断；切换走与 DM 同源的写路由）
     d.appendChild(el('div', null, '🧠 后端'));
     d.appendChild(el('div', 'note', '当前 ' + p.backend + ' · 切换只对新话题生效；已有话题会话仍走原后端'));
     var backends = (diag && diag.backends) || null;
@@ -431,7 +445,6 @@ export const UI_HTML = `<!doctype html>
         d.appendChild(row);
       });
     }
-    d.appendChild(el('div', 'note', '⏳ 切换按钮当前返回 501：写操作在第二棒（daemon 进程内）接线后开放。'));
     d.appendChild(el('hr', 'hr'));
 
     // ✋ 免@

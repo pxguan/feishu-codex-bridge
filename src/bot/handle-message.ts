@@ -7,7 +7,16 @@ import type {
   ReactionEvent,
 } from '@larksuiteoapi/node-sdk';
 import { DEFAULT_BACKEND_ID, backendIds, createBackend } from '../agent';
-import type { AgentBackend, AgentInput, AgentRun, AgentThread, BackendProbe, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
+import type { AgentBackend, AgentInput, AgentRun, AgentThread, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
+import {
+  createAdminWriteExecutor,
+  performBackendSwitch,
+  performSetAutoCompact,
+  performSetNoMention,
+  performSetPermissionMode,
+  probeBackends,
+  type AdminWriteOp,
+} from '../admin/ops';
 import { isGoalTerminal, UsageError } from '../agent/types';
 import {
   getMaxConcurrentRuns,
@@ -87,7 +96,6 @@ import {
   buildSettingsCard,
   buildUpdateCard,
   buildWatchdogCustomCard,
-  tierLabel,
   DM,
   GS,
   type BackendProbeRow,
@@ -118,8 +126,6 @@ import { buildScopeGrantUrl, JOIN_GROUP_SCOPES } from '../config/scopes';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import {
   defaultNoMention,
-  effectiveGuestMode,
-  effectiveMode,
   getProjectByChatId,
   getProjectByName,
   listProjects,
@@ -253,73 +259,9 @@ function asTier(v: string | undefined): PermissionMode | undefined {
   return v === 'qa' || v === 'write' || v === 'full' ? v : undefined;
 }
 
-/**
- * 项目后端切换的纯校验（exported for tests）：① 目标 id 在注册表里；② 目标后端
- * doctor() 探测通过（未装 CLI / SDK 不可用要在这里拦住，而不是切过去后每条消息
- * 报错）；③ 项目两档权限（管理员档 + 普通用户档）都在目标后端声明的支持面内
- * （如 claude-sdk 仅「完全访问」——其 startThread 的 fail-closed 硬守卫不变，这里
- * 只是把拒绝提前到切换时并讲清原因）。返回首个不满足的原因（中文，直接上卡）；
- * 全过返回 null。切换本身不驱逐活跃会话：SessionRecord.backend 让已有话题会话
- * 仍走原后端，新话题才用新值（resolveThread 按记录路由的既有语义）。
- */
-export function validateBackendSwitch(opts: {
-  /** 目标后端 id（下拉提交值） */
-  target: string;
-  /** 注册表内全部后端 id（backendIds()） */
-  registered: readonly string[];
-  /** 项目当前权限档（两档都要被目标后端支持） */
-  project: Pick<Project, 'mode' | 'guestMode'>;
-  /** 目标后端声明的权限档支持面（AgentBackend.supportedModes；undefined ⇒ 全支持） */
-  supportedModes?: readonly PermissionMode[];
-  /** 目标后端 doctor() 探测结果；undefined = 探测没跑成，按不可用拒绝 */
-  probe?: BackendProbe;
-}): string | null {
-  if (!opts.registered.includes(opts.target)) {
-    return `未知后端「${opts.target}」（可用：${opts.registered.join('、')}）`;
-  }
-  if (!opts.probe?.ok) {
-    return `后端「${opts.target}」当前不可用：${opts.probe?.hint ?? '环境探测失败（未安装或未登录）'}`;
-  }
-  if (opts.supportedModes) {
-    const tiers = [...new Set([effectiveMode(opts.project), effectiveGuestMode(opts.project)])];
-    const unsupported = tiers.filter((t) => !opts.supportedModes!.includes(t));
-    if (unsupported.length > 0) {
-      return (
-        `该后端仅支持 ${opts.supportedModes.map(tierLabel).join(' / ')} 权限档，` +
-        `本项目当前为 ${tiers.map(tierLabel).join(' / ')} —— 请先在「🔐 权限」把两档都调整到支持的档位再切换。`
-      );
-    }
-  }
-  return null;
-}
-
-/** 单个后端 doctor 探测的超时兜底（ms）：探测要 spawn CLI，未安装/卡死时不能
- * 拖住检测卡——超时按「探测没跑成」（probe undefined）渲染为不可用。 */
-export const BACKEND_PROBE_TIMEOUT_MS = 3000;
-
-/**
- * 🧠 后端检测的纯探测（exported for tests）：并行对全部后端 doctor({force})，
- * 单个超时（Promise.race 兜底）/抛错都归一成 probe undefined——检测结果卡按
- * 不可用渲染，绝不放行。输入是后端实例的最小切面，注册表里有什么测什么，
- * 新后端注册即自动出现在结果卡上。
- */
-export async function probeBackends(
-  backends: readonly Pick<AgentBackend, 'id' | 'displayName' | 'supportedModes' | 'doctor'>[],
-  timeoutMs = BACKEND_PROBE_TIMEOUT_MS,
-): Promise<BackendProbeRow[]> {
-  return Promise.all(
-    backends.map(async (be) => {
-      let timer: NodeJS.Timeout | undefined;
-      const timeout = new Promise<undefined>((resolve) => {
-        timer = setTimeout(() => resolve(undefined), timeoutMs);
-      });
-      const probe = await Promise.race([be.doctor({ force: true }).catch(() => undefined), timeout]).finally(() =>
-        clearTimeout(timer),
-      );
-      return { id: be.id, name: be.displayName, probe, supportedModes: be.supportedModes };
-    }),
-  );
-}
+// 后端切换校验 + 探测已抽到管理面共享层（admin/ops.ts）——DM 回调与 Web 控制台
+// 写同一套逻辑的单一事实源。原处 re-export 保持既有 import 路径（含测试）不变。
+export { BACKEND_PROBE_TIMEOUT_MS, probeBackends, validateBackendSwitch } from '../admin/ops';
 
 interface ActiveState {
   /** unset only during the brief "reserved, still resolving the thread" window */
@@ -371,6 +313,10 @@ export interface Orchestrator {
   /** application.bot.menu_v6（raw-tap）：bot 单聊菜单点击 → DM 管理台菜单卡。 */
   onBotMenu: (evt: { openId?: string; eventKey?: string; eventId?: string }) => Promise<void>;
   dispatcher: CardDispatcher;
+  /** 进程内管理写面（Web 控制台 / supervisor IPC 共用）：四个写操作走与 DM
+   * 卡片回调完全同一套共享函数（admin/ops.ts），含同样的校验与活跃会话驱逐；
+   * 校验拒绝抛 AdminWriteError（HTTP 409 / IPC code 还原）。 */
+  adminExecute: (op: AdminWriteOp) => Promise<void>;
   /** Close every live codex session (SIGKILLs the app-server children) so a
    *  graceful exit leaves no orphan processes. */
   shutdown: () => Promise<void>;
@@ -2236,15 +2182,16 @@ export function createOrchestrator(
       if (Number.isFinite(n)) applyPref(evt, (p) => (p.maxConcurrentRuns = n));
     })
     // In-group settings: toggle 免@ for the project bound to evt.chatId. Admin-gated.
+    // 写路径走管理面共享层（admin/ops.ts）——与 DM 卡片 / Web 控制台同一套落盘逻辑。
     .on(GS.setNoMention, ({ evt, value }) => {
       if (!isAdmin(cfg, evt.operator?.openId ?? '')) return;
       const on = value.v === 'on';
       patch(evt, async () => {
         const project = await getProjectByChatId(evt.chatId);
         if (project) {
-          await updateProject(project.name, { noMention: on });
+          const r = await performSetNoMention({ projectName: project.name, on });
           log.info('console', 'group-nomention', { project: project.name, on });
-          return buildGroupSettingsCard({ ...project, noMention: on });
+          return buildGroupSettingsCard(r.ok ? r.project : { ...project, noMention: on });
         }
         return buildGroupSettingsCard({ name: '本群', kind: 'multi', noMention: on });
       });
@@ -2255,12 +2202,11 @@ export function createOrchestrator(
       patch(evt, async () => {
         const project = await getProjectByChatId(evt.chatId);
         if (project) {
-          await updateProject(project.name, { autoCompact: on });
-          // The auto-compact limit is bound at thread/start, so evict live threads
-          // to rebind under the new setting on the next message (like 🔐 权限).
-          await evictLiveSessionsForChat(project.chatId);
+          // 共享层落盘 + 驱逐活跃会话（压缩上限在 thread/start 绑定，驱逐后下一条
+          // 消息重绑生效——与 🔐 权限同语义）。
+          const r = await performSetAutoCompact({ projectName: project.name, on, evictLiveSessionsForChat });
           log.info('console', 'group-autocompact', { project: project.name, on });
-          return buildGroupSettingsCard({ ...project, autoCompact: on });
+          return buildGroupSettingsCard(r.ok ? r.project : { ...project, autoCompact: on });
         }
         return buildGroupSettingsCard({ name: '本群', kind: 'multi', autoCompact: on });
       });
@@ -2379,15 +2325,15 @@ export function createOrchestrator(
         return buildProjectTopicsCard(p, sessions);
       });
     })
+    // 写路径走管理面共享层（admin/ops.ts）——与 Web 控制台同一套校验/落盘/驱逐。
     .on(DM.setNoMentionDm, ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
       const name = typeof value.n === 'string' ? value.n : '';
       const on = value.v === 'on';
       patch(evt, async () => {
-        const p = await getProjectByName(name);
-        if (!p) return buildDmMenuCard();
-        await updateProject(name, { noMention: on });
-        return buildProjectSettingsCard({ ...p, noMention: on }, backendDisplayName(p.backend));
+        const r = await performSetNoMention({ projectName: name, on });
+        if (!r.ok) return buildDmMenuCard();
+        return buildProjectSettingsCard(r.project, backendDisplayName(r.project.backend));
       });
     })
     .on(DM.setAutoCompactDm, ({ evt, value }) => {
@@ -2395,14 +2341,12 @@ export function createOrchestrator(
       const name = typeof value.n === 'string' ? value.n : '';
       const on = value.v === 'on';
       patch(evt, async () => {
-        const p = await getProjectByName(name);
-        if (!p) return buildDmMenuCard();
-        await updateProject(name, { autoCompact: on });
-        // The auto-compact limit is bound at thread/start, so evict live threads
-        // to rebind under the new setting on the next message (mirrors 群设置).
-        await evictLiveSessionsForChat(p.chatId);
+        // 共享层落盘 + 驱逐活跃会话（压缩上限在 thread/start 绑定，驱逐后下一条
+        // 消息重绑生效——mirrors 群设置）。
+        const r = await performSetAutoCompact({ projectName: name, on, evictLiveSessionsForChat });
+        if (!r.ok) return buildDmMenuCard();
         log.info('console', 'project-autocompact', { project: name, on });
-        return buildProjectSettingsCard({ ...p, autoCompact: on }, backendDisplayName(p.backend));
+        return buildProjectSettingsCard(r.project, backendDisplayName(r.project.backend));
       });
     })
     // 🔐 权限：打开下拉表单子卡（管理员档 + 普通用户档 + 联网，选完提交）。
@@ -2424,14 +2368,12 @@ export function createOrchestrator(
       const guestMode = asTier(selectValue(formValue, 'guestMode'));
       const network = selectValue(formValue, 'network') === 'on';
       void (async () => {
-        const p = await getProjectByName(name);
-        if (!p) return;
-        await updateProject(name, { ...(mode ? { mode } : {}), ...(guestMode ? { guestMode } : {}), network });
-        await evictLiveSessionsForChat(p.chatId);
+        // 共享层（admin/ops.ts）：落盘 + 驱逐活跃会话让新档立即生效；写后回读，
+        // 卡片与盘上一致——与 Web 控制台的 setPermissionMode 完全同一条路径。
+        const r = await performSetPermissionMode({ projectName: name, mode, guestMode, network, evictLiveSessionsForChat });
+        if (!r.ok) return;
         log.info('console', 'permission', { project: name, mode, guestMode, network });
-        const fresh = await getProjectByName(name); // 写后回读，卡片与盘上一致
-        if (!fresh) return;
-        await sendManagedCard(channel, evt.chatId, buildProjectSettingsCard(fresh, backendDisplayName(fresh.backend))).catch((e) =>
+        await sendManagedCard(channel, evt.chatId, buildProjectSettingsCard(r.project, backendDisplayName(r.project.backend))).catch((e) =>
           log.fail('console', e, { phase: 'permission-result' }),
         );
       })();
@@ -2493,30 +2435,19 @@ export function createOrchestrator(
       patch(evt, async () => {
         const p = await getProjectByName(name);
         if (!p || !target) return buildDmMenuCard();
-        const registered = backendIds();
-        // doctor({force}) 看「现在」的状态：检测卡渲染后环境可能已变（卸载/登出），
-        // 写盘前再探一次，带与检测同款的超时兜底。全程异步（回调里绝不 spawnSync）。
-        const probe = registered.includes(target)
-          ? (await probeBackends([backendFor(target)]))[0]?.probe
-          : undefined;
-        const reason = validateBackendSwitch({
-          target,
-          registered,
-          project: p,
-          supportedModes: registered.includes(target) ? backendFor(target).supportedModes : undefined,
-          probe,
-        });
-        if (reason) {
-          log.info('console', 'backend-denied', { project: name, target, reason });
-          return buildBackendPickerCard(p, await probeAllBackends(), reason);
+        // 共享层（admin/ops.ts）：注册表 → doctor 探活（写盘前再探一次「现在」的
+        // 状态，带超时兜底，全程异步）→ 权限档支持面校验，全过才写盘——与 Web
+        // 控制台的 switchBackend 完全同一条路径。
+        const r = await performBackendSwitch({ projectName: name, target, backendFor });
+        if (!r.ok) {
+          log.info('console', 'backend-denied', { project: name, target, reason: r.reason });
+          return buildBackendPickerCard(p, await probeAllBackends(), r.reason);
         }
-        await updateProject(name, { backend: target });
         log.info('console', 'backend', { project: name, backend: target });
-        const fresh = (await getProjectByName(name)) ?? { ...p, backend: target }; // 写后回读，卡片与盘上一致
         return buildProjectSettingsCard(
-          fresh,
-          backendDisplayName(fresh.backend),
-          `✅ 已切到 **${backendDisplayName(fresh.backend)}** · 新话题生效`,
+          r.project,
+          backendDisplayName(r.project.backend),
+          `✅ 已切到 **${backendDisplayName(r.project.backend)}** · 新话题生效`,
         );
       });
     });
@@ -3750,7 +3681,12 @@ export function createOrchestrator(
   // 首次真实调用会自动重试，fallback 绝不被钉死（listModels 包装层也不缓存）。
   void backend.listModels().catch((err) => log.fail('agent', err, { phase: 'models-prewarm' }));
 
-  return { onMessage, onComment, onBotAddedToChat, onBotRemovedFromChat, onReaction, onBotMenu, dispatcher, shutdown };
+  // 管理面写执行器（Web 控制台 / supervisor IPC 入口）：与上面 DM 回调共用
+  // admin/ops.ts 的 perform*，注入同一个 backendFor + evictLiveSessionsForChat
+  // —— 双端写行为同源（同校验、同落盘、同驱逐）。
+  const adminExecute = createAdminWriteExecutor({ backendFor, evictLiveSessionsForChat });
+
+  return { onMessage, onComment, onBotAddedToChat, onBotRemovedFromChat, onReaction, onBotMenu, dispatcher, adminExecute, shutdown };
 }
 
 /** Resolve a message's thread_id via raw API (reply response omits it). The

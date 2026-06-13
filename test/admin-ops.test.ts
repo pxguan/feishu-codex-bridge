@@ -1,0 +1,207 @@
+import { rmSync } from 'node:fs';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { paths } from '../src/config/paths';
+import { addProject, getProjectByName, removeProject } from '../src/project/registry';
+import {
+  AdminWriteError,
+  createAdminWriteExecutor,
+  performBackendSwitch,
+  performSetAutoCompact,
+  performSetNoMention,
+  performSetPermissionMode,
+  probeBackends as opsProbeBackends,
+  runAdminWriteOp,
+  validateBackendSwitch as opsValidateBackendSwitch,
+} from '../src/admin/ops';
+import {
+  BACKEND_PROBE_TIMEOUT_MS as hmTimeout,
+  probeBackends as hmProbeBackends,
+  validateBackendSwitch as hmValidateBackendSwitch,
+} from '../src/bot/handle-message';
+import type { AgentBackend } from '../src/agent/types';
+
+// 写操作单测一律在临时目录里落盘（mock paths），绝不碰真实 ~/.feishu-codex-bridge。
+vi.mock('../src/config/paths', async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const appDir = mkdtempSync(join(tmpdir(), 'admin-ops-test-'));
+  return {
+    botDir: (appId: string) => join(appDir, 'bots', appId),
+    botPaths: (appId: string) => ({
+      dir: join(appDir, 'bots', appId),
+      configFile: join(appDir, 'bots', appId, 'config.json'),
+      sessionsFile: join(appDir, 'bots', appId, 'sessions.json'),
+      projectsFile: join(appDir, 'bots', appId, 'projects.json'),
+      processesFile: join(appDir, 'bots', appId, 'processes.json'),
+    }),
+    useBotDir: () => undefined,
+    paths: {
+      appDir,
+      cacheDir: appDir,
+      botsFile: join(appDir, 'bots.json'),
+      configFile: join(appDir, 'config.json'),
+      sessionsFile: join(appDir, 'sessions.json'),
+      projectsFile: join(appDir, 'projects.json'),
+      processesFile: join(appDir, 'processes.json'),
+      projectsRootDir: join(appDir, 'projects'),
+      webConsoleFile: join(appDir, 'web-console.json'),
+    },
+  };
+});
+
+afterAll(() => {
+  rmSync(paths.appDir, { recursive: true, force: true });
+});
+
+/** 可用的假后端（doctor ok、全档支持，除非显式收窄）。 */
+function fakeBackend(over: Partial<AgentBackend> = {}): AgentBackend {
+  return {
+    id: 'claude-sdk',
+    displayName: 'Claude (SDK)',
+    doctor: async () => ({ ok: true, version: '1.0.0' }),
+    ...over,
+  } as unknown as AgentBackend;
+}
+
+beforeEach(async () => {
+  await removeProject('demo');
+  await addProject({
+    name: 'demo',
+    chatId: 'oc_demo',
+    cwd: '/tmp/demo',
+    blank: false,
+    createdAt: 1,
+    mode: 'full',
+  });
+});
+
+describe('共享层契约：DM（handle-message re-export）与 ops 是同一个函数对象', () => {
+  it('validateBackendSwitch / probeBackends / BACKEND_PROBE_TIMEOUT_MS 同源（防止两套逻辑漂移回潮）', () => {
+    expect(hmValidateBackendSwitch).toBe(opsValidateBackendSwitch);
+    expect(hmProbeBackends).toBe(opsProbeBackends);
+    expect(hmTimeout).toBe(3000);
+  });
+});
+
+describe('performSetNoMention / performSetAutoCompact', () => {
+  it('免@：落盘并写后回读（无需驱逐）', async () => {
+    const r = await performSetNoMention({ projectName: 'demo', on: false });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.project.noMention).toBe(false);
+    expect((await getProjectByName('demo'))?.noMention).toBe(false);
+  });
+
+  it('自动压缩：落盘 + 驱逐该群活跃会话（thread/start 绑定，驱逐才能重绑生效）', async () => {
+    const evict = vi.fn(async () => undefined);
+    const r = await performSetAutoCompact({ projectName: 'demo', on: false, evictLiveSessionsForChat: evict });
+    expect(r.ok).toBe(true);
+    expect((await getProjectByName('demo'))?.autoCompact).toBe(false);
+    expect(evict).toHaveBeenCalledWith('oc_demo');
+  });
+
+  it('项目不存在 → ok:false（不落盘、不驱逐）', async () => {
+    const evict = vi.fn(async () => undefined);
+    const r1 = await performSetNoMention({ projectName: 'nope', on: true });
+    const r2 = await performSetAutoCompact({ projectName: 'nope', on: true, evictLiveSessionsForChat: evict });
+    expect(r1.ok).toBe(false);
+    expect(r2.ok).toBe(false);
+    expect(evict).not.toHaveBeenCalled();
+  });
+});
+
+describe('performSetPermissionMode', () => {
+  it('落盘 mode/guestMode/network + 驱逐活跃会话（新档立即生效的既有语义）', async () => {
+    const evict = vi.fn(async () => undefined);
+    const r = await performSetPermissionMode({
+      projectName: 'demo',
+      mode: 'qa',
+      guestMode: 'write',
+      network: true,
+      evictLiveSessionsForChat: evict,
+    });
+    expect(r.ok).toBe(true);
+    const p = await getProjectByName('demo');
+    expect(p?.mode).toBe('qa');
+    expect(p?.guestMode).toBe('write');
+    expect(p?.network).toBe(true);
+    expect(evict).toHaveBeenCalledWith('oc_demo');
+  });
+
+  it('缺省字段不改盘（undefined 跳过——与 DM 旧写法等价）', async () => {
+    const evict = vi.fn(async () => undefined);
+    await performSetPermissionMode({ projectName: 'demo', network: false, evictLiveSessionsForChat: evict });
+    const p = await getProjectByName('demo');
+    expect(p?.mode).toBe('full'); // 原值保留
+    expect(p?.guestMode).toBeUndefined();
+  });
+
+  it('Web 来路的非法档位 → 拒绝（DM 来路有 asTier 收窄，这里再守一道）', async () => {
+    const evict = vi.fn(async () => undefined);
+    const r = await performSetPermissionMode({
+      projectName: 'demo',
+      mode: 'root' as never,
+      evictLiveSessionsForChat: evict,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('未知权限档');
+    expect(evict).not.toHaveBeenCalled();
+    expect((await getProjectByName('demo'))?.mode).toBe('full');
+  });
+});
+
+describe('performBackendSwitch（注册表 → doctor 探活 → 档位支持面，全过才写盘）', () => {
+  it('未知后端 → 拒绝且不写盘', async () => {
+    const r = await performBackendSwitch({ projectName: 'demo', target: 'gpt-9', backendFor: () => fakeBackend() });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('未知后端');
+    expect((await getProjectByName('demo'))?.backend).toBeUndefined();
+  });
+
+  it('doctor 探活失败 → 拒绝（切过去才报错是事故，这里提前拦）', async () => {
+    const be = fakeBackend({ doctor: async () => ({ ok: false, hint: '未登录' }) } as Partial<AgentBackend>);
+    const r = await performBackendSwitch({ projectName: 'demo', target: 'claude-sdk', backendFor: () => be });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('不可用');
+  });
+
+  it('权限档不在目标后端支持面 → 拒绝并讲清原因', async () => {
+    await performSetPermissionMode({
+      projectName: 'demo',
+      mode: 'qa',
+      evictLiveSessionsForChat: async () => undefined,
+    });
+    const be = fakeBackend({ supportedModes: ['full'] } as Partial<AgentBackend>);
+    const r = await performBackendSwitch({ projectName: 'demo', target: 'claude-sdk', backendFor: () => be });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('权限档');
+  });
+
+  it('全过 → 写盘 + 写后回读', async () => {
+    const r = await performBackendSwitch({ projectName: 'demo', target: 'claude-sdk', backendFor: () => fakeBackend() });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.project.backend).toBe('claude-sdk');
+    expect((await getProjectByName('demo'))?.backend).toBe('claude-sdk');
+  });
+});
+
+describe('createAdminWriteExecutor / runAdminWriteOp（Web · IPC 入口）', () => {
+  const deps = {
+    backendFor: () => fakeBackend(),
+    evictLiveSessionsForChat: async () => undefined,
+  };
+
+  it('op 分发到对应 perform*（落盘可见）', async () => {
+    const r = await runAdminWriteOp({ kind: 'setNoMention', project: 'demo', on: false }, deps);
+    expect(r.ok).toBe(true);
+    expect((await getProjectByName('demo'))?.noMention).toBe(false);
+  });
+
+  it('执行器：成功静默返回，拒绝抛 AdminWriteError（带 code，IPC/HTTP 可还原）', async () => {
+    const exec = createAdminWriteExecutor(deps);
+    await expect(exec({ kind: 'setAutoCompact', project: 'demo', on: true })).resolves.toBeUndefined();
+    const err = await exec({ kind: 'switchBackend', project: 'demo', backend: 'gpt-9' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdminWriteError);
+    expect((err as AdminWriteError).code).toBe('ADMIN_WRITE_REJECTED');
+  });
+});

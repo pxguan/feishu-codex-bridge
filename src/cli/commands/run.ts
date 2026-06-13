@@ -5,6 +5,10 @@ import { acquireSingleInstanceLock, BridgeAlreadyRunningError } from '../../core
 import { recordServicePid } from '../../service/win-startup';
 import { activeBots, loadBots } from '../../config/bots';
 import { log } from '../../core/logger';
+import { AdminWriteError } from '../../admin/ops';
+import { createAdminIpcResponder } from '../../admin/ipc';
+import { createAdminService } from '../../admin/service';
+import { mountWebConsole, type MountedWebConsole } from '../../web/mount';
 
 /**
  * `run` — foreground long-connection bot(s).
@@ -77,13 +81,72 @@ async function runSingle(botName?: string): Promise<void> {
   // 配置生效后播报「事件已生效」。fire-and-forget，自身绝不 throw。
   void announceEventsWhenLive(ready);
 
+  // ── Web 控制台 / supervisor IPC（按进程形态二选一）────────────────────────
+  let webConsole: MountedWebConsole | undefined;
+  if (process.send) {
+    // supervisor 子进程（'ipc' stdio）：控制台由 supervisor 聚合挂载，本进程只
+    // 接写请求——在进程内执行（registry withLock + 共享校验 + 驱逐 LIVE 会话，
+    // 这正是写操作必须 IPC 转发、不能 supervisor 文件直写的原因）。status 请求
+    // 回报真实 WS 连接状态，替代锁文件探测。
+    const respond = createAdminIpcResponder(
+      async (op) => {
+        if (op.kind === 'status') {
+          return { connection: handle.channel.getConnectionStatus?.()?.state ?? 'unknown' };
+        }
+        await handle.adminExecute(op);
+        return { done: true };
+      },
+      (msg) => void process.send?.(msg),
+    );
+    process.on('message', respond);
+  } else {
+    // 独立 daemon（单 bot inline）：进程内挂全局控制台。本 bot 的写/实时状态走
+    // 进程内 orchestrator；其他已注册 bot 仍可只读快照（写需该 bot 进程在跑——
+    // 多 bot 写请用 `bot use` 选多个后由 supervisor 聚合）。
+    const ownAppId = cfg.accounts.app.id;
+    const startedAt = Date.now();
+    webConsole = await mountWebConsole(
+      createAdminService({
+        executeWrite: async (botId, op) => {
+          if (botId !== ownAppId) {
+            throw new AdminWriteError(
+              '该机器人不归本进程管：当前是单 bot 运行模式，只能改本 bot 的项目。多 bot 请 `bot use` 勾选后重启，由 supervisor 聚合管理。',
+            );
+          }
+          await handle.adminExecute(op);
+        },
+        liveStatus: async (botId) =>
+          botId === ownAppId
+            ? {
+                running: true,
+                pid: process.pid,
+                startedAt,
+                connection: handle.channel.getConnectionStatus?.()?.state ?? 'unknown',
+              }
+            : undefined,
+      }),
+    );
+    if (webConsole) {
+      if (process.stdout.isTTY) {
+        // 含 token 的 URL 只在前台 TTY 打印；后台 daemon 的 stdout 会被 launchd/
+        // systemd 重定向落盘——token 绝不进日志，后台改用 `web` 命令经 0600 发现
+        // 文件跳转。
+        console.log(`🌐 Web 控制台：${webConsole.url}`);
+        console.log('   仅本机可访问（127.0.0.1）；URL 含 token 勿外传。也可随时 `feishu-codex-bridge web` 重新打开。\n');
+      } else {
+        console.log(`🌐 Web 控制台已内嵌启动（127.0.0.1:${webConsole.port}）：运行 \`feishu-codex-bridge web\` 获取登录链接。`);
+      }
+    }
+  }
+
   let stopping = false;
   const stop = (sig: NodeJS.Signals): void => {
     if (stopping) return;
     stopping = true;
     console.log(`\n收到 ${sig}，正在优雅退出（关闭所有 codex 会话）…`);
-    void handle
-      .shutdown()
+    void (webConsole?.close() ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() => handle.shutdown())
       .catch((err) => log.fail('run', err, { phase: 'shutdown' }))
       .finally(() => {
         releaseLock();

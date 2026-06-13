@@ -20,9 +20,31 @@ export function botDir(appId: string): string {
   return join(appDir, 'bots', appId);
 }
 
-/** Point the per-bot paths at `appId`'s directory. Call once at startup. */
+/** Point the per-bot paths at `appId`'s directory. Call once at startup.
+ * ⚠️ daemon 进程内（run/supervisor）绝不可在请求路径上反复调它切目录——它是
+ * 模块级全局态，会把在跑 bot 进程的 paths 指到别的 bot。跨 bot 聚合读取一律
+ * 走 {@link botPaths} 的显式路径。 */
 export function useBotDir(appId: string): void {
   currentBotDir = botDir(appId);
+}
+
+/** 指定 bot 的各状态文件路径（纯函数，不碰全局 currentBotDir）。Web 控制台 /
+ * supervisor 聚合多 bot 读取专用——与 useBotDir 后的 paths.* 指向完全一致。 */
+export function botPaths(appId: string): {
+  dir: string;
+  configFile: string;
+  sessionsFile: string;
+  projectsFile: string;
+  processesFile: string;
+} {
+  const dir = botDir(appId);
+  return {
+    dir,
+    configFile: join(dir, 'config.json'),
+    sessionsFile: join(dir, 'sessions.json'),
+    projectsFile: join(dir, 'projects.json'),
+    processesFile: join(dir, 'processes.json'),
+  };
 }
 
 export const paths = {
@@ -65,4 +87,7 @@ export const paths = {
   /** Inbound file attachments downloaded from chat, handed to codex by absolute
    * path (codex has no native file input). TTL-pruned like {@link mediaDir}. */
   inboundDir: join(appDir, 'inbound'),
+  /** daemon 内嵌 Web 控制台的发现文件 {port, token, pid}（0600，daemon 退出
+   * 清理）——`web` 子命令据此直接打开 daemon 控制台而不是再起只读副本。 */
+  webConsoleFile: join(appDir, 'web-console.json'),
 };

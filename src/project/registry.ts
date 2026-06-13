@@ -121,8 +121,15 @@ interface StoreFile {
 const FILE_VERSION = 1;
 
 async function read(): Promise<Project[]> {
+  return listProjectsIn(paths.projectsFile);
+}
+
+/** 读取指定 projects.json（绝对路径）。Web 控制台 / supervisor 跨 bot 聚合视图
+ * 专用——daemon 进程内绝不可用 useBotDir 全局切目录，显式路径才安全。文件缺失
+ * 视为空注册表（与当前 bot 路径同语义）。 */
+export async function listProjectsIn(file: string): Promise<Project[]> {
   try {
-    const text = await readFile(paths.projectsFile, 'utf8');
+    const text = await readFile(file, 'utf8');
     const parsed = JSON.parse(text) as Partial<StoreFile>;
     return Array.isArray(parsed.projects) ? parsed.projects : [];
   } catch (err) {

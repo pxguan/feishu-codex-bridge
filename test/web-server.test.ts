@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createWebServer, type WebServer } from '../src/web/server';
 import { NotWiredYetError, type AdminService } from '../src/admin/service';
+import { AdminWriteError } from '../src/admin/ops';
 
 // 内存 stub：server 层单测不碰真实文件/注册表（service 自有专门的集成测试）。
 function stubService(): AdminService {
@@ -217,7 +218,7 @@ describe('web server · 只读 API', () => {
   });
 });
 
-describe('web server · 写操作占位（第二棒接线）', () => {
+describe('web server · 写操作占位（只读预览：daemon 未跑）', () => {
   it.each(['backend', 'permission', 'no-mention', 'auto-compact'])('POST /api/project/demo/%s → 501', async (action) => {
     const res = await authed(`/api/project/demo/${action}`, {
       method: 'POST',
@@ -227,12 +228,60 @@ describe('web server · 写操作占位（第二棒接线）', () => {
     expect(res.status).toBe(501);
     const body = await jsonOf(res);
     expect(body.error).toBe('not_wired_yet');
-    expect(body.message).toContain('第二棒');
+    expect(body.message).toContain('daemon');
   });
 
   it('写操作同样要鉴权：无 token → 401（不是 501）', async () => {
     const res = await get('/api/project/demo/backend', { method: 'POST', body: '{}' });
     expect(res.status).toBe(401);
+  });
+});
+
+describe('web server · 写操作真实现（daemon 进程内 service）', () => {
+  // 写方法可成功 / 校验拒绝的 stub —— 验证路由对 200/409 的映射；UI 的 postWrite
+  // 已按「200 → ✅ 已保存、其余 → ❌ message」处理，路由从 501 变真后前端零改动。
+  let writeWeb: WebServer;
+  let writeBase: string;
+  const written: unknown[] = [];
+
+  beforeAll(async () => {
+    const svc = stubService();
+    svc.switchBackend = async (botId, project, backend) => {
+      written.push({ botId, project, backend });
+    };
+    svc.setNoMention = async () => {
+      throw new AdminWriteError('项目「demo」不存在');
+    };
+    writeWeb = createWebServer({ service: svc, token: TOKEN, logDir });
+    const { port } = await writeWeb.listen(0);
+    writeBase = `http://127.0.0.1:${port}`;
+  });
+
+  afterAll(async () => {
+    await writeWeb.close();
+  });
+
+  it('写成功 → 200 {ok:true}（前端走 ✅ 已保存）', async () => {
+    const res = await fetch(`${writeBase}/api/project/demo/backend?bot=cli_a`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ backend: 'claude-sdk' }),
+    });
+    expect(res.status).toBe(200);
+    expect((await jsonOf(res)).ok).toBe(true);
+    expect(written).toEqual([{ botId: 'cli_a', project: 'demo', backend: 'claude-sdk' }]);
+  });
+
+  it('校验拒绝（AdminWriteError）→ 409 write_rejected + 中文原因', async () => {
+    const res = await fetch(`${writeBase}/api/project/demo/no-mention?bot=cli_a`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on: true }),
+    });
+    expect(res.status).toBe(409);
+    const body = await jsonOf(res);
+    expect(body.error).toBe('write_rejected');
+    expect(body.message).toContain('不存在');
   });
 });
 

@@ -60,8 +60,14 @@ function migrate(raw: Record<string, unknown>): SessionRecord {
 }
 
 async function read(): Promise<SessionRecord[]> {
+  return listSessionsIn(paths.sessionsFile);
+}
+
+/** 读取指定 sessions.json（绝对路径，含 v1 迁移）。Web 控制台 / supervisor 跨
+ * bot 聚合视图专用——daemon 进程内绝不可用 useBotDir 全局切目录。 */
+export async function listSessionsIn(file: string): Promise<SessionRecord[]> {
   try {
-    const text = await readFile(paths.sessionsFile, 'utf8');
+    const text = await readFile(file, 'utf8');
     const parsed = JSON.parse(text) as Partial<StoreFile>;
     if (!Array.isArray(parsed.sessions)) return [];
     return (parsed.sessions as unknown as Record<string, unknown>[]).map(migrate);

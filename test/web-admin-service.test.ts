@@ -1,15 +1,20 @@
 import { rmSync } from 'node:fs';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { paths, useBotDir } from '../src/config/paths';
 import { saveBots } from '../src/config/bots';
 import { addProject } from '../src/project/registry';
 import { upsertSession } from '../src/bot/session-store';
-import { createReadonlyAdminService, NotWiredYetError, type AdminService } from '../src/admin/service';
+import {
+  createAdminService,
+  createReadonlyAdminService,
+  NotWiredYetError,
+  type AdminService,
+} from '../src/admin/service';
+import { AdminWriteError, type AdminWriteOp } from '../src/admin/ops';
 
-// 把整个 ~/.feishu-codex-bridge 指到临时目录（含 useBotDir 的 per-bot 切换语义），
-// 绝不碰真实用户数据。fixture 全部通过 bots/registry/session-store 模块的导出写
-// 入 —— 服务层读到的就是真实落盘格式。
+// 把整个 ~/.feishu-codex-bridge 指到临时目录，绝不碰真实用户数据。fixture 通过
+// bots/registry/session-store 模块的导出写入（useBotDir 切目录后写）——服务层读
+// 到的就是真实落盘格式；服务层自身只走 botPaths 显式路径，不再 useBotDir。
 vi.mock('../src/config/paths', async () => {
   const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
@@ -17,8 +22,19 @@ vi.mock('../src/config/paths', async () => {
   const appDir = mkdtempSync(join(tmpdir(), 'web-admin-service-test-'));
   let currentBotDir = appDir;
   const botDir = (appId: string): string => join(appDir, 'bots', appId);
+  const botPaths = (appId: string) => {
+    const dir = botDir(appId);
+    return {
+      dir,
+      configFile: join(dir, 'config.json'),
+      sessionsFile: join(dir, 'sessions.json'),
+      projectsFile: join(dir, 'projects.json'),
+      processesFile: join(dir, 'processes.json'),
+    };
+  };
   return {
     botDir,
+    botPaths,
     useBotDir: (appId: string): void => {
       currentBotDir = botDir(appId);
     },
@@ -26,6 +42,7 @@ vi.mock('../src/config/paths', async () => {
       appDir,
       cacheDir: appDir,
       botsFile: join(appDir, 'bots.json'),
+      webConsoleFile: join(appDir, 'web-console.json'),
       get configFile(): string {
         return join(currentBotDir, 'config.json');
       },
@@ -97,6 +114,10 @@ beforeAll(async () => {
     createdAt: 200,
   });
 
+  // 服务层不依赖 useBotDir 的全局态——故意把全局目录切到一个无关 bot，证明
+  // 读取走的是显式路径（第一棒 useBotDir 切目录的坑已修掉）。
+  useBotDir('cli_unrelated');
+
   service = createReadonlyAdminService();
 });
 
@@ -104,8 +125,8 @@ afterAll(() => {
   rmSync(paths.appDir, { recursive: true, force: true });
 });
 
-describe('createReadonlyAdminService · 只读方法', () => {
-  it('listBots：全部 bot + current/active 标记，预览态下 running=false', async () => {
+describe('createReadonlyAdminService · 只读方法（显式路径，不碰全局 currentBotDir）', () => {
+  it('listBots：全部 bot + current/active 标记，预览态下 running=false 且无 connection', async () => {
     const bots = await service.listBots();
     expect(bots.map((b) => b.appId).sort()).toEqual([BOT_A, BOT_B]);
     const a = bots.find((b) => b.appId === BOT_A)!;
@@ -115,9 +136,10 @@ describe('createReadonlyAdminService · 只读方法', () => {
     expect(a.botName).toBe('阿尔法');
     expect(b.current).toBe(false);
     expect(b.active).toBe(false);
-    // 没有单实例锁文件 → 未在跑
+    // 没有单实例锁文件 → 未在跑；真实 WS 状态只有 daemon 进程内才有
     expect(a.running).toBe(false);
     expect(b.running).toBe(false);
+    expect(a.connection).toBeUndefined();
   });
 
   it('listProjects：effective 字段已解析（默认值回填）+ 话题数按 chatId 聚合', async () => {
@@ -146,7 +168,7 @@ describe('createReadonlyAdminService · 只读方法', () => {
     expect(projects[0]!.sessionCount).toBe(0);
   });
 
-  it('并发跨 bot 读不串目录（withBotDir 串行锁）', async () => {
+  it('并发跨 bot 读互不串（显式路径天然无共享可变态）', async () => {
     const [a, b] = await Promise.all([service.listProjects(BOT_A), service.listProjects(BOT_B)]);
     expect(a.map((p) => p.name)).toEqual(['proj-a']);
     expect(b.map((p) => p.name)).toEqual(['proj-b']);
@@ -175,7 +197,7 @@ describe('createReadonlyAdminService · 只读方法', () => {
   });
 });
 
-describe('createReadonlyAdminService · 写方法（第一棒占位）', () => {
+describe('createReadonlyAdminService · 写方法（只读预览占位）', () => {
   it('四个写方法一律抛 NotWiredYetError', async () => {
     await expect(service.switchBackend(BOT_A, 'proj-a', 'claude-sdk')).rejects.toBeInstanceOf(NotWiredYetError);
     await expect(service.setPermissionMode(BOT_A, 'proj-a', { mode: 'qa' })).rejects.toBeInstanceOf(NotWiredYetError);
@@ -183,10 +205,70 @@ describe('createReadonlyAdminService · 写方法（第一棒占位）', () => {
     await expect(service.setAutoCompact(BOT_A, 'proj-a', false)).rejects.toBeInstanceOf(NotWiredYetError);
   });
 
-  it('NotWiredYetError 带 code 和第二棒提示文案', async () => {
+  it('NotWiredYetError 带 code 和「先起 daemon」的引导文案', async () => {
     const err = await service.switchBackend(BOT_A, 'proj-a', 'x').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(NotWiredYetError);
     expect((err as NotWiredYetError).code).toBe('NOT_WIRED_YET');
-    expect((err as NotWiredYetError).message).toContain('第二棒');
+    expect((err as NotWiredYetError).message).toContain('daemon');
+    expect((err as NotWiredYetError).message).toContain('只读预览');
+  });
+});
+
+describe('createAdminService · daemon 进程内（executeWrite + liveStatus 注入）', () => {
+  it('写方法把 botId + AdminWriteOp 原样交给执行器（Web 与 DM 同一写路径的接缝）', async () => {
+    const calls: { botId: string; op: AdminWriteOp }[] = [];
+    const daemon = createAdminService({
+      executeWrite: async (botId, op) => void calls.push({ botId, op }),
+    });
+    await daemon.switchBackend(BOT_A, 'proj-a', 'claude-sdk');
+    await daemon.setPermissionMode(BOT_A, 'proj-a', { mode: 'qa', guestMode: 'write', network: true });
+    await daemon.setNoMention(BOT_A, 'proj-a', false);
+    await daemon.setAutoCompact(BOT_A, 'proj-a', true);
+    expect(calls).toEqual([
+      { botId: BOT_A, op: { kind: 'switchBackend', project: 'proj-a', backend: 'claude-sdk' } },
+      {
+        botId: BOT_A,
+        op: { kind: 'setPermissionMode', project: 'proj-a', mode: 'qa', guestMode: 'write', network: true },
+      },
+      { botId: BOT_A, op: { kind: 'setNoMention', project: 'proj-a', on: false } },
+      { botId: BOT_A, op: { kind: 'setAutoCompact', project: 'proj-a', on: true } },
+    ]);
+  });
+
+  it('执行器抛 AdminWriteError（校验拒绝）原样透传给调用方', async () => {
+    const daemon = createAdminService({
+      executeWrite: async () => {
+        throw new AdminWriteError('后端「x」当前不可用');
+      },
+    });
+    await expect(daemon.switchBackend(BOT_A, 'proj-a', 'x')).rejects.toBeInstanceOf(AdminWriteError);
+  });
+
+  it('liveStatus 注入：listBots 用真实 WS 状态替代锁文件探测；未覆盖的 bot 回退锁文件', async () => {
+    const daemon = createAdminService({
+      liveStatus: async (botId) =>
+        botId === BOT_A
+          ? { running: true, pid: 4242, startedAt: 1000, connection: 'connected' }
+          : undefined,
+    });
+    const bots = await daemon.listBots();
+    const a = bots.find((b) => b.appId === BOT_A)!;
+    const b = bots.find((b) => b.appId === BOT_B)!;
+    expect(a.running).toBe(true);
+    expect(a.pid).toBe(4242);
+    expect(a.connection).toBe('connected');
+    // B 不归 daemon 管 → 锁文件探测（无锁文件 = 未在跑）
+    expect(b.running).toBe(false);
+    expect(b.connection).toBeUndefined();
+  });
+
+  it('liveStatus 抛错不致命：回退锁文件探测（绝不让 /api/state 整页 500）', async () => {
+    const daemon = createAdminService({
+      liveStatus: async () => {
+        throw new Error('IPC 超时');
+      },
+    });
+    const bots = await daemon.listBots();
+    expect(bots.find((b) => b.appId === BOT_A)!.running).toBe(false);
   });
 });

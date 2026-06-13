@@ -1,4 +1,5 @@
 import { createLarkChannel, Domain, type LarkChannel } from '@larksuiteoapi/node-sdk';
+import type { AdminWriteOp } from '../admin/ops';
 import type { AppConfig } from '../config/schema';
 import { log } from '../core/logger';
 import { createOrchestrator } from './handle-message';
@@ -12,6 +13,9 @@ export interface BridgeOptions {
 
 export interface BridgeHandle {
   channel: LarkChannel;
+  /** 管理面写操作（Web 控制台 / supervisor IPC）：进程内执行，与 DM 卡片回调
+   * 同一套共享逻辑（admin/ops.ts）；校验拒绝抛 AdminWriteError。 */
+  adminExecute: (op: AdminWriteOp) => Promise<void>;
   /** Graceful teardown: close every codex session (no orphan app-servers) then
    *  drop the long connection. Idempotent enough for a signal handler. */
   shutdown: () => Promise<void>;
@@ -120,5 +124,5 @@ export async function startBridge(opts: BridgeOptions): Promise<BridgeHandle> {
     await orchestrator.shutdown();
     await channel.disconnect().catch((err) => log.fail('ws', err, { phase: 'disconnect' }));
   };
-  return { channel, shutdown };
+  return { channel, adminExecute: orchestrator.adminExecute, shutdown };
 }

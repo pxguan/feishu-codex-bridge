@@ -1,14 +1,13 @@
 import { readFile } from 'node:fs/promises';
 import { loadBots } from '../config/bots';
-import { paths, useBotDir } from '../config/paths';
+import { botPaths } from '../config/paths';
 import {
   defaultNoMention,
   effectiveGuestMode,
   effectiveMode,
-  getProjectByName,
-  listProjects as registryListProjects,
+  listProjectsIn,
 } from '../project/registry';
-import { listSessions as storeListSessions } from '../bot/session-store';
+import { listSessionsIn } from '../bot/session-store';
 import { loadConfig } from '../config/store';
 import { isComplete } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
@@ -16,11 +15,12 @@ import { diagnoseEventSubscription, type EventDiagnosis } from '../utils/event-d
 import { backendIds, createBackend, DEFAULT_BACKEND_ID } from '../agent';
 import type { PermissionMode } from '../agent/types';
 import { readRecentLogs } from '../core/logger';
+import type { AdminWriteOp } from './ops';
 
 /**
- * 管理面共享服务层（设计：.plans/auto-optimize/design/admin-surface.md 阶段 1）。
+ * 管理面共享服务层（设计：.plans/auto-optimize/design/admin-surface.md）。
  *
- * 【契约】DM 卡片回调与 Web API **共享此层**：
+ * 【契约】DM 卡片回调与 Web API **共享同一写逻辑**：
  *   - 体验对齐原则「Web 能操作的飞书也能操作」——本接口的方法清单严格对齐
  *     DM 私聊控制台已有的 dm.* 动作（src/card/dm-cards.ts）：
  *       listBots            ← CLI `bot list` / 多 bot 聚合视图
@@ -34,38 +34,37 @@ import { readRecentLogs } from '../core/logger';
  *       eventDiagnosis      ← dm.doctor 的事件订阅三态段（M-7）
  *       listSessions        ← dm.projectTopics（🧵 话题钻取）
  *       tailLogs            ← CLI `logs`（DM 够不着的宿主机域）
- *   - 第二棒（daemon 进程内集成）必须让 DM 的 dm.* 回调 handler 与 Web 的写路由
- *     调用**同一个 AdminService 实现**，保证两面行为一致（同样的校验、同样的
- *     会话驱逐、同样的生效播报），杜绝双写两套逻辑漂移。
+ *   - 写方法与 DM 的 dm.* 回调 handler 走**同一套共享纯函数**（admin/ops.ts 的
+ *     perform*）：同样的校验、同样的会话驱逐、同样的落盘——双端行为零漂移。
  *
- * 【本棒边界】只实现只读方法（直读 registry / session-store / bots / paths 模块，
- * 不自己解析 JSON）；四个写方法一律抛 {@link NotWiredYetError} —— 写操作必须在
- * daemon 进程内执行（落盘 + 驱逐活跃会话才能立即生效），独立预览进程写盘会与
- * 在跑的 bot 进程产生双写竞争，故第一棒刻意不接。
+ * 【进程形态】写操作必须在持有该 bot registry/LIVE 会话的进程内执行：
+ *   - 单 bot inline `run`：daemon 进程内直接调 Orchestrator.adminExecute。
+ *   - 多 bot supervisor：经 IPC（admin/ipc.ts）转发给对应 bot 子进程执行。
+ *   - 独立预览进程（`web` 命令、daemon 未跑）：无 executeWrite → 写抛
+ *     {@link NotWiredYetError}（HTTP 501，只读预览）。
  *
- * 【实现注意】只读实现通过 useBotDir() 全局切换当前 bot 目录后再读文件——这只
- * 在**独立 web 预览进程**（`feishu-codex-bridge web`）里安全。第二棒在 daemon
- * 进程内集成时**绝不可**这样切（会把在跑 bot 进程的 paths 指到别的 bot），必须
- * 换成每 bot 进程只服务自身状态、或经 supervisor 聚合的实现。
+ * 【实现注意】所有跨 bot 读取走 {@link botPaths} 的**显式路径**（listProjectsIn /
+ * listSessionsIn / loadConfig(file)），绝不 useBotDir 全局切目录——daemon 进程内
+ * 切目录会把在跑 bot 的 paths 指到别的 bot（第一棒遗留的坑，本棒修掉）。
  */
 export interface AdminService {
-  /** 全部已注册 bot + 进程在跑状态（预览级探测：单实例锁文件 + signal 0）。 */
+  /** 全部已注册 bot + 进程在跑状态（daemon 内 = 真实 WS 状态；预览 = 锁文件探测）。 */
   listBots(): Promise<AdminBot[]>;
   /** 某 bot 的项目列表（含话题数等聚合字段），对齐 DM 📁 项目列表。 */
   listProjects(botId: string): Promise<AdminProject[]>;
   /** 单个项目详情；不存在返回 undefined。 */
   getProject(botId: string, name: string): Promise<AdminProject | undefined>;
-  /** 🧠 切换项目后端（写）。第一棒：抛 NotWiredYetError。 */
+  /** 🧠 切换项目后端（写）。与 DM dm.proj.backend.submit 同一套校验+落盘。 */
   switchBackend(botId: string, projectName: string, backendId: string): Promise<void>;
-  /** 🔐 设置权限档（管理员档/普通用户档/联网）（写）。第一棒：抛 NotWiredYetError。 */
+  /** 🔐 设置权限档（管理员档/普通用户档/联网）（写），含驱逐活跃会话的既有语义。 */
   setPermissionMode(
     botId: string,
     projectName: string,
     opts: { mode: PermissionMode; guestMode?: PermissionMode; network?: boolean },
   ): Promise<void>;
-  /** ✋ 免@ 开关（写）。第一棒：抛 NotWiredYetError。 */
+  /** ✋ 免@ 开关（写）。 */
   setNoMention(botId: string, projectName: string, on: boolean): Promise<void>;
-  /** 🗜️ 自动压缩开关（写）。第一棒：抛 NotWiredYetError。 */
+  /** 🗜️ 自动压缩开关（写），含驱逐活跃会话的既有语义。 */
   setAutoCompact(botId: string, projectName: string, on: boolean): Promise<void>;
   /** 🩺 对全部注册后端做环境体检（doctor 探测，绝不抛错）。 */
   doctorBackends(): Promise<AdminBackendStatus[]>;
@@ -77,11 +76,14 @@ export interface AdminService {
   tailLogs(opts?: { maxBytes?: number }): Promise<string>;
 }
 
-/** 写方法在第一棒（只读预览）里统一抛它；HTTP 层映射成 501。 */
+/** 只读预览（daemon 未跑 / 独立 `web` 进程）里写方法统一抛它；HTTP 层映射 501。 */
 export class NotWiredYetError extends Error {
   readonly code = 'NOT_WIRED_YET';
   constructor(action: string) {
-    super(`「${action}」尚未接线：写操作将在第二棒（daemon 进程内集成）开放，当前为只读预览。`);
+    super(
+      `「${action}」需要 daemon 在跑：当前是只读预览（直读本机文件）。` +
+        '请先 `feishu-codex-bridge run`（或 `start`）启动，再运行 `web` 自动跳到 daemon 的控制台执行写操作。',
+    );
     this.name = 'NotWiredYetError';
   }
 }
@@ -95,11 +97,22 @@ export interface AdminBot {
   active: boolean;
   /** bots.json 的 current（单 bot 代码路径的主 bot） */
   current: boolean;
-  /** 预览级探测：该 bot 的单实例锁被活进程持有 = bridge 在跑。
-   * 真实 WS 连接状态（connected/reconnecting）第二棒由 daemon 进程内上报。 */
+  /** bridge 进程在跑吗。daemon 进程内 = 本进程/子进程的真实状态；预览进程 =
+   * 单实例锁文件 + signal 0 探测。 */
   running: boolean;
   pid?: number;
   startedAt?: number;
+  /** 真实 WS 长连接状态（connected / connecting / reconnecting / …）。仅 daemon
+   * 进程内（本进程的 channel / 子进程 IPC 上报）可用；预览进程缺省。 */
+  connection?: string;
+}
+
+/** daemon 进程内的实时运行状态（注入 {@link AdminServiceDeps.liveStatus}）。 */
+export interface BotLiveStatus {
+  running: boolean;
+  pid?: number;
+  startedAt?: number;
+  connection?: string;
 }
 
 /** 项目快照——effective 值（缺省已按 registry 的单一事实源解析），UI 直接渲染。 */
@@ -149,36 +162,26 @@ export interface AdminBackendStatus {
   isDefault: boolean;
 }
 
-/**
- * 只读 AdminService —— 直读 ~/.feishu-codex-bridge 下的注册表/会话文件，复用
- * registry / session-store / bots 模块的导出（不自己解析 JSON）。不依赖 daemon
- * 在跑。所有「切 bot 目录 + 读」收进同一把进程内锁，防并发请求交错 useBotDir。
- */
-export function createReadonlyAdminService(): AdminService {
-  // 与 registry/session-store 同款的串行锁：useBotDir 是模块级全局态，
-  // 两个并发请求读不同 bot 时必须串行，否则 A 的读会落到 B 的目录。
-  let opChain: Promise<unknown> = Promise.resolve();
-  function withBotDir<T>(botId: string, fn: () => Promise<T>): Promise<T> {
-    const run = opChain.then(
-      () => {
-        useBotDir(botId);
-        return fn();
-      },
-      () => {
-        useBotDir(botId);
-        return fn();
-      },
-    );
-    opChain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
-  }
+/** daemon/预览两种进程形态的差异全部收进这两个注入点；读路径完全同源。 */
+export interface AdminServiceDeps {
+  /** 写执行器：botId + op → 完成或抛 AdminWriteError（校验拒绝）。
+   * 缺省 = 只读预览，写方法抛 {@link NotWiredYetError}（HTTP 501）。 */
+  executeWrite?: (botId: string, op: AdminWriteOp) => Promise<void>;
+  /** 实时运行状态（daemon 进程内：本进程 channel / 子进程 IPC）。返回 undefined
+   * 或缺省 → 回退锁文件探测（该 bot 不归本 daemon 管，如未激活的 bot）。 */
+  liveStatus?: (botId: string) => Promise<BotLiveStatus | undefined>;
+}
 
-  async function projectsWithCounts(): Promise<AdminProject[]> {
-    const projects = await registryListProjects();
-    const sessions = await storeListSessions();
+/**
+ * AdminService 的统一实现：读路径直读 ~/.feishu-codex-bridge/bots/<appId>/ 下的
+ * 注册表/会话文件（复用 registry / session-store / store 模块的显式路径导出，
+ * 不自己解析 JSON；不碰全局 currentBotDir）；写路径与实时状态由 deps 注入。
+ */
+export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
+  async function projectsWithCounts(botId: string): Promise<AdminProject[]> {
+    const files = botPaths(botId);
+    const projects = await listProjectsIn(files.projectsFile);
+    const sessions = await listSessionsIn(files.sessionsFile);
     const countByChat = new Map<string, number>();
     for (const s of sessions) {
       countByChat.set(s.chatId, (countByChat.get(s.chatId) ?? 0) + 1);
@@ -204,10 +207,11 @@ export function createReadonlyAdminService(): AdminService {
   }
 
   /** 单实例锁文件（processes.json）→「bridge 进程在跑吗」。损坏/缺失一律视为
-   * 未在跑（预览级探测，绝不抛错）。 */
-  async function readRunState(): Promise<{ running: boolean; pid?: number; startedAt?: number }> {
+   * 未在跑（预览级探测，绝不抛错）。daemon 进程内只用于「不归本 daemon 管」的
+   * bot（如未激活但被别的终端单独 run 起来的）。 */
+  async function lockFileRunState(botId: string): Promise<BotLiveStatus> {
     try {
-      const raw = await readFile(paths.processesFile, 'utf8');
+      const raw = await readFile(botPaths(botId).processesFile, 'utf8');
       const rec = JSON.parse(raw) as { pid?: number; startedAt?: number };
       if (typeof rec.pid === 'number' && isAlive(rec.pid)) {
         return { running: true, pid: rec.pid, startedAt: rec.startedAt };
@@ -218,13 +222,23 @@ export function createReadonlyAdminService(): AdminService {
     return { running: false };
   }
 
+  async function runState(botId: string): Promise<BotLiveStatus> {
+    const live = await deps.liveStatus?.(botId).catch(() => undefined);
+    return live ?? lockFileRunState(botId);
+  }
+
+  function executeWrite(botId: string, action: string, op: AdminWriteOp): Promise<void> {
+    if (!deps.executeWrite) throw new NotWiredYetError(action);
+    return deps.executeWrite(botId, op);
+  }
+
   return {
     async listBots(): Promise<AdminBot[]> {
       const reg = await loadBots();
       const configured = reg.bots.some((b) => b.active !== undefined);
       const out: AdminBot[] = [];
       for (const b of reg.bots) {
-        const run = await withBotDir(b.appId, readRunState);
+        const run = await runState(b.appId);
         out.push({
           name: b.name,
           appId: b.appId,
@@ -236,37 +250,44 @@ export function createReadonlyAdminService(): AdminService {
           running: run.running,
           pid: run.pid,
           startedAt: run.startedAt,
+          connection: run.connection,
         });
       }
       return out;
     },
 
     listProjects(botId: string): Promise<AdminProject[]> {
-      return withBotDir(botId, projectsWithCounts);
+      return projectsWithCounts(botId);
     },
 
-    getProject(botId: string, name: string): Promise<AdminProject | undefined> {
-      return withBotDir(botId, async () => {
-        const p = await getProjectByName(name);
-        if (!p) return undefined;
-        return (await projectsWithCounts()).find((x) => x.name === name);
+    async getProject(botId: string, name: string): Promise<AdminProject | undefined> {
+      return (await projectsWithCounts(botId)).find((x) => x.name === name);
+    },
+
+    async switchBackend(botId: string, projectName: string, backendId: string): Promise<void> {
+      await executeWrite(botId, '🧠 切换后端', { kind: 'switchBackend', project: projectName, backend: backendId });
+    },
+
+    async setPermissionMode(
+      botId: string,
+      projectName: string,
+      opts: { mode: PermissionMode; guestMode?: PermissionMode; network?: boolean },
+    ): Promise<void> {
+      await executeWrite(botId, '🔐 设置权限档', {
+        kind: 'setPermissionMode',
+        project: projectName,
+        mode: opts.mode,
+        guestMode: opts.guestMode,
+        network: opts.network,
       });
     },
 
-    async switchBackend(): Promise<void> {
-      throw new NotWiredYetError('🧠 切换后端');
+    async setNoMention(botId: string, projectName: string, on: boolean): Promise<void> {
+      await executeWrite(botId, '✋ 免@ 开关', { kind: 'setNoMention', project: projectName, on });
     },
 
-    async setPermissionMode(): Promise<void> {
-      throw new NotWiredYetError('🔐 设置权限档');
-    },
-
-    async setNoMention(): Promise<void> {
-      throw new NotWiredYetError('✋ 免@ 开关');
-    },
-
-    async setAutoCompact(): Promise<void> {
-      throw new NotWiredYetError('🗜️ 自动压缩开关');
+    async setAutoCompact(botId: string, projectName: string, on: boolean): Promise<void> {
+      await executeWrite(botId, '🗜️ 自动压缩开关', { kind: 'setAutoCompact', project: projectName, on });
     },
 
     async doctorBackends(): Promise<AdminBackendStatus[]> {
@@ -288,44 +309,46 @@ export function createReadonlyAdminService(): AdminService {
       );
     },
 
-    eventDiagnosis(botId: string): Promise<EventDiagnosis> {
-      return withBotDir(botId, async () => {
-        try {
-          const cfg = await loadConfig();
-          if (!isComplete(cfg)) return { state: 'unchecked', reason: '配置缺失（该 bot 尚未完成初始化）' };
-          const { app } = cfg.accounts;
-          const secret = await resolveAppSecret(cfg);
-          return await diagnoseEventSubscription(app.id, secret, app.tenant);
-        } catch (err) {
-          return { state: 'unchecked', reason: err instanceof Error ? err.message : String(err) };
-        }
-      });
+    async eventDiagnosis(botId: string): Promise<EventDiagnosis> {
+      try {
+        const cfg = await loadConfig(botPaths(botId).configFile);
+        if (!isComplete(cfg)) return { state: 'unchecked', reason: '配置缺失（该 bot 尚未完成初始化）' };
+        const { app } = cfg.accounts;
+        const secret = await resolveAppSecret(cfg);
+        return await diagnoseEventSubscription(app.id, secret, app.tenant);
+      } catch (err) {
+        return { state: 'unchecked', reason: err instanceof Error ? err.message : String(err) };
+      }
     },
 
-    listSessions(botId: string, projectName: string): Promise<AdminSession[]> {
-      return withBotDir(botId, async () => {
-        const p = await getProjectByName(projectName);
-        if (!p?.chatId) return [];
-        const sessions = await storeListSessions();
-        return sessions
-          .filter((s) => s.chatId === p.chatId)
-          .sort((a, b) => b.updatedAt - a.updatedAt)
-          .map((s) => ({
-            threadId: s.threadId,
-            chatId: s.chatId,
-            summary: s.summary,
-            backend: s.backend,
-            model: s.model,
-            createdAt: s.createdAt,
-            updatedAt: s.updatedAt,
-          }));
-      });
+    async listSessions(botId: string, projectName: string): Promise<AdminSession[]> {
+      const files = botPaths(botId);
+      const p = (await listProjectsIn(files.projectsFile)).find((x) => x.name === projectName);
+      if (!p?.chatId) return [];
+      const sessions = await listSessionsIn(files.sessionsFile);
+      return sessions
+        .filter((s) => s.chatId === p.chatId)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .map((s) => ({
+          threadId: s.threadId,
+          chatId: s.chatId,
+          summary: s.summary,
+          backend: s.backend,
+          model: s.model,
+          createdAt: s.createdAt,
+          updatedAt: s.updatedAt,
+        }));
     },
 
     tailLogs(opts?: { maxBytes?: number }): Promise<string> {
       return readRecentLogs({ maxBytes: opts?.maxBytes ?? 64 * 1024 });
     },
   };
+}
+
+/** 只读预览（独立 `web` 进程，daemon 未跑）：无写执行器、状态靠锁文件探测。 */
+export function createReadonlyAdminService(): AdminService {
+  return createAdminService();
 }
 
 function isAlive(pid: number): boolean {

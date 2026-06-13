@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { paths } from '../config/paths';
 import { bridgeVersion } from '../core/version';
 import { NotWiredYetError, type AdminService } from '../admin/service';
+import { AdminWriteError } from '../admin/ops';
 import { UI_HTML } from './ui';
 
 /**
@@ -18,14 +19,18 @@ import { UI_HTML } from './ui';
  *      302 去掉 URL 里的 token，防日志/历史记录泄漏长期凭据）。
  *   3. Host/Origin 校验防 DNS rebinding（只认 127.0.0.1 / localhost / [::1]）。
  *   4. 端点最小化：只读（state / diagnosis / logs / sessions）+「DM 卡片已有
- *      等价操作」的写入占位（backend / permission / no-mention / auto-compact，
- *      第一棒一律 501）。绝不暴露「执行命令」「读任意文件」类端点。
+ *      等价操作」的写入（backend / permission / no-mention / auto-compact）。
+ *      绝不暴露「执行命令」「读任意文件」类端点。
  *   5. 日志流只透传现有文件日志行（已是尾 6 位脱敏风格），token 绝不进日志。
  *
- * TODO(第二棒): daemon（run 进程）内嵌同一 createWebServer —— service 换成接住
- * 在跑 orchestrator/bridge 实例的实现（真实 WS 连接状态 + 写操作落盘并驱逐
- * 活跃会话），写路由的 501 即自动消失；DM dm.* 回调与这里共享该 AdminService。
+ * 进程形态（第二棒已接）：daemon（run/supervisor 进程）经 web/mount.ts 内嵌同一
+ * createWebServer——service 注入 executeWrite（进程内 Orchestrator.adminExecute /
+ * supervisor IPC 转发）+ liveStatus（真实 WS 状态），写路由真实生效；独立 `web`
+ * 预览进程无 executeWrite → 写仍 501（NotWiredYetError）。
  */
+
+/** 默认端口（设计文档 §3 方案 B 的示例端口）；被占用时 daemon 退临时端口。 */
+export const DEFAULT_WEB_PORT = 7866;
 export interface WebServerOptions {
   service: AdminService;
   /** 测试注入：日志目录（默认 ~/.feishu-codex-bridge/logs，与 core/logger 同址）。 */
@@ -141,8 +146,8 @@ export function createWebServer(opts: WebServerOptions): WebServer {
       return;
     }
 
-    // POST 写操作占位 —— 第一棒一律 501（NotWiredYetError → 501 映射）。
-    // TODO(第二棒): daemon 内 service 实现落地后，这些路由原样变成真实写入。
+    // POST 写操作 —— daemon 进程内为真实写入（共享 admin/ops.ts，与 DM 卡片同
+    // 源）；只读预览进程映射 501（NotWiredYetError），校验拒绝映射 409。
     const writeMatch = /^\/api\/project\/([^/]+)\/(backend|permission|no-mention|auto-compact)$/.exec(pathName);
     if (req.method === 'POST' && writeMatch) {
       const project = decodeURIComponent(writeMatch[1]!);
@@ -176,8 +181,14 @@ export function createWebServer(opts: WebServerOptions): WebServer {
         sendJson(res, 200, { ok: true });
       } catch (err) {
         if (err instanceof NotWiredYetError) {
-          // 占位响应：第二棒（daemon 进程内集成）接上真实现后自动变 200。
+          // 只读预览进程（daemon 未跑）：引导用户起 daemon 后从其控制台操作。
           sendJson(res, 501, { error: 'not_wired_yet', message: err.message });
+          return;
+        }
+        if (err instanceof AdminWriteError) {
+          // 校验拒绝（项目不存在 / 后端不可用 / 档位不支持 / bot 进程未在跑）：
+          // 中文原因原样上 body，UI toast 直接展示。
+          sendJson(res, 409, { error: 'write_rejected', message: err.message });
           return;
         }
         throw err;

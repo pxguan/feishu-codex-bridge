@@ -3,6 +3,10 @@ import { spawnProcess } from '../platform/spawn';
 import { SERVICE_ENV_FLAG } from '../service/win-startup';
 import { log } from '../core/logger';
 import type { BotEntry } from '../config/bots';
+import { createAdminIpcCaller, type AdminIpcCaller } from '../admin/ipc';
+import { AdminWriteError } from '../admin/ops';
+import { createAdminService } from '../admin/service';
+import { mountWebConsole } from '../web/mount';
 
 /**
  * Multi-bot supervisor. `run` delegates here when more than one bot is active
@@ -16,6 +20,11 @@ import type { BotEntry } from '../config/bots';
  *
  * Children inherit the supervisor's CLI entry (`process.argv[1]`) so this works
  * identically for a global install, npx, and a local `./bin` checkout.
+ *
+ * Web 控制台（第二棒）：supervisor 是多 bot 聚合点，全局控制台挂在这里（子进程
+ * 检测到 'ipc' stdio 就不再各自挂）。读路径直读各 bot 目录的文件快照；写操作与
+ * 实时连接状态经 IPC 转发给对应子进程——registry 的 withLock 是进程内锁、LIVE
+ * 会话驱逐只能在 bot 进程内做，supervisor 文件级直写既会丢更新也驱逐不了。
  */
 
 const BACKOFF_MIN_MS = 1_000;
@@ -31,7 +40,14 @@ interface Child {
   backoffMs: number;
   restartTimer?: NodeJS.Timeout;
   startedAt: number;
+  /** 管理面 IPC（写转发 + 实时状态查询）；子进程重启换新实例，旧在途请求由
+   * rejectAll 收尾，绝不悬挂 Web 请求。 */
+  ipc?: AdminIpcCaller;
 }
+
+/** 实时状态查询（{kind:'status'}）的短超时：/api/state 是 5s 轮询，不能被一个
+ * 假死子进程拖住整页——超时按 connection:'unknown' 渲染。 */
+const STATUS_IPC_TIMEOUT_MS = 2_000;
 
 export async function runSupervisor(bots: BotEntry[]): Promise<void> {
   const cliEntry = process.argv[1];
@@ -69,17 +85,29 @@ export async function runSupervisor(bots: BotEntry[]): Promise<void> {
 
   const spawnChild = (c: Child): void => {
     c.startedAt = Date.now();
+    // 'ipc' 通道：子进程据此识别自己被 supervisor 托管（不自己挂 Web 控制台），
+    // 并接收管理面写请求（admin/ipc.ts 协议）。
     const proc = spawnProcess(process.execPath, [cliEntry, 'run', '--bot', c.bot.appId], {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env: childEnv,
     });
     c.proc = proc;
+    const ipc = createAdminIpcCaller((msg) => {
+      // connected=false 才算通道关闭；send 返回 false 还可能只是背压（消息仍会
+      // 送达），不能据此误拒——真丢失由 caller 的超时兜底。
+      if (!proc.connected) throw new Error('IPC 通道已关闭');
+      proc.send(msg);
+    });
+    c.ipc = ipc;
+    proc.on('message', ipc.onMessage);
     log.info('supervisor', 'child-start', { bot: c.bot.name, appId: c.bot.appId, pid: proc.pid ?? null });
     prefixPipe(c.bot.name, proc.stdout, process.stdout);
     prefixPipe(c.bot.name, proc.stderr, process.stderr);
 
     proc.on('exit', (code, signal) => {
       c.proc = undefined;
+      c.ipc = undefined;
+      ipc.rejectAll(`机器人「${c.bot.name}」进程已退出（等待自动重启）`);
       if (shuttingDown) return;
       // Reset backoff if it had been healthy a while; otherwise grow it.
       const uptime = Date.now() - c.startedAt;
@@ -99,11 +127,49 @@ export async function runSupervisor(bots: BotEntry[]): Promise<void> {
 
   for (const c of children) spawnChild(c);
 
+  // ── 全局 Web 控制台（多 bot 聚合）─────────────────────────────────────────
+  // 读 = 各 bot 目录文件快照（显式路径，不切全局目录）；写 + 实时连接状态 =
+  // IPC 转发给对应子进程（崩溃重启窗口内明确拒绝，绝不静默丢写）。
+  const byAppId = (botId: string): Child | undefined => children.find((c) => c.bot.appId === botId);
+  const webConsole = await mountWebConsole(
+    createAdminService({
+      executeWrite: async (botId, op) => {
+        const c = byAppId(botId);
+        if (!c) throw new AdminWriteError(`机器人「${botId}」不在本次启动的活跃集里（先 \`bot use\` 勾选后重启）。`);
+        if (!c.proc || !c.ipc) throw new AdminWriteError(`机器人「${c.bot.name}」进程未在运行（崩溃重启中），稍后重试。`);
+        await c.ipc.call(op);
+      },
+      liveStatus: async (botId) => {
+        const c = byAppId(botId);
+        if (!c?.proc || !c.ipc) return undefined; // 不归本 supervisor 管 → 锁文件探测兜底
+        const r = (await c.ipc.call({ kind: 'status' }, STATUS_IPC_TIMEOUT_MS).catch(() => undefined)) as
+          | { connection?: string }
+          | undefined;
+        return {
+          running: true,
+          pid: c.proc.pid,
+          startedAt: c.startedAt,
+          connection: r?.connection ?? 'unknown',
+        };
+      },
+    }),
+  );
+  if (webConsole) {
+    if (process.stdout.isTTY) {
+      // 含 token 的 URL 只在前台 TTY 打印（后台 stdout 会落盘成日志，token 不进
+      // 日志——后台用 `web` 命令经 0600 发现文件跳转）。
+      console.log(`🌐 Web 控制台（聚合 ${bots.length} 个机器人）：${webConsole.url}\n`);
+    } else {
+      console.log(`🌐 Web 控制台已内嵌启动（127.0.0.1:${webConsole.port}）：运行 \`feishu-codex-bridge web\` 获取登录链接。`);
+    }
+  }
+
   await new Promise<void>((resolve) => {
     const stop = (sig: NodeJS.Signals): void => {
       if (shuttingDown) return;
       shuttingDown = true;
       console.log(`\n收到 ${sig}，正在关闭全部机器人…`);
+      void webConsole?.close().catch(() => undefined);
       for (const c of children) {
         if (c.restartTimer) clearTimeout(c.restartTimer);
         c.proc?.kill('SIGTERM');
