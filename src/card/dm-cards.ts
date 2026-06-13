@@ -73,11 +73,8 @@ export const DM = {
   // 🔐 权限：codex 沙箱档位（管理员档 + 普通用户档）+ 联网，做成下拉表单（选+提交）
   permission: 'dm.proj.perm',
   permissionSubmit: 'dm.proj.perm.submit',
-  // 🧠 后端：项目级 agent 后端选择（注册表动态列出）。backend = 打开/重新检测
-  // （两段式：检测中 → 检测结果卡），backendSubmit = 结果卡「切换」按钮单点直达
-  // （value.b 直接带目标后端 id，不再是下拉表单提交）
-  backend: 'dm.proj.backend',
-  backendSubmit: 'dm.proj.backend.submit',
+  // 🧠 后端 backend/backendSubmit 已移除：后端改为「创建时选定、运行时固定、不支持切换」，
+  // 新建卡选后端见 newProjectSubmit；项目设置卡只读展示。
 } as const;
 
 /** Action ids for the in-group settings card (@bot /settings). */
@@ -943,82 +940,10 @@ export interface BackendProbeRow {
   supportedModes?: readonly PermissionMode[];
 }
 
-/**
- * 🧠 后端检测中间态（DM「项目设置 → 🧠 后端」第一段）。点击后立即 patch 这张
- * 轻量卡（让用户瞬间看到反应），后台并行 doctor 全部注册后端，完成后原地刷成
- * {@link buildBackendPickerCard}。
- */
-export function buildBackendDetectingCard(p: Pick<Project, 'name'>): CardObject {
-  return card(
-    [
-      md(`**🧠 后端** · ${p.name}`),
-      md('🔍 正在检测本机可用后端…'),
-      note('对每个已注册后端做环境体检（最多约 3 秒），完成后这张卡会自动刷新。'),
-    ],
-    { header: { title: '🧠 后端', template: 'turquoise' } },
-  );
-}
-
-/**
- * 🧠 后端检测结果卡（第二段）：每个注册后端一行，三态渲染——
- *   可用 → ✅ + 一个「切换」按钮单点直达（value 直接带目标后端 id `b`，落
- *         {@link DM.backendSubmit} 复用既有校验+写盘逻辑）；
- *   当前 → 标注「✓ 使用中」，无按钮；
- *   不可用（探测失败/超时）→ ❌ 灰字附 doctor hint，无按钮；
- *   可用但权限档不支持（如 claude 系仅 full）→ 灰字提前告知「需完全访问档」，
- *         无按钮（提前告知而非点了才拒；backendSubmit 的硬校验不变）。
- * 纯按钮不锁卡，可反复 🔄 重新检测 / 切换。`rows` 由调用方按注册表动态探测——
- * 绝不硬编码后端列表（新后端注册即自动出现）。
- */
-export function buildBackendPickerCard(
-  p: Pick<Project, 'name' | 'backend' | 'mode' | 'guestMode'>,
-  rows: BackendProbeRow[],
-  error?: string,
-): CardObject {
-  const current = p.backend ?? DEFAULT_BACKEND_ID;
-  const tiers = [...new Set([effectiveMode(p), effectiveGuestMode(p)])];
-  const elements: CardElement[] = [];
-  if (error) elements.push(md(`❌ **切换失败**：${error}`));
-  elements.push(
-    md(`**🧠 后端** · ${p.name}`),
-    note('已检测本机各后端的可用状态，点「切换」单点直达。**切换只对新话题生效；已有话题会话仍走原后端**（按会话记录路由）。'),
-    hr(),
-  );
-  for (const row of rows) {
-    const ok = row.probe?.ok === true;
-    const ver = row.probe?.version ? ` ${row.probe.version}` : '';
-    const def = row.id === DEFAULT_BACKEND_ID ? '（默认）' : '';
-    const label = `${ok ? '✅' : '❌'} **${row.name}**${ver}${def}`;
-    if (row.id === current) {
-      elements.push(md(`${label} · ✓ 使用中`));
-      if (!ok) elements.push(note(row.probe?.hint ?? '环境探测失败（未安装、未登录或探测超时）'));
-      continue;
-    }
-    if (!ok) {
-      elements.push(md(label), note(row.probe?.hint ?? '环境探测失败（未安装、未登录或探测超时）'));
-      continue;
-    }
-    const unsupported = row.supportedModes ? tiers.filter((t) => !row.supportedModes!.includes(t)) : [];
-    if (unsupported.length > 0) {
-      elements.push(
-        md(label),
-        note(
-          `需 ${row.supportedModes!.map(tierLabel).join(' / ')} 权限档（本项目当前 ${tiers.map(tierLabel).join(' / ')}）—— 先在「🔐 权限」调整后才能切换`,
-        ),
-      );
-      continue;
-    }
-    elements.push(actions([md(label), button('切换', { a: DM.backendSubmit, n: p.name, b: row.id }, 'primary')]));
-  }
-  elements.push(
-    hr(),
-    actions([
-      button('🔄 重新检测', { a: DM.backend, n: p.name }),
-      button('⬅️ 返回设置', { a: DM.projectSettings, n: p.name }),
-    ]),
-  );
-  return card(elements, { header: { title: '🧠 后端', template: 'blue' } });
-}
+// 〔已移除〕buildBackendDetectingCard / buildBackendPickerCard —— 项目后端「运行时切换」
+// 卡。产品改为「创建时选定、运行时固定、不支持切换」（阶段4/5）后，这两张卡及其
+// DM.backend/backendSubmit 入口已废弃删除；后端只读展示见 buildProjectSettingsCard，
+// 创建时选后端见 buildNewProjectFormCard。BackendProbeRow 类型保留（probeBackends 仍用）。
 
 /**
  * 项目设置卡（DM「📁 项目列表 / 建项目完成卡 → ⚙️ 设置」）。可扩展容器：当前放
