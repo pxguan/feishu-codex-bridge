@@ -533,6 +533,60 @@ export const UI_HTML = `<!doctype html>
   .bk-meta { color: var(--text-3); font-size: 12.5px; margin-top: 3px; }
   .bk-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .ver { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  /* ── 后端 Agent 页（Linear 风：表格列表 + 详情）─────────────────────────────── */
+  .bka-tbl { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--panel); }
+  .bka-th, .bka-row { display: grid; grid-template-columns: minmax(0,2.3fr) 1.1fr 1.2fr 1.1fr 44px; align-items: center; }
+  .bka-th { padding: 9px 16px; border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 11.5px; font-weight: 600; }
+  .bka-row { padding: 13px 16px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .bka-row:last-child { border-bottom: 0; }
+  .bka-row:hover { background: var(--hover); }
+  .bka-ag { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .bka-ic { width: 30px; height: 30px; border-radius: 8px; flex: none; display: flex; align-items: center; justify-content: center; background: var(--panel-2); border: 1px solid var(--border); font-size: 15px; }
+  .bka-nm { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .bka-nm .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bka-sub { color: var(--text-3); font-size: 12px; margin-top: 1px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .pill .dot.green { background: var(--green); box-shadow: 0 0 0 3px var(--green-tint); }
+  .pill .dot.gray { background: #54545c; }
+  .bka-proj { display: flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 12.5px; }
+  .bka-av { display: flex; }
+  .bka-av span { width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid var(--panel); background: var(--panel-2); margin-left: -6px; display: flex; align-items: center; justify-content: center; font-size: 9px; color: var(--text-2); }
+  .bka-av span:first-child { margin-left: 0; }
+  .bka-verm { font: 12px/1.4 var(--mono); color: var(--text-2); }
+  .bka-verm small { color: var(--text-3); }
+  .bka-rowact { display: flex; justify-content: flex-end; position: relative; }
+  .iconbtn { border: 1px solid transparent; background: transparent; color: var(--text-2); cursor: pointer; border-radius: 7px; width: 28px; height: 26px; display: inline-flex; align-items: center; justify-content: center; }
+  .iconbtn:hover { background: var(--hover); color: var(--text); }
+  .iconbtn svg { width: 15px; height: 15px; }
+  .menu { position: absolute; top: 28px; right: 0; background: #1c1c21; border: 1px solid var(--border-2); border-radius: 10px; padding: 5px; min-width: 152px; box-shadow: var(--shadow-md); z-index: 25; display: none; }
+  .menu.open { display: block; }
+  .mi { display: flex; align-items: center; gap: 9px; padding: 7px 9px; border-radius: 7px; font-size: 12.5px; color: var(--text); cursor: pointer; }
+  .mi svg { width: 14px; height: 14px; color: var(--text-2); }
+  .mi:hover { background: var(--hover); }
+  .mi.danger { color: var(--red); } .mi.danger svg { color: var(--red); }
+  .mi.disabled { color: var(--text-3); cursor: not-allowed; } .mi.disabled:hover { background: transparent; }
+  .bka-crumb { display: flex; align-items: center; gap: 8px; color: var(--text-2); font: 13px var(--mono); margin-bottom: 16px; }
+  .bka-crumb a { color: var(--text-2); text-decoration: none; cursor: pointer; } .bka-crumb a:hover { color: var(--text); }
+  .bka-crumb .sep { color: var(--text-3); }
+  .bka-dgrid { display: grid; grid-template-columns: minmax(0,1fr) 290px; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .bka-dgrid { grid-template-columns: 1fr; } }
+  .bka-dhead { display: flex; align-items: center; gap: 13px; }
+  .bka-dhead .ic { width: 42px; height: 42px; border-radius: 11px; background: var(--panel-2); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 21px; flex: none; }
+  .bka-dhead h2 { font-size: 17px; margin: 0; font-weight: 650; display: flex; align-items: center; gap: 10px; }
+  .bka-dhead .dsub { color: var(--text-3); font-size: 12.5px; margin-top: 2px; }
+  .bka-meta { display: grid; grid-template-columns: repeat(4,1fr); gap: 1px; margin-top: 16px; background: var(--border); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .bka-meta > div { background: var(--panel); padding: 12px 14px; }
+  .bka-meta .k { font-size: 11px; color: var(--text-3); margin-bottom: 5px; }
+  .bka-meta .v { font-size: 13px; font-weight: 550; }
+  .bka-meta .v.mono { font-family: var(--mono); font-weight: 500; font-size: 12.5px; }
+  .bka-pr { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--border); }
+  .bka-pr:last-child { border-bottom: 0; }
+  .bka-pic { width: 28px; height: 28px; border-radius: 7px; background: var(--panel-2); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; flex: none; color: var(--text-2); }
+  .bka-kv { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; font-size: 12.5px; border-bottom: 1px solid var(--border); }
+  .bka-kv:last-of-type { border-bottom: 0; }
+  .bka-kv .k { color: var(--text-3); }
+  .bka-path { font: 11.5px var(--mono); color: var(--text-2); word-break: break-all; background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; padding: 7px 9px; margin-top: 8px; }
   #logbox .hl { color: #79c0ff; }
   #logbox .warn { color: #e3b341; }
   #logbox .err { color: #ff7b72; }
@@ -705,6 +759,7 @@ ${UI_PURE_JS}
   var catalog = null;        // /api/backends 缓存（后端管理卡 + 项目 picker 复用）
   var drawerProject = null;  // 抽屉里打开的项目名
   var diagBotId = null;      // diag 属于哪个 bot（防串台）
+  var bkDetailId = null;     // 后端 Agent 详情视图当前展开的后端 id（null=列表）
 
   // ── 动画层（GSAP 渐进增强）─────────────────────────────────────────────────
   // 没加载到 GSAP，或用户在系统里开了「减少动态效果」(prefers-reduced-motion) → fx.on=false，
@@ -781,6 +836,10 @@ ${UI_PURE_JS}
     zap: '<path d="M13 3L5 13h6l-1 8 8-10h-6l1-8z"/>',
     shield: '<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z"/>',
     rocket: '<path d="M12 3c3 1.5 5 4.5 5 8 0 2-.7 3.5-1.5 4.7L12 18l-3.5-2.3C7.7 14.5 7 13 7 11c0-3.5 2-6.5 5-8z"/><circle cx="12" cy="10" r="1.6"/><path d="M9 18l-2 3M15 18l2 3"/>',
+    download: '<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"/>',
+    dots: '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>',
+    refresh: '<path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>',
+    trash: '<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>',
   };
   function icSvg(name) {
     return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[name] || '') + '</svg>';
@@ -1012,7 +1071,7 @@ ${UI_PURE_JS}
 
   // hash 路由切换：切页必清上一个 bot 的 diag（防串台），关抽屉与移动端侧栏。
   function go(route) {
-    diag = null; diagBotId = null;
+    diag = null; diagBotId = null; bkDetailId = null;
     closeDrawer(); closeSidebar();
     if (route.tab === 'bot') location.hash = '#bot/' + encodeURIComponent(route.botId);
     else if (route.tab === 'overview' || route.tab === 'backends' || route.tab === 'doctor' || route.tab === 'logs') location.hash = '#' + route.tab;
@@ -1193,12 +1252,263 @@ ${UI_PURE_JS}
   //  系统分页：后端管理 / 宿主机体检 / 实时日志
   // ════════════════════════════════════════════════════════════════════════════
   function renderBackendsPage(root) {
-    var card = el('div', 'card');
-    card.appendChild(el('div', 'note', '装哪个后端就能用哪个 agent。下载到本机用户目录（零 sudo），可随时更新或卸载；切换由各项目/DM 卡片选择。'));
-    var body = el('div'); body.style.marginTop = '6px';
-    card.appendChild(body);
-    root.appendChild(card);
-    renderBackendManager(body);
+    if (!catalog) {
+      root.appendChild(el('div', 'note', '加载中…'));
+      loadCatalog().then(function (c) { if (c && parseRoute(location.hash).tab === 'backends') renderRoute(); });
+      return;
+    }
+    if (bkDetailId) {
+      var ent = catalogEntryById(bkDetailId);
+      if (ent) { renderBackendDetail(root, ent); return; }
+      bkDetailId = null; // 找不到（已卸载等）→ 退回列表
+    }
+    renderBackendList(root);
+  }
+  function catalogEntryById(id) {
+    if (!catalog || !catalog.entries) return null;
+    for (var i = 0; i < catalog.entries.length; i++) if (catalog.entries[i].id === id) return catalog.entries[i];
+    return null;
+  }
+  function bkFamilyIcon(family) { return family === 'codex' ? '⚡' : family === 'claude' ? '✳️' : '🧩'; }
+  // 该后端被哪些项目关联（项目在创建时选定后端，运行时固定）。从 /api/state 派生。
+  function projectsForBackend(id) {
+    var out = [];
+    var bots = (state && state.bots) || [];
+    bots.forEach(function (b) {
+      (b.projects || []).forEach(function (p) {
+        if (p.backend === id) out.push({ name: p.name, kind: p.kind, mode: p.mode, botName: b.botName || b.name, sessions: p.sessionCount });
+      });
+    });
+    return out;
+  }
+
+  // ── 后端 Agent 列表（Linear 表格：后端 / 状态 / 关联项目 / 版本·体积 / ⋯）─────────
+  function renderBackendList(root) {
+    var entries = catalog.entries || [];
+    var head = el('div', 'ph');
+    var hwrap = el('div'); hwrap.style.cssText = 'display:flex;align-items:center;gap:10px;width:100%';
+    var h1 = el('h1', null, '后端 Agent '); h1.style.cssText = 'font-size:17px;font-weight:650;margin:0';
+    h1.appendChild(el('span', null, String(entries.length))).style.cssText = 'color:var(--text-3);font-weight:500;margin-left:4px';
+    hwrap.appendChild(h1);
+    var sp = el('div'); sp.style.flex = '1'; hwrap.appendChild(sp);
+    var chk = el('button', 'btn sm', '检查更新'); chk.onclick = function () { checkAllUpdates(chk); };
+    hwrap.appendChild(chk);
+    head.appendChild(hwrap);
+    root.appendChild(head);
+    root.appendChild(el('p', 'pdesc', '每个后端 Agent 是一种编码引擎；下载到本机用户目录（零 sudo）。新建项目时选定后端，之后固定不变。默认仅内置 Codex App Server，其余按需下载。'))
+      .style.cssText = 'color:var(--text-2);font-size:13px;margin:2px 0 18px';
+
+    var tbl = el('div', 'bka-tbl');
+    var th = el('div', 'bka-th');
+    ['后端 Agent', '状态', '关联项目', '版本 · 体积', ''].forEach(function (t) { th.appendChild(el('div', null, t)); });
+    tbl.appendChild(th);
+    entries.forEach(function (e) { tbl.appendChild(renderBackendRow(e)); });
+    root.appendChild(tbl);
+  }
+
+  function renderBackendRow(e) {
+    var tri = depTriState(e);
+    var installed = e.depState === 'installed';
+    var row = el('div', 'bka-row');
+    row.onclick = function () { openBackendDetail(e.id); };
+
+    // 后端名 + 家族
+    var agc = el('div', 'bka-ag');
+    var icon = el('div', 'bka-ic', bkFamilyIcon(e.agentFamily)); if (!installed) icon.style.opacity = '.55';
+    agc.appendChild(icon);
+    var nmwrap = el('div'); nmwrap.style.minWidth = '0';
+    var nm = el('div', 'bka-nm');
+    var nmT = el('span', 't', e.displayName); if (!installed) nmT.style.color = 'var(--text-2)';
+    nm.appendChild(nmT);
+    if (e.isDefault) nm.appendChild(el('span', 'tag blue', '内置'));
+    nmwrap.appendChild(nm);
+    nmwrap.appendChild(el('div', 'bka-sub', familyName(e.agentFamily) + ' · ' + (e.access || '')));
+    agc.appendChild(nmwrap);
+    row.appendChild(agc);
+
+    // 状态
+    var stwrap = el('div');
+    var pill = el('span', 'pill');
+    if (installed) { pill.appendChild(el('span', 'dot green')); pill.appendChild(el('span', null, e.isDefault ? '已装 · 在线' : '已下载')); }
+    else { pill.appendChild(el('span', 'dot gray')); var u = el('span', null, '未下载'); u.style.color = 'var(--text-3)'; pill.appendChild(u); }
+    stwrap.appendChild(pill);
+    row.appendChild(stwrap);
+
+    // 关联项目
+    var pj = projectsForBackend(e.id);
+    var pjwrap = el('div');
+    if (pj.length) {
+      var pc = el('div', 'bka-proj');
+      var av = el('div', 'bka-av');
+      pj.slice(0, 3).forEach(function (p) { av.appendChild(el('span', null, (p.name || '·').slice(0, 1))); });
+      pc.appendChild(av);
+      pc.appendChild(el('span', null, pj.length + ' 个项目'));
+      pjwrap.appendChild(pc);
+    } else { var dash = el('span', null, '—'); dash.style.color = 'var(--text-3)'; pjwrap.appendChild(dash); }
+    row.appendChild(pjwrap);
+
+    // 版本 · 体积
+    var verwrap = el('div', 'bka-verm');
+    var shownVer = e.installedVersion || (installed ? e.version : '');
+    var vtxt = '';
+    if (shownVer) vtxt = /^\\d/.test(shownVer) ? 'v' + shownVer : shownVer;
+    verwrap.appendChild(document.createTextNode(vtxt || ''));
+    if (e.approxSizeMB) verwrap.appendChild(el('small', null, (vtxt ? ' · ' : '') + (installed ? '' : '约 ') + e.approxSizeMB + 'M'));
+    else if (e.isDefault) verwrap.appendChild(el('small', null, ' · 内置'));
+    row.appendChild(verwrap);
+
+    // 操作
+    var act = el('div', 'bka-rowact');
+    act.onclick = function (ev) { ev.stopPropagation(); };
+    if (tri.action === 'download') {
+      var dl = el('button', 'iconbtn'); dl.title = '下载'; dl.innerHTML = icSvg('download');
+      dl.onclick = function () { openBackendDetail(e.id); };
+      act.appendChild(dl);
+    } else if (installed) {
+      var mb = el('button', 'iconbtn'); mb.innerHTML = icSvg('dots');
+      var menu = el('div', 'menu');
+      var miU = el('div', 'mi'); miU.innerHTML = icSvg('refresh') + '<span>检查更新</span>';
+      miU.onclick = function () { closeAllMenus(); openBackendDetail(e.id); };
+      menu.appendChild(miU);
+      if (e.canUninstall) {
+        var miD = el('div', 'mi danger'); miD.innerHTML = icSvg('trash') + '<span>删除</span>';
+        miD.onclick = function () { closeAllMenus(); askUninstallBackend(e); };
+        menu.appendChild(miD);
+      } else {
+        var miX = el('div', 'mi disabled'); miX.innerHTML = icSvg('trash') + '<span>删除（内置）</span>';
+        menu.appendChild(miX);
+      }
+      mb.onclick = function () { var open = menu.classList.contains('open'); closeAllMenus(); if (!open) menu.classList.add('open'); };
+      act.appendChild(mb); act.appendChild(menu);
+    }
+    row.appendChild(act);
+    return row;
+  }
+  function closeAllMenus() { document.querySelectorAll('.menu.open').forEach(function (m) { m.classList.remove('open'); }); }
+
+  function openBackendDetail(id) { bkDetailId = id; document.querySelector('.content').scrollTop = 0; renderRoute(); }
+  function backBackendList() { bkDetailId = null; renderRoute(); }
+
+  // ── 后端 Agent 详情：头部 + 元信息 + 关联项目 + 右栏诊断/操作 ────────────────────
+  function renderBackendDetail(root, e) {
+    var tri = depTriState(e);
+    var installed = e.depState === 'installed';
+    var crumb = el('div', 'bka-crumb');
+    var back = el('a', null, '← 全部后端 Agent'); back.onclick = backBackendList;
+    crumb.appendChild(back);
+    crumb.appendChild(el('span', 'sep', '/'));
+    crumb.appendChild(el('span', null, e.displayName));
+    root.appendChild(crumb);
+
+    var grid = el('div', 'bka-dgrid');
+    var left = el('div'); var right = el('div');
+
+    // 头部卡
+    var hcard = el('div', 'card');
+    var dh = el('div', 'bka-dhead');
+    var ic = el('div', 'ic', bkFamilyIcon(e.agentFamily)); if (!installed) ic.style.opacity = '.55';
+    dh.appendChild(ic);
+    var htxt = el('div'); htxt.style.flex = '1';
+    var h2 = el('h2', null, e.displayName);
+    var sp2 = el('span', 'pill');
+    if (installed) { sp2.appendChild(el('span', 'dot green')); var on = el('span', null, '在线'); on.style.color = 'var(--green)'; sp2.appendChild(on); }
+    else { sp2.appendChild(el('span', 'dot gray')); var off = el('span', null, '未下载'); off.style.color = 'var(--text-3)'; sp2.appendChild(off); }
+    h2.appendChild(sp2);
+    htxt.appendChild(h2);
+    htxt.appendChild(el('div', 'dsub', (e.isDefault ? '内置后端，随桥打包' : (installed ? '已下载到用户私装目录' : '尚未下载')) + (e.blurb ? ' · ' + e.blurb : '')));
+    dh.appendChild(htxt);
+    hcard.appendChild(dh);
+    // 元信息四宫格
+    var meta = el('div', 'bka-meta');
+    function mcell(k, v, mono) { var c = el('div'); c.appendChild(el('div', 'k', k)); c.appendChild(el('div', 'v' + (mono ? ' mono' : ''), v)); return c; }
+    var shownVer = e.installedVersion || (installed ? e.version : '') || '—';
+    meta.appendChild(mcell('家族', familyName(e.agentFamily)));
+    meta.appendChild(mcell('安装方式', e.isDefault ? '内置（随桥）' : (installed ? '按需下载' : '未下载')));
+    meta.appendChild(mcell('版本', /^\\d/.test(shownVer) ? 'v' + shownVer : shownVer, true));
+    meta.appendChild(mcell('体积', e.approxSizeMB ? (installed ? '约 ' : '约 ') + e.approxSizeMB + 'M' : '内置', true));
+    hcard.appendChild(meta);
+    left.appendChild(hcard);
+
+    // 关联项目卡
+    var pj = projectsForBackend(e.id);
+    var pcard = el('div', 'card');
+    var ph = el('div'); ph.style.cssText = 'font-size:13px;font-weight:600;margin-bottom:3px';
+    ph.appendChild(document.createTextNode('关联项目 '));
+    ph.appendChild(el('span', null, '· ' + pj.length)).style.color = 'var(--text-3)';
+    pcard.appendChild(ph);
+    pcard.appendChild(el('div', 'note', '这些项目在创建时选定了该后端，运行时固定使用它（不支持中途切换后端）。'))
+      .style.cssText = 'color:var(--text-3);font-size:12px;margin-bottom:10px';
+    if (pj.length) {
+      pj.forEach(function (p) {
+        var pr = el('div', 'bka-pr');
+        var pic = el('div', 'bka-pic'); pic.innerHTML = icSvg('folder'); pr.appendChild(pic);
+        var pt = el('div'); pt.style.minWidth = '0';
+        pt.appendChild(el('div', null, p.name)).style.cssText = 'font-weight:550;font-size:13px';
+        pt.appendChild(el('div', 'note', kindLabel(p.kind) + ' · ' + p.botName)).style.fontSize = '11.5px';
+        pr.appendChild(pt);
+        var psp = el('div'); psp.style.flex = '1'; pr.appendChild(psp);
+        pr.appendChild(el('span', 'tag ' + (p.mode === 'full' ? 'orange' : p.mode === 'write' ? 'green' : ''), tierLabel(p.mode)));
+        var sc = el('span', 'note', (p.sessions || 0) + ' 话题'); sc.style.color = 'var(--text-3)'; pr.appendChild(sc);
+        pcard.appendChild(pr);
+      });
+    } else {
+      pcard.appendChild(el('div', 'note', installed ? '暂无项目使用。新建项目时可选用它。' : '未下载，暂无项目。下载后即可在「新建项目」时选用。'))
+        .style.cssText = 'color:var(--text-3);font-size:12.5px;padding:6px 0';
+    }
+    left.appendChild(pcard);
+
+    // 右栏：诊断
+    var diagCard = el('div', 'card');
+    diagCard.appendChild(el('div', 'note', '诊断')).style.cssText = 'font-size:12px;color:var(--text-3);font-weight:600;margin-bottom:8px';
+    function kv(k, v, color) { var r = el('div', 'bka-kv'); r.appendChild(el('span', 'k', k)); var vv = el('span', 'v', v); if (color) vv.style.color = color; r.appendChild(vv); return r; }
+    diagCard.appendChild(kv('可用性', installed ? '✓ 可用' : '未下载', installed ? 'var(--green)' : 'var(--text-3)'));
+    diagCard.appendChild(kv('家族', familyName(e.agentFamily)));
+    diagCard.appendChild(kv('安装方式', e.isDefault ? '内置（不可删）' : (installed ? '用户私装目录' : '未下载')));
+    if (e.hint && !installed) diagCard.appendChild(el('div', 'bka-path', e.hint));
+    right.appendChild(diagCard);
+
+    // 右栏：操作（下载 / 更新 / 删除）
+    var opCard = el('div', 'card');
+    opCard.appendChild(el('div', 'note', '操作')).style.cssText = 'font-size:12px;color:var(--text-3);font-weight:600;margin-bottom:10px';
+    var opBox = el('div'); opCard.appendChild(opBox);
+    renderBackendOps(opBox, e, tri);
+    right.appendChild(opCard);
+
+    grid.appendChild(left); grid.appendChild(right);
+    root.appendChild(grid);
+  }
+
+  // 详情右栏的操作区：未下载→下载；已装→更新 + 删除（内置不可删则禁用）。进度就地展示。
+  function renderBackendOps(box, e, tri) {
+    box.textContent = '';
+    if (tri.action === 'download') {
+      var dl = el('button', 'btn primary'); dl.style.cssText = 'width:100%;justify-content:center';
+      dl.textContent = '⬇ 下载' + (e.approxSizeMB ? '（约 ' + e.approxSizeMB + 'M）' : '');
+      dl.onclick = function () { startBackendInstall(e, box, dl, 'install'); };
+      box.appendChild(dl);
+      if (e.hint) box.appendChild(el('div', 'note', '装法：' + e.hint)).style.cssText = 'margin-top:8px;font-size:12px';
+      return;
+    }
+    if (e.depState === 'installed') {
+      var upd = el('button', 'btn'); upd.style.cssText = 'width:100%;justify-content:center'; upd.textContent = '检查更新';
+      upd.onclick = function () { checkBackendUpdate(e, box, upd); };
+      box.appendChild(upd);
+      var gap = el('div'); gap.style.height = '8px'; box.appendChild(gap);
+      if (e.canUninstall) {
+        var rm = el('button', 'btn danger'); rm.style.cssText = 'width:100%;justify-content:center;border:1px solid var(--border-2)'; rm.textContent = '删除后端';
+        rm.onclick = function () { askUninstallBackend(e); };
+        box.appendChild(rm);
+      } else {
+        var dis = el('button', 'btn disabled'); dis.style.cssText = 'width:100%;justify-content:center'; dis.disabled = true; dis.textContent = '内置 · 不可删除';
+        box.appendChild(dis);
+      }
+    }
+  }
+
+  function checkAllUpdates(btn) {
+    btn.disabled = true; btn.className = 'btn sm disabled'; btn.textContent = '查询中…';
+    toast('正在检查各后端最新版本…');
+    setTimeout(function () { btn.disabled = false; btn.className = 'btn sm'; btn.textContent = '检查更新'; }, 1500);
   }
   function renderDoctorPage(root) {
     var card = el('div', 'card');
@@ -1389,59 +1699,6 @@ ${UI_PURE_JS}
   function refreshBackends() {
     loadCatalog().then(function () { if (parseRoute(location.hash).tab === 'backends' || parseRoute(location.hash).tab === 'overview') renderRoute(); });
   }
-  function renderBackendManager(box) {
-    box.textContent = '';
-    if (!catalog) {
-      box.appendChild(el('div', 'note', '加载中…'));
-      loadCatalog().then(function (c) { if (c && parseRoute(location.hash).tab === 'backends') renderBackendManager(box); });
-      return;
-    }
-    groupBackends(catalog.entries).forEach(function (grp) {
-      var gh = el('div', null, familyName(grp.family));
-      gh.style.cssText = 'margin:16px 0 2px;font-size:12px;font-weight:600;letter-spacing:.4px;color:var(--text-3);text-transform:uppercase';
-      box.appendChild(gh);
-      grp.entries.forEach(function (e) { box.appendChild(renderBackendManagerRow(e)); });
-    });
-  }
-
-  function renderBackendManagerRow(e) {
-    var item = el('div', 'bk-item');
-    item.appendChild(el('div', 'bk-ic', e.agentFamily === 'codex' ? '⚡' : e.agentFamily === 'claude' ? '◆' : '🧩'));
-    var main = el('div', 'bk-main');
-    var tri = depTriState(e);
-    var name = el('div', 'bk-name');
-    name.appendChild(document.createTextNode(e.displayName));
-    name.appendChild(el('span', tri.state === 'installed' ? 'tag green' : tri.state === 'downloadable' ? 'tag blue' : 'tag orange', tri.label));
-    if (e.isDefault) name.appendChild(el('span', 'tag', '默认'));
-    main.appendChild(name);
-    var bits = [e.access];
-    var shownVer = e.installedVersion || e.version;
-    // version 串可能已含名字（codex 的 "codex-cli 0.139.0"）→ 只对纯版本号补 "v" 前缀。
-    if (shownVer) bits.push(/^\\d/.test(shownVer) ? 'v' + shownVer : shownVer);
-    if (e.approxSizeMB) bits.push('约 ' + e.approxSizeMB + 'M');
-    var meta = el('div', 'bk-meta', bits.join(' · '));
-    main.appendChild(meta);
-    if (e.blurb) main.appendChild(el('div', 'note', e.blurb));
-    if (tri.action === 'manual' && e.hint) main.appendChild(el('div', 'note', '装法：' + e.hint));
-    item.appendChild(main);
-
-    var actions = el('div', 'bk-actions');
-    item.appendChild(actions);
-    if (tri.action === 'download') {
-      var dl = el('button', 'btn primary sm', '⬇️ 下载' + (e.approxSizeMB ? '（约 ' + e.approxSizeMB + 'M）' : ''));
-      dl.onclick = function () { startBackendInstall(e, item, dl, 'install'); };
-      actions.appendChild(dl);
-    } else if (e.depState === 'installed' && e.canUninstall) {
-      var upd = el('button', 'btn sm', '🔄 检查更新');
-      upd.onclick = function () { checkBackendUpdate(e, item, upd); };
-      actions.appendChild(upd);
-      var rm = el('button', 'btn danger sm', '🗑️ 卸载');
-      rm.onclick = function () { askUninstallBackend(e); };
-      actions.appendChild(rm);
-    }
-    return item;
-  }
-
   // 「检查更新」：GET /version → 有新版则把按钮变成「更新到 vX」（点了走 update SSE）。
   function checkBackendUpdate(e, item, btn) {
     btn.disabled = true; btn.className = 'btn sm disabled'; btn.textContent = '🔍 查询中…';
@@ -2304,6 +2561,8 @@ ${UI_PURE_JS}
   $('confirmMask').onclick = function (e) { if (e.target === $('confirmMask')) $('confirmMask').classList.remove('open'); };
   var hb = $('hamburger'); if (hb) hb.onclick = openSidebar;
   var scrim = $('sideScrim'); if (scrim) scrim.onclick = closeSidebar;
+  // 点击空白处关闭后端 Agent 行内 ⋯ 菜单（菜单按钮所在的 .bka-rowact 已 stopPropagation）。
+  document.addEventListener('click', function (e) { if (!e.target.closest || !e.target.closest('.bka-rowact')) closeAllMenus(); });
   startLogStream();
   loadCatalog();
   loadState();
