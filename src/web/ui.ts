@@ -325,7 +325,7 @@ export const UI_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="/vendor/logo.png">
-<title>Codex Bridge 管理台</title>
+<title>Feishu Bridge 管理台</title>
 <style>
   :root {
     /* Linear/Cursor 风：近黑底 + 极细描边 + 靛蓝点睛 + 绿点在线 + 克制小圆角。 */
@@ -713,8 +713,8 @@ export const UI_HTML = `<!doctype html>
   <!-- 左侧深色导航栏：品牌 + 分组导航（概览 / 机器人 / 系统）+ 底部版本与在线态 -->
   <aside class="sidebar" id="sidebar">
     <div class="side-brand">
-      <span class="side-logo"><img src="/vendor/logo.png" alt="Codex Bridge"></span>
-      <div class="side-brand-txt"><b>Codex Bridge</b><span>本机控制台</span></div>
+      <span class="side-logo"><img src="/vendor/logo.png" alt="Feishu Bridge"></span>
+      <div class="side-brand-txt"><b>Feishu Bridge</b><span>本机控制台</span></div>
     </div>
     <nav class="side-nav" id="sideNav"></nav>
     <div class="side-foot" id="sideFoot"></div>
@@ -968,7 +968,7 @@ ${UI_PURE_JS}
 
   // ── 路由 → 页面标题/副标题（顶栏面包屑 + 页头复用）─────────────────────────
   function routeTitle(r) {
-    if (r.tab === 'home') return { t: '首页', s: 'Codex Bridge 总览' };
+    if (r.tab === 'home') return { t: '首页', s: 'Feishu Bridge 总览' };
     if (r.tab === 'bot') { var b = botOf(r.botId); return { t: (b ? botTitle(b) : '机器人'), s: '单机器人 · 项目 / 接入诊断' }; }
     if (r.tab === 'backends') return { t: '后端 Agent', s: '按需下载 / 更新 / 卸载 agent 后端' };
     if (r.tab === 'doctor') return { t: '宿主机体检', s: '本机后端环境与运行时信息' };
@@ -1017,7 +1017,7 @@ ${UI_PURE_JS}
     var r = parseRoute(location.hash);
     nav.appendChild(el('div', 'nav-sec', '概览'));
     nav.appendChild(navItem({ icon: 'grid', label: '仪表盘', on: r.tab === 'overview', onClick: function () { go({ tab: 'overview' }); } }));
-    nav.appendChild(el('div', 'nav-sec', '工作区'));
+    nav.appendChild(el('div', 'nav-sec', '飞书机器人'));
     var bots = (state && state.bots) || [];
     bots.forEach(function (b) {
       nav.appendChild(navItem({ icon: 'bot', label: botTitle(b), on: r.tab === 'bot' && r.botId === b.appId, dot: !!b.running, onClick: function () { go({ tab: 'bot', botId: b.appId }); } }));

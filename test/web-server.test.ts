@@ -303,7 +303,7 @@ describe('web server · 安全（loopback + token + Host 校验）', () => {
     const cookiePair = cookie.split(';')[0]!;
     const page = await get('/', { headers: { Cookie: cookiePair } });
     expect(page.status).toBe(200);
-    expect(await page.text()).toContain('Codex Bridge 管理台');
+    expect(await page.text()).toContain('Feishu Bridge 管理台');
     const api = await get('/api/state', { headers: { Cookie: cookiePair } });
     expect(api.status).toBe(200);
   });
