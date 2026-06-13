@@ -179,6 +179,12 @@ describe('performSetPermissionMode', () => {
 });
 
 describe('performBackendSwitch（注册表 → doctor 探活 → 档位支持面，全过才写盘）', () => {
+  it('项目不存在 → 拒绝（防御式 IPC/HTTP 入口的脏请求）', async () => {
+    const r = await performBackendSwitch({ projectName: 'ghost', target: 'claude-sdk', backendFor: () => fakeBackend() });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('不存在');
+  });
+
   it('未知后端 → 拒绝且不写盘', async () => {
     const r = await performBackendSwitch({ projectName: 'demo', target: 'gpt-9', backendFor: () => fakeBackend() });
     expect(r.ok).toBe(false);
