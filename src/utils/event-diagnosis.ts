@@ -103,14 +103,22 @@ export async function diagnoseEventSubscription(
       `${base}/open-apis/application/v6/applications/${encodeURIComponent(appId)}/app_versions?lang=zh_cn&page_size=50&order=0`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
-    if (!resp.ok) return { state: 'unchecked', reason: `HTTP ${resp.status}` };
-    body = (await resp.json()) as VersionListResp;
+    // 飞书即便 HTTP 4xx 也常带 {code,msg}（如缺 scope 返回 400 + 99991672）——先尝试读 body
+    // 拿到可读原因，而不是甩一个裸状态码。读不到 body 才回退到 HTTP 状态。
+    body = (await resp.json().catch(() => undefined)) as VersionListResp | undefined ?? { code: -1, msg: '' };
+    if (!resp.ok && body.code === -1) {
+      const hint = resp.status === 400 || resp.status === 403 ? '——可能缺 application:application.app_version:readonly 权限' : '';
+      return { state: 'unchecked', reason: `HTTP ${resp.status}${hint}` };
+    }
   } catch (err) {
     return { state: 'unchecked', reason: `网络错误：${err instanceof Error ? err.message : String(err)}` };
   }
   if (body.code !== 0) {
     // 典型：缺 application:application.app_version:readonly scope → 非 0 错误码。
-    return { state: 'unchecked', reason: `code=${body.code ?? '?'} msg=${body.msg ?? '<no msg>'}` };
+    const scopeHint = body.code === 99991672 || /permission|scope|access/i.test(body.msg ?? '')
+      ? '——请在「权限管理」授权 application:application.app_version:readonly 后重试'
+      : '';
+    return { state: 'unchecked', reason: `code=${body.code ?? '?'} msg=${body.msg ?? '<no msg>'}${scopeHint}` };
   }
 
   const live = (body.data?.items ?? []).find((v) => v.status === 1);

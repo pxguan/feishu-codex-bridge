@@ -103,6 +103,30 @@ describe('diagnoseEventSubscription — 三态 + unchecked 降级', () => {
     expect(d.state).toBe('unchecked');
     expect(d.reason).toContain('99991672');
     expect(d.reason).toContain('no permission');
+    expect(d.reason).toContain('application:application.app_version:readonly'); // scope 提示
+  });
+
+  it('unchecked：app_versions HTTP 400 且 body 不可解析 → 带「可能缺 app_version scope」提示', async () => {
+    const fetchFn = (async (url: Parameters<typeof fetch>[0]) => {
+      const u = String(url);
+      if (u.includes('tenant_access_token')) return jsonResponse({ code: 0, tenant_access_token: 't-x' });
+      return new Response('<html>400</html>', { status: 400 }); // 非 JSON body
+    }) as typeof fetch;
+    const d = await diagnoseEventSubscription('cli_x', 's', 'feishu', fetchFn);
+    expect(d.state).toBe('unchecked');
+    expect(d.reason).toContain('HTTP 400');
+    expect(d.reason).toContain('app_version'); // 缺 scope 提示，而非裸状态码
+  });
+
+  it('unchecked：app_versions HTTP 400 但带飞书 {code,msg} → 读出可读原因', async () => {
+    const fetchFn = (async (url: Parameters<typeof fetch>[0]) => {
+      const u = String(url);
+      if (u.includes('tenant_access_token')) return jsonResponse({ code: 0, tenant_access_token: 't-x' });
+      return jsonResponse({ code: 99991672, msg: 'Access denied' }, 400);
+    }) as typeof fetch;
+    const d = await diagnoseEventSubscription('cli_x', 's', 'feishu', fetchFn);
+    expect(d.state).toBe('unchecked');
+    expect(d.reason).toContain('Access denied');
   });
 
   it('unchecked：token 换取失败 / token 端点 HTTP 错', async () => {

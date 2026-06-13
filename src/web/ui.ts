@@ -365,6 +365,7 @@ export const UI_HTML = `<!doctype html>
     line.appendChild(el('span', 'tag blue', 'v' + d.version));
     box.appendChild(line);
     if (d.uptimeMs !== undefined && d.running) box.appendChild(el('div', 'note', '已运行 ' + fmtUptime(d.uptimeMs)));
+    if (d.selfHosted) box.appendChild(el('div', 'note', '⚠️ 手动运行，未注册为开机自启 —— 关机/登出后不会自动拉起。运行 feishu-codex-bridge install 注册为后台服务。'));
     if (d.lastExit !== undefined && d.lastExit !== '0') box.appendChild(el('div', 'note', '上次退出码：' + d.lastExit));
     // 重启按钮：仅在「本进程就是 daemon」（有 uptimeMs，即写操作可用）时真生效；
     // 只读预览态点了会 501，按钮仍可点但提示去起 daemon。

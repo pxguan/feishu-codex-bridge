@@ -31,8 +31,10 @@ export interface DaemonStatus {
   platformName?: string;
   /** 服务定义（plist/task/unit）已注册到 OS。 */
   installed: boolean;
-  /** 服务进程当前存活（service manager 视角）。 */
+  /** daemon 进程当前存活：service manager 报 running，**或**当前内嵌 web 的进程自身就是活 daemon。 */
   running: boolean;
+  /** daemon 在跑但不由 service manager 托管（手动前台 / nohup 起的）——UI 提示「未注册为开机自启」。 */
+  selfHosted: boolean;
   /** 服务进程 pid（service manager 报的；可能与内嵌 web 的 process.pid 不同）。 */
   pid?: number;
   /** 上次退出码（诊断用）。 */
@@ -76,10 +78,15 @@ export function toDaemonStatus(opts: {
   now?: number;
 }): DaemonStatus {
   const s = opts.status;
+  // startedAt 仅在 daemon 进程内嵌 web 时注入：它存在即证明「当前有 daemon 进程在响应」，
+  // 哪怕该进程是手动 nohup/前台起的（service manager 视角 running=false）。
+  const selfRunning = opts.startedAt !== undefined;
+  const serviceRunning = s?.running ?? false;
   return {
     platformName: s?.platformName,
     installed: s?.installed ?? false,
-    running: s?.running ?? false,
+    running: serviceRunning || selfRunning,
+    selfHosted: selfRunning && !serviceRunning,
     pid: s?.pid ? Number(s.pid) : undefined,
     lastExit: s?.lastExit,
     version: opts.version,

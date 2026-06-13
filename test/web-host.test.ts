@@ -31,11 +31,20 @@ describe('host · toDaemonStatus（service 快照 → daemon 状态，纯函数�
     expect(d.uptimeMs).toBe(60_000);
     expect(d.supported).toBe(true);
     expect(d.platformName).toBe('launchd (macOS)');
+    expect(d.selfHosted).toBe(false); // service manager 托管，非手动
   });
 
   it('未传 startedAt（只读预览进程）→ uptimeMs undefined', () => {
     const d = toDaemonStatus({ status: base, version: '0.3.11' });
     expect(d.uptimeMs).toBeUndefined();
+  });
+
+  it('手动 nohup 起的 daemon（startedAt 有值但 service manager 报未运行）→ running=true + selfHosted=true', () => {
+    const manual: ServiceStatus = { ...base, installed: false, running: false, pid: undefined };
+    const d = toDaemonStatus({ status: manual, version: '0.3.11', startedAt: 1000, now: 5000 });
+    expect(d.running).toBe(true); // 内嵌 web 在响应即证明 daemon 活着
+    expect(d.selfHosted).toBe(true); // 但未注册为开机服务
+    expect(d.installed).toBe(false);
   });
 
   it('status undefined（未支持平台）→ supported=false、installed/running 兜底 false', () => {

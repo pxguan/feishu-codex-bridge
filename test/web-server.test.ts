@@ -114,6 +114,7 @@ function stubService(): AdminService {
         platformName: 'launchd (macOS)',
         installed: true,
         running: true,
+        selfHosted: false,
         pid: 4242,
         version: '0.3.11',
         uptimeMs: 60_000,
