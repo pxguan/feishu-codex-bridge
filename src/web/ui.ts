@@ -2011,6 +2011,18 @@ ${UI_PURE_JS}
     if (drawerProject) renderDrawer(drawerProject);
   }
 
+  // 飞书 applink「打开机器人」：在飞书客户端里直接拉起与该 bot 的私聊（同开发者后台
+  // 「创建成功 → 打开应用」那条链）。feishu / lark 各自域名。
+  function botOpenLink(appId, tenant) {
+    var host = tenant === 'lark' ? 'applink.larksuite.com' : 'applink.feishu.cn';
+    return 'https://' + host + '/client/bot/open?appId=' + encodeURIComponent(appId || '');
+  }
+  function openBotBtn(appId, tenant, label) {
+    var a = el('a', 'btn', label || '🔗 在飞书中打开');
+    a.href = botOpenLink(appId, tenant); a.target = '_blank'; a.rel = 'noopener';
+    return a;
+  }
+
   function renderBotOverview(card, b) {
     var line1 = el('div', 'statline');
     line1.appendChild(el('span', 'tag', b.tenant === 'lark' ? 'Lark' : '飞书'));
@@ -2018,6 +2030,9 @@ ${UI_PURE_JS}
     if (b.current) line1.appendChild(el('span', 'tag blue', '主 bot'));
     if (b.active) line1.appendChild(el('span', 'tag blue', '活跃集'));
     card.appendChild(line1);
+    var openRow = el('div'); openRow.style.marginTop = '8px';
+    openRow.appendChild(openBotBtn(b.appId, b.tenant, '🔗 在飞书中打开机器人'));
+    card.appendChild(openRow);
     var line2 = el('div', 'statline');
     if (b.running) {
       line2.appendChild(el('span', 'tag green', '✅ bridge 运行中 · pid ' + b.pid));
@@ -2588,6 +2603,9 @@ ${UI_PURE_JS}
     // 引导（那会让人以为得先做完才能继续）。重启入口**只此一处**：主按钮「重启使其上线」；
     // 想晚点再说就点「稍后再重启」。
     w.appendChild(el('div', 'note', '机器人「' + who + '」已加入活跃集。最后一步：重启 Feishu Bridge 让它上线（约数秒，其它在线机器人会短暂断连后自动重连）。'));
+    var openRow = el('div'); openRow.style.margin = '4px 0 12px';
+    openRow.appendChild(openBotBtn(wizBotId, wizSetup && wizSetup.tenant, '🔗 在飞书中打开机器人'));
+    w.appendChild(openRow);
     var gotoBot = function () { var id = wizBotId; closeWizard(); if (id) go({ tab: 'bot', botId: id }); };
     var actions = el('div', 'actions');
     var later = el('button', 'btn', '稍后再重启');
