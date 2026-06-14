@@ -535,7 +535,10 @@ export function buildJoinGroupFormCard(
   ];
   if (backends.length > 1) {
     formItems.push(
-      note('🧠 后端 Agent（绑定后**固定不可切换**；外部群默认只读档，仅列支持该档且已下载的后端）'),
+      note(
+        '🧠 后端 Agent（绑定后**固定不可切换**）。默认 **Codex** 以「只读」档绑定（外部群安全）；' +
+          '选 **Claude** 系则以「完全访问」档绑定（Claude 暂不支持只读档）—— 给自己的内部群用 Claude 时直接选即可。',
+      ),
       selectMenu({ name: 'backend', placeholder: '选择后端 Agent', options: backends, initial: backends[0]?.value }),
     );
   } else if (backends.length === 1) {

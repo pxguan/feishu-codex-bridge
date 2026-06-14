@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { safeBackendId } from '../src/bot/handle-message';
+import { safeBackendId, bindModeFor } from '../src/bot/handle-message';
 import { assertBackendUsable } from '../src/project/lifecycle';
 
 /**
@@ -25,6 +25,26 @@ describe('safeBackendId —— 飞书表单 backend 值的防伪收口', () => {
     expect(safeBackendId({ backend: 'gpt-9' })).toBeUndefined();
     expect(safeBackendId({ backend: 'claude-sdk; rm -rf' })).toBeUndefined();
     expect(safeBackendId({ backend: '../../etc' })).toBeUndefined();
+  });
+});
+
+describe('bindModeFor —— 绑定『已有群』按所选后端定档（claude 可选 + 外部群仍默认 qa）', () => {
+  it('codex / 未选 → undefined（沿用 joinExistingGroup 的 qa 只读默认，外部群安全不变）', () => {
+    expect(bindModeFor('codex-appserver')).toBeUndefined();
+    expect(bindModeFor(undefined)).toBeUndefined();
+  });
+
+  it('claude 系（supportedModes=[full]，不含 qa）→ full：显式选了才以完全访问档绑定，' +
+    '否则 assertBackendUsable 会当场拒「不支持 qa 档」', () => {
+    expect(bindModeFor('claude-sdk')).toBe('full');
+    expect(bindModeFor('claude-acp')).toBe('full');
+    // 选了 claude → full，assertBackendUsable 放行（之前 qa 写死会拒、根本选不了）。
+    expect(() => assertBackendUsable('claude-sdk', bindModeFor('claude-sdk') ?? 'qa')).not.toThrow();
+    expect(() => assertBackendUsable('claude-acp', bindModeFor('claude-acp') ?? 'qa')).not.toThrow();
+  });
+
+  it('未知 id → undefined（不臆造档；落地时 assertBackendUsable 再兜底拒绝）', () => {
+    expect(bindModeFor('no-such-backend')).toBeUndefined();
   });
 });
 

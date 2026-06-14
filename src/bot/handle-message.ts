@@ -7,7 +7,7 @@ import type {
   ReactionEvent,
 } from '@larksuiteoapi/node-sdk';
 import { DEFAULT_BACKEND_ID, backendIds, createBackend, isBackendEntryInstalled } from '../agent';
-import { projectCreatableBackends } from '../agent/catalog';
+import { catalogById, projectCreatableBackends } from '../agent/catalog';
 import type { AgentBackend, AgentInput, AgentRun, AgentThread, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
 import type { SelectOption } from '../card/cards';
 import {
@@ -266,6 +266,18 @@ function asTier(v: string | undefined): PermissionMode | undefined {
  */
 function backendOptionsFor(mode: PermissionMode): SelectOption[] {
   return projectCreatableBackends(mode, isBackendEntryInstalled).map((e) => ({ label: e.displayName, value: e.id }));
+}
+
+/**
+ * 绑定『已有群』时该项目落哪个权限档。joined 群默认只读 qa（外部群安全考量）——但
+ * claude 系后端仅支持 full，若用户在绑定卡里显式选了它，就以它支持的档（full）绑定，
+ * 否则 joinExistingGroup 的 assertBackendUsable 会当场拒绝「不支持该档」。codex / 未选
+ * → undefined → 沿用 joinExistingGroup 的 qa 默认（外部群仍只读，安全不变）。
+ */
+export function bindModeFor(backend?: string): PermissionMode | undefined {
+  const modes = backend ? catalogById(backend)?.supportedModes : undefined;
+  if (modes && !modes.includes('qa')) return modes.includes('full') ? 'full' : modes[0];
+  return undefined;
 }
 /** 把卡片提交的 backend 收成安全值：必须是注册表里的 id，否则丢弃（落回默认 codex），防伪造。 */
 export function safeBackendId(formValue: Record<string, unknown> | undefined): string | undefined {
@@ -1970,7 +1982,9 @@ export function createOrchestrator(
       const chatId = typeof value.chatId === 'string' ? value.chatId : '';
       const backend = safeBackendId(formValue);
       const kind: 'multi' | 'single' = value.kind === 'single' ? 'single' : 'multi';
-      const backends = backendOptionsFor('qa'); // 外部群默认只读档
+      // 列「全后端」（full 档过滤面 = 已下载的都列，含 claude 系）。默认仍是 codex（列表
+      // 首项），绑定后按所选后端定档：codex→qa（外部群安全默认）、claude→full（见 bindModeFor）。
+      const backends = backendOptionsFor('full');
       // Same fresh-card pattern as DM.newProjectSubmit: a submitted form locks
       // its card_id, so the result goes to a new card while the form stays above
       // as a 留痕. Detached so the click acks immediately (join is slow).
@@ -1982,8 +1996,8 @@ export function createOrchestrator(
         else if (!op) result = buildJoinGroupFormCard({ chatId, name, cwd: cwdIn, error: '无法识别操作者身份', backends });
         else {
           try {
-            const p = await joinExistingGroup(channel, { name, chatId, addedBy: op, existingPath: cwdIn || undefined, kind, backend });
-            log.info('console', 'join-group', { name: p.name, blank: p.blank, backend: p.backend });
+            const p = await joinExistingGroup(channel, { name, chatId, addedBy: op, existingPath: cwdIn || undefined, kind, backend, mode: bindModeFor(backend) });
+            log.info('console', 'join-group', { name: p.name, blank: p.blank, backend: p.backend, mode: p.mode });
             result = buildNewProjectDoneCard(p);
           } catch (err) {
             result = buildJoinGroupFormCard({ chatId, name, cwd: cwdIn, error: err instanceof Error ? err.message : String(err), backends });
@@ -3469,7 +3483,7 @@ export function createOrchestrator(
       await sendManagedCard(
         channel,
         op,
-        buildJoinGroupFormCard({ chatId: evt.chatId, name, backends: backendOptionsFor('qa') }),
+        buildJoinGroupFormCard({ chatId: evt.chatId, name, backends: backendOptionsFor('full') }),
         undefined,
         false,
         'open_id',
