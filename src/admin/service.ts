@@ -956,8 +956,10 @@ async function catalogEntryStatus(
 
 /** 与 DM 🧠 后端检测卡同源：按注册表动态探测全部后端，绝不硬编码列表；绝不抛错。 */
 async function probeAllBackends(): Promise<AdminBackendStatus[]> {
+  // 只探**用户可见**后端：hidden 闸隐藏的 claude 两后端不出现在接入诊断 / 宿主机体检里
+  // （与 listBackendCatalog / host.doctorBackends 同口径，走 visibleCatalog 单一过滤源）。
   return Promise.all(
-    backendIds().map(async (id) => {
+    visibleCatalog().map((e) => e.id).map(async (id) => {
       const backend = createBackend(id);
       const probe = await backend.doctor({ force: true }).catch(() => undefined);
       return {
