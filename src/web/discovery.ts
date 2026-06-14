@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { paths } from '../config/paths';
@@ -60,6 +61,35 @@ export function clearWebConsole(file: string = paths.webConsoleFile): void {
   } catch {
     /* 已被清 / 损坏 / 不可读 —— 读取方有 pid 活性兜底，无须强删 */
   }
+}
+
+/**
+ * 稳定的 Web 控制台 token——持久化到 0600 文件（与 web-console.json 同信任域：拿得到
+ * 这个文件的人本来就拿得到密钥库）。daemon 内嵌控制台与只读预览都用它，使「重启 /
+ * 预览→daemon 切换」后浏览器里那条 `…/?token=` URL 的 token 始终有效，不再 401（旧实现
+ * 每进程随机 token，重启即失效）。文件不存在就生成一个落盘；删掉它即轮换。绝不抛错——
+ * 读/写失败都回退到一个进程内随机 token（至少不崩，只是丢了跨重启稳定性）。
+ */
+export function stableWebConsoleToken(file: string = paths.webTokenFile): string {
+  try {
+    const t = readFileSync(file, 'utf8').trim();
+    if (t) return t;
+  } catch {
+    /* 不存在 / 不可读 → 生成 */
+  }
+  const token = randomUUID();
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    try {
+      unlinkSync(file);
+    } catch {
+      /* ENOENT */
+    }
+    writeFileSync(file, `${token}\n`, { mode: 0o600 });
+  } catch {
+    /* 落盘失败 → 用进程内随机 token（丢稳定性但不崩） */
+  }
+  return token;
 }
 
 function isAlive(pid: number): boolean {

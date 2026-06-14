@@ -1,6 +1,6 @@
 import { createReadonlyAdminService } from '../../admin/service';
-import { readWebConsole } from '../../web/discovery';
-import { createWebServer, DEFAULT_WEB_PORT } from '../../web/server';
+import { readWebConsole, stableWebConsoleToken } from '../../web/discovery';
+import { createWebServer } from '../../web/server';
 import { openUrl } from '../../utils/open-url';
 import { spawnDaemonControl } from './daemon-control';
 
@@ -28,7 +28,10 @@ export async function runWeb(opts: { port?: number } = {}): Promise<void> {
     return;
   }
 
-  const port = opts.port ?? DEFAULT_WEB_PORT;
+  // 预览默认用**临时端口**（port=0），绝不抢规范端口 51847——那是 daemon 控制台的权威
+  // 端口（见 web/mount.ts）。这样「点启动 → daemon 起来占 51847 → 前端自动跳到 51847」，
+  // 之后重启都稳定在 51847，不再换来换去。用户可 --port 显式指定。
+  const port = opts.port ?? 0;
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     console.error(`✗ 无效端口：${opts.port}`);
     process.exitCode = 1;
@@ -36,11 +39,11 @@ export async function runWeb(opts: { port?: number } = {}): Promise<void> {
   }
 
   // 只读预览唯一放行的宿主级动作：「启动 daemon」。detached helper 装好后台服务并
-  // 拉起（与本预览进程脱钩）；本预览仍持有 51847 → daemon 退化到临时端口。但用户不必
-  // 手动重开 `web`：注入 liveConsole（readWebConsole）后，前端检测到 daemon 已起就自动
-  // 把页面带去那条可写控制台（见 server.ts /api/console/live），端口在哪都不用用户操心。
+  // 拉起（与本预览进程脱钩）。预览不占 51847，daemon 起来即可拿到 51847；注入 liveConsole
+  // （readWebConsole）后前端检测到 daemon 已起就自动把页面带去那条可写控制台（见
+  // server.ts /api/console/live）。token 用稳定 token——切过去后那条 URL 长期有效不 401。
   const service = createReadonlyAdminService({ startDaemon: () => spawnDaemonControl('start') });
-  const web = createWebServer({ service, liveConsole: () => readWebConsole() });
+  const web = createWebServer({ service, token: stableWebConsoleToken(), liveConsole: () => readWebConsole() });
 
   let url: string;
   try {

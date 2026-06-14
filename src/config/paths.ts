@@ -97,4 +97,7 @@ export const paths = {
   /** daemon 内嵌 Web 控制台的发现文件 {port, token, pid}（0600，daemon 退出
    * 清理）——`web` 子命令据此直接打开 daemon 控制台而不是再起只读副本。 */
   webConsoleFile: join(appDir, 'web-console.json'),
+  /** 稳定的 Web 控制台 token（0600，**不随进程退出清理**）——让重启 / 预览→daemon
+   * 切换后浏览器里那条带 token 的 URL 始终有效，不再 401。删此文件即轮换 token。 */
+  webTokenFile: join(appDir, 'web-token'),
 };
