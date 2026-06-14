@@ -126,6 +126,34 @@ describe('claude-sdk 事件映射：golden 序列 → AgentEvent 契约', () => 
     expect(state.footer).toBeNull();
   });
 
+  it('result 带 modelUsage → 补发 context_usage（used=input+cache，window=最大 contextWindow）→ 驱动 /context 与进度条', () => {
+    const events = mapAll(new ClaudeEventMapper('tc'), [
+      {
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        usage: { input_tokens: 1000, output_tokens: 50, cache_read_input_tokens: 20000, cache_creation_input_tokens: 4000 },
+        // 主模型 200k 窗口；子代理用 haiku 的小窗口不应被选中（取最大）。
+        modelUsage: { 'claude-sonnet-4-6': { contextWindow: 200000 }, 'claude-haiku': { contextWindow: 50000 } },
+      },
+    ]);
+    const cu = events.find((e) => e.type === 'context_usage');
+    expect(cu).toMatchObject({ type: 'context_usage', usedTokens: 25000, contextWindow: 200000 }); // 1000+20000+4000
+    // context_usage 必须在 done 之前（run loop 命中 done 即终止该轮）。
+    const iCu = events.findIndex((e) => e.type === 'context_usage');
+    const iDone = events.findIndex((e) => e.type === 'done');
+    expect(iCu).toBeGreaterThanOrEqual(0);
+    expect(iCu).toBeLessThan(iDone);
+  });
+
+  it('result 无 modelUsage（窗口未知）→ context_usage.contextWindow=null（诚实降级，/context 只显 token 数不显百分比）', () => {
+    const events = mapAll(new ClaudeEventMapper('tc2'), [
+      { type: 'result', subtype: 'success', is_error: false, usage: { input_tokens: 500, output_tokens: 10 } },
+    ]);
+    const cu = events.find((e) => e.type === 'context_usage');
+    expect(cu).toMatchObject({ type: 'context_usage', usedTokens: 500, contextWindow: null });
+  });
+
   it('system/init 映射为 system 事件并携带 session id', () => {
     const events = mapAll(new ClaudeEventMapper('t3'), TEXT_TURN);
     expect(events[0]).toEqual({ type: 'system', threadId: 'sess-1' });

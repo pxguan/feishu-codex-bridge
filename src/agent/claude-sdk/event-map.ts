@@ -95,6 +95,11 @@ export interface SdkResultMessageLike {
     cache_creation_input_tokens?: number;
     cache_read_input_tokens?: number;
   };
+  /** Per-model usage (SDKResultMessage.modelUsage). Each entry carries the
+   * model's total `contextWindow` — the ONLY place the SDK surfaces the window
+   * size, so /context + the run-card gauge读这里算「已用 / 窗口」百分比（与
+   * 终端 statusline 的 context_window.used_percentage 同源数据）。 */
+  modelUsage?: Record<string, { contextWindow?: number }>;
 }
 
 export type SdkMessageLike =
@@ -276,19 +281,36 @@ export class ClaudeEventMapper {
 
   private mapResult(msg: SdkResultMessageLike): AgentEvent[] {
     const u = msg.usage;
-    const usage: AgentEvent = {
-      type: 'usage',
-      // cache reads/writes ARE context the model consumed — count them in, so
-      // the number reflects the real request size (parity with codex's last-
-      // request semantics).
-      inputTokens:
-        (u?.input_tokens ?? 0) + (u?.cache_read_input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0),
-      outputTokens: u?.output_tokens ?? 0,
-    };
+    // cache reads/writes ARE context the model consumed — count them in, so the
+    // number reflects the real request size (parity with codex's last-request
+    // semantics).
+    const usedTokens =
+      (u?.input_tokens ?? 0) + (u?.cache_read_input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0);
+    const usage: AgentEvent = { type: 'usage', inputTokens: usedTokens, outputTokens: u?.output_tokens ?? 0 };
+    // context_usage drives the run-card 上下文进度条 + /context（与 codex 同事件）。
+    // window 取 modelUsage 各模型里最大的 contextWindow（主对话模型；子代理可能用更小
+    // 窗口的模型）；拿不到则 null → /context 显示 token 数但不显百分比（诚实降级）。
+    const out: AgentEvent[] = [usage];
+    const window = maxContextWindow(msg.modelUsage);
+    if (window || usedTokens) out.push({ type: 'context_usage', usedTokens, contextWindow: window });
     if (msg.subtype === 'success' && !msg.is_error) {
-      return [usage, { type: 'done', turnId: this.turnId }];
+      out.push({ type: 'done', turnId: this.turnId });
+      return out;
     }
     const detail = msg.errors?.filter(Boolean).join('；') || msg.result || msg.subtype;
-    return [usage, { type: 'error', message: `Claude 运行失败：${detail}`, willRetry: false }];
+    out.push({ type: 'error', message: `Claude 运行失败：${detail}`, willRetry: false });
+    return out;
   }
+}
+
+/** Largest `contextWindow` across the result's per-model usage map (the main
+ * conversation model has the widest window; subagents may run smaller ones).
+ * null when the SDK reported no window → /context degrades to「token 数，无百分比」. */
+function maxContextWindow(modelUsage: SdkResultMessageLike['modelUsage']): number | null {
+  if (!modelUsage) return null;
+  let max = 0;
+  for (const mu of Object.values(modelUsage)) {
+    if (typeof mu?.contextWindow === 'number' && mu.contextWindow > max) max = mu.contextWindow;
+  }
+  return max > 0 ? max : null;
 }

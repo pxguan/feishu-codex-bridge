@@ -43,13 +43,14 @@ describe('agent backend registry', () => {
 describe('claude-sdk backend：能力守卫（无半实现）', () => {
   const be = createBackend('claude-sdk') as ClaudeSdkBackend;
 
-  it('注册表解析到 ClaudeSdkBackend，capabilities 全 false', () => {
+  it('注册表解析到 ClaudeSdkBackend，capabilities：compact 已实现(true)，goal/steer/resume 仍未支持', () => {
     expect(be).toBeInstanceOf(ClaudeSdkBackend);
     expect(be.id).toBe('claude-sdk');
     expect(be.capabilities).toEqual({
       goal: false,
       steer: false,
-      compact: false,
+      // 手动 /compact 经 SDK 实现（推 "/compact" → status[compact_result]+compact_boundary）。
+      compact: true,
       resume: false,
       approvals: false,
     });

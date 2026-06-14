@@ -29,12 +29,15 @@ const SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk';
 /**
  * Claude Code backend via the official Agent SDK (@anthropic-ai/claude-agent-sdk).
  *
- * MINIMAL SLICE (multi-backend step 1, see research/05 + synthesis L-1): only
- * isAvailable / listModels / startThread / resumeThread / runStreamed / abort
- * are real. Every codex-only capability is hard-guarded — `capabilities` flags
- * them false AND the methods throw a clear "not supported" error (never a
- * silent half-implementation):
- *   - goal/steer/compact → throw (orchestrator surfaces ❌ / falls back to queue)
+ * Real methods: isAvailable / listModels / startThread / resumeThread /
+ * runStreamed / abort / compact / context-usage (context_usage emitted from the
+ * result's modelUsage.contextWindow — drives /context + the run-card gauge,
+ * same data as the terminal statusline's context_window.used_percentage).
+ * Remaining codex-only capabilities are hard-guarded — `capabilities` flags them
+ * false AND the methods throw a clear "not supported" error (never a silent
+ * half-implementation):
+ *   - goal/steer → throw (orchestrator surfaces ❌ / falls back to queue)
+ *   - compact → IMPLEMENTED (manual /compact via the SDK, see compact())
  *   - resume PICKER (listThreads/readHistory) → throw / empty. resumeThread
  *     itself IS implemented (M-8): SessionRecord carries the backend id, so a
  *     daemon restart routes back here and the SDK-native `resume:` continues
@@ -69,13 +72,20 @@ const STARTUP_PROBE_MS = 1_500;
 // resumeThread 本身已实现 —— 重启恢复路径（resolveThread）不经此能力位。
 // `approvals: false`：审批转发（canUseTool → approval_request）是后续切片，
 // 当前 bypassPermissions 下不会发审批。
+// `compact: true`：手动 /compact 经 SDK 实现 —— 推 "/compact" 进 streaming 输入，
+// CLI 触发压缩并回 status[compact_result] + compact_boundary（探测于 2026-06，见
+// compact() 实现注释）。Claude Code 本就自带 /compact 与 auto-compact，这里把手动
+// 那条接出来与 codex 对齐。
 const CAPABILITIES: AgentCapabilities = {
   goal: false,
   steer: false,
-  compact: false,
+  compact: true,
   resume: false,
   approvals: false,
 };
+
+/** 压缩是一次 LLM 摘要调用（非瞬时），给足时间；超时即判进程疑似卡死并报错。 */
+const COMPACT_TIMEOUT_MS = 90_000;
 
 /** Model aliases the claude CLI resolves itself (`--model sonnet|opus|haiku`).
  * Claude has no codex-style reasoning-effort axis → supportedEfforts empty;
@@ -377,8 +387,73 @@ class ClaudeSdkThread implements AgentThread {
     await this.q.interrupt();
   }
 
+  /**
+   * Manual /compact via the SDK. Idle-only (handle-message reserves the session
+   * before calling — no turn owns the shared iterator). Pushes the "/compact"
+   * slash command into the streaming input; the CLI runs compaction and emits
+   * (probed on-machine 2026-06, streaming-input mode):
+   *   system{subtype:'status', status:'compacting'}
+   *   system{subtype:'status', compact_result:'success'|'failed', compact_error?}
+   *   system{subtype:'compact_boundary', compact_metadata:{post_tokens}}  // success only
+   *   …optional re-init/assistant…
+   *   result{subtype:'success'}                                            // turn terminal
+   * We read THROUGH the terminal `result` so the shared stream is left clean for
+   * the next turn (a leftover result would read as a premature `done`). The
+   * "Not enough messages to compact" failure is benign — context is already
+   * small — and maps to compacted:false (codex's nothing-to-compact parity), not
+   * an error card.
+   */
   async compact(): Promise<CompactResult> {
-    throw notSupported(' /compact 手动压缩（Claude Code 会自行 auto-compact）');
+    if (!this.isAlive()) throw new Error('Claude 会话进程已退出，无法压缩');
+    this.input.push({
+      type: 'user',
+      message: { role: 'user', content: '/compact' },
+      parent_tool_use_id: null,
+      session_id: this.sessionId,
+    });
+    const deadline = Date.now() + COMPACT_TIMEOUT_MS;
+    let compactedOk = false;
+    let failedErr: string | undefined;
+    let sawResult = false;
+    while (Date.now() < deadline && !sawResult) {
+      let step: IteratorResult<SDKMessage>;
+      try {
+        step = await this.nextMessage();
+      } catch (err) {
+        throw new Error(`Claude 压缩中进程异常：${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (step.done) throw new Error('Claude 进程已退出（压缩未完成）');
+      const m = step.value as SdkMessageLike & {
+        subtype?: string;
+        compact_result?: 'success' | 'failed';
+        compact_error?: string;
+      };
+      // A prior locally-terminated turn (⏹/watchdog) may have left its result in
+      // the stream — eat it first, exactly like runStreamed, so we don't mistake
+      // it for compaction's terminal.
+      if (this.staleResults > 0 && m.type === 'result') {
+        this.staleResults--;
+        continue;
+      }
+      if (m.type === 'system' && m.subtype === 'compact_boundary') {
+        compactedOk = true; // the boundary is the proof compaction actually happened
+      } else if (m.type === 'system' && m.subtype === 'status' && m.compact_result === 'failed') {
+        failedErr = m.compact_error;
+      } else if (m.type === 'result') {
+        sawResult = true; // turn terminal — shared stream is now clean for the next turn
+      }
+    }
+    if (!sawResult && !compactedOk) {
+      throw new Error(`Claude 压缩超时（未在 ${COMPACT_TIMEOUT_MS / 1000}s 内完成）`);
+    }
+    // 上下文太短、无需压缩 —— 良性（与 codex nothing-to-compact 同义）。
+    if (failedErr && !/not enough messages/i.test(failedErr)) throw new Error(`压缩失败：${failedErr}`);
+    // usage:null 是有意为之 —— compact_metadata.post_tokens 只含「对话摘要」、不含
+    // system prompt + 工具定义（实测 601 vs 真实 24k，差 ~40×），拿来填卡会严重低估
+    // 占用、且与紧接着的 /context 自相矛盾。诚实做法：不报可能错的 post 数，卡片走
+    // buildCompactedCard 的兜底文案「发下一条消息后 /context 即可看到占用下降」，下一轮
+    // 的 context_usage 事件给出真实新占用（与 codex「含全部」语义一致）。
+    return { compacted: compactedOk, usage: null };
   }
 
   isAlive(): boolean {
