@@ -32,3 +32,6 @@ prototype/
 
 # local test recordings (binary; keep repo clean)
 docs/tests/
+
+# local-only working assets (scratch images, contact sheets — never published)
+docs/assets/_local/
