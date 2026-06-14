@@ -58,6 +58,7 @@ export async function runWeb(opts: { port?: number } = {}): Promise<void> {
 
   console.log('🌐 Web 控制台（只读预览）已启动，浏览器打开：');
   console.log(`\n   ${url}\n`);
+  if (openUrl(url)) console.log('   已尝试在浏览器打开；没弹出就手动复制上面链接。');
   console.log('   · 仅本机可访问（127.0.0.1）；URL 含一次性 token，请勿外传/截图。');
   console.log('   · daemon 未在跑：当前为只读预览（直读本机文件）。先 `run`/`start` 再开 `web` 可用写操作。');
   console.log('   · Ctrl+C 退出。');

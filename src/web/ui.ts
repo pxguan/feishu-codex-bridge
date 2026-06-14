@@ -1762,13 +1762,32 @@ ${UI_PURE_JS}
   }
 
   function toggleBotEnabled(b) {
+    var enabling = !b.active;
     fetch('/api/bots/' + encodeURIComponent(b.appId), {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !b.active }),
+      body: JSON.stringify({ enabled: enabling }),
     }).then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
       .then(function (resp) {
-        if (resp.status === 200) { toast('✅ ' + (resp.body.message || '已保存')); loadState(); }
-        else toast('❌ ' + (resp.body.message || ('HTTP ' + resp.status)));
+        if (resp.status === 200) {
+          toast('✅ ' + (resp.body.message || '已保存'));
+          loadState();
+          // 改活跃集要重启 Feishu Bridge 才生效。daemon 在跑 → 弹窗确认，确认就帮用户
+          // 自动重启（postAction → /api/daemon/restart，detached helper 拉新实例），省去
+          // 终端 restart。daemon 没在跑（只读预览）就不弹——那种情况要 start 不是重启，
+          // 现有 toast 已引导。（注意：本文件整体在模板字符串里，注释/代码都禁用反引号。）
+          if (daemon && daemon.running) {
+            var who = '「' + (b.botName || b.name) + '」';
+            confirmDialog({
+              title: '🔄 立即重启 Feishu Bridge 让改动生效？',
+              lines: [
+                who + (enabling ? ' 已加入活跃集，重启后会被拉起上线。' : ' 已移出活跃集，重启后会停止运行。'),
+                '重启约数秒，期间所有在线机器人的长连接会短暂断开并自动重连。',
+              ],
+              confirmLabel: '立即重启',
+              onConfirm: function () { postAction('/api/daemon/restart', '重启'); },
+            });
+          }
+        } else toast('❌ ' + (resp.body.message || ('HTTP ' + resp.status)));
       })
       .catch(function () { toast('❌ 请求失败'); });
   }
@@ -2490,10 +2509,17 @@ ${UI_PURE_JS}
       w.appendChild(checkItem('spin', 'bridge 运行中', '长连接' + (conn.connection ? '（' + conn.connection + '）' : '建立中…')));
     } else {
       var cmd = el('div');
-      cmd.appendChild(el('div', 'note', '该机器人尚未被 Feishu Bridge 拉起。把它加入活跃集后重启 Feishu Bridge 即可生效：'));
+      var act = el('div', 'actions');
+      var go1 = el('button', 'btn primary', '⚡ 一键启用并拉起');
+      go1.onclick = function () { wizEnableAndLaunch(); };
+      act.appendChild(go1);
+      cmd.appendChild(act);
+      cmd.appendChild(el('div', 'note', '一键：把它加入活跃集并自动'
+        + ((daemon && daemon.running) ? '重启' : '启动') + ' Feishu Bridge'
+        + ((daemon && daemon.running) ? '（约数秒，其它在线机器人会短暂断连后自动重连）' : '') + '。'));
+      cmd.appendChild(el('div', 'note', '或手动在终端执行：'));
       cmd.appendChild(copyRow('feishu-codex-bridge bot use ' + (wizBotId || '<appId>')));
       cmd.appendChild(copyRow('feishu-codex-bridge start'));
-      cmd.appendChild(el('div', 'note', '（已在跑单 bot 的 run 进程不会被打断；上面的命令只影响 Feishu Bridge 拉起的活跃集。）'));
       w.appendChild(checkItem('🟠', '长连接未建立', '需要 Feishu Bridge 拉起这个 bot', cmd));
     }
     var ev = s.event || { state: 'unchecked' };
@@ -2526,6 +2552,37 @@ ${UI_PURE_JS}
     else { next.className = 'btn disabled'; next.disabled = true; }
     actions.appendChild(next);
     return actions;
+  }
+
+  // 「长连接未建立」一键：启用（加入活跃集）→ daemon 在跑就确认重启、没跑就直接启动，
+  // 省去终端 bot use + start。复用 confirmDialog / postAction，与仪表盘重启同一套。
+  function wizEnableAndLaunch() {
+    if (!wizBotId) { toast('❌ 缺少机器人 ID'); return; }
+    var who = (wizSetup && wizSetup.botName) || wizBotId;
+    fetch('/api/bots/' + encodeURIComponent(wizBotId), {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (resp) {
+        if (resp.status !== 200) { toast('❌ ' + (resp.body.message || ('HTTP ' + resp.status))); return; }
+        toast('✅ 已加入活跃集');
+        if (daemon && daemon.running) {
+          confirmDialog({
+            title: '🔄 立即重启 Feishu Bridge 拉起「' + who + '」？',
+            lines: [
+              '已加入活跃集，重启后即可上线。',
+              '重启约数秒，期间所有在线机器人的长连接会短暂断开并自动重连。',
+            ],
+            confirmLabel: '立即重启',
+            onConfirm: function () { postAction('/api/daemon/restart', '重启'); },
+          });
+        } else {
+          // daemon 没在跑（只读预览）→ 启动它（read-only preview 注入了 startDaemon）；
+          // 起来后 /api/console/live 轮询会把页面自动带去可写控制台。
+          postAction('/api/daemon/start', '启动');
+        }
+      })
+      .catch(function () { toast('❌ 请求失败'); });
   }
 
   function copyRow(text) {
