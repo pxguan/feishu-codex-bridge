@@ -481,6 +481,24 @@ export function createOrchestrator(
     }
     return be;
   }
+
+  /** 会话后端是否支持 `/goal` 自治目标（codex caps undefined ⇒ true）。 */
+  function goalCapable(project?: Project): boolean {
+    return backendFor(project?.backend).capabilities?.goal ?? true;
+  }
+
+  /** 后端不支持 `/goal` 时的统一回执。关键：在「加 OKR reaction / 起 reserved run」之前
+   * 拦截 —— 否则 claude 系会先贴上 🎯OKR 受理回执、再被能力守卫拒绝，留下一个自相矛盾的
+   * 假信号（e2e 实测发现）。claude 每轮本就 agentic，引导用户直接派活即可。 */
+  async function denyGoal(msg: NormalizedMessage, inThread: boolean): Promise<void> {
+    await channel
+      .send(
+        msg.chatId,
+        { markdown: '当前后端不支持 `/goal` 自治目标（codex 专属能力）。直接 @我描述任务即可 —— Claude 每轮本就会自主多步骤跑到完成。' },
+        { replyTo: msg.messageId, replyInThread: inThread },
+      )
+      .catch(() => undefined);
+  }
   /** The default backend (codex app-server). Call sites that aren't project-
    * routed yet (status card, /usage, models prewarm, resume-picker pick) keep
    * using it directly — identical to the pre-registry behavior. */
@@ -678,6 +696,10 @@ export function createOrchestrator(
         return;
       }
       if (goalObjective) {
+        if (!goalCapable(project)) {
+          await denyGoal(msg, false);
+          return;
+        }
         void addReaction(msg.messageId, 'OKR');
         startReservedRun(msg, goalObjective, ts.sessionKey, true, project, ts, undefined, undefined, undefined, true);
         return;
@@ -714,6 +736,10 @@ export function createOrchestrator(
         return;
       }
       if (goalObjective) {
+        if (!goalCapable(project)) {
+          await denyGoal(msg, true);
+          return;
+        }
         void addReaction(msg.messageId, 'OKR');
         startReservedRun(msg, goalObjective, ts.sessionKey, false, project, ts, undefined, undefined, undefined, true);
         return;
@@ -743,6 +769,10 @@ export function createOrchestrator(
       return;
     }
     if (goalObjective) {
+      if (!goalCapable(project)) {
+        await denyGoal(msg, false);
+        return;
+      }
       void addReaction(msg.messageId, 'OKR');
       startTopicDirectly(msg, goalObjective, project, true);
       return;

@@ -1,7 +1,18 @@
 import type { LarkChannel } from '@larksuiteoapi/node-sdk';
 import { log } from '../core/logger';
 import { buildWelcomeCard } from '../card/command-cards';
+import { createBackend } from '../agent';
 import { defaultNoMention, type Project } from './registry';
+
+/** 项目后端的能力位（用于欢迎卡按后端裁剪命令）。未知/手编 id 解析失败 ⇒ undefined
+ * （= 全列，与 codex 一致），绝不因此让建项目/绑群失败。 */
+function welcomeCaps(backend?: string): { goal?: boolean; compact?: boolean; resume?: boolean } | undefined {
+  try {
+    return createBackend(backend).capabilities;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Public command manual — an internet-readable Feishu doc (full command guide +
@@ -44,7 +55,7 @@ export async function onboardGroup(channel: LarkChannel, project: Project): Prom
   //    we capture the message_id and Pin it; joined groups skip the Pin.
   try {
     const noMention = project.noMention ?? defaultNoMention(project);
-    const content = JSON.stringify(buildWelcomeCard(kind, HELP_DOC_URL || undefined, noMention));
+    const content = JSON.stringify(buildWelcomeCard(kind, HELP_DOC_URL || undefined, noMention, welcomeCaps(project.backend)));
     const sent = await channel.rawClient.im.v1.message.create({
       params: { receive_id_type: 'chat_id' },
       data: { receive_id: chatId, msg_type: 'interactive', content },

@@ -94,8 +94,43 @@ describe('/goal 可发现性', () => {
     }
   });
 
-  it('欢迎卡两种群类型都列出 /goal', () => {
+  it('欢迎卡两种群类型都列出 /goal（默认 = codex，caps undefined）', () => {
     expect(JSON.stringify(buildWelcomeCard('multi'))).toContain('/goal');
     expect(JSON.stringify(buildWelcomeCard('single'))).toContain('/goal');
+  });
+});
+
+describe('buildWelcomeCard 按后端能力裁剪命令（三后端一致性，与 /help 同源 caps）', () => {
+  // claude-sdk：compact 已实现(true)，但 goal/resume 仍未支持。
+  const sdkCaps = { goal: false, compact: true, resume: false };
+  // claude-acp：goal/compact/resume 全不支持。
+  const acpCaps = { goal: false, compact: false, resume: false };
+
+  it('claude-sdk：欢迎卡不列 /goal、不列 /resume，但仍列 /compact 与 /context（compact 已实现）', () => {
+    for (const kind of ['multi', 'single'] as const) {
+      const j = JSON.stringify(buildWelcomeCard(kind, undefined, true, sdkCaps));
+      expect(j).not.toContain('/goal');
+      expect(j).not.toContain('/resume');
+      expect(j).toContain('/model'); // 共享能力仍在
+    }
+    const multi = JSON.stringify(buildWelcomeCard('multi', undefined, true, sdkCaps));
+    expect(multi).toContain('/compact'); // sdk 支持 → 话题内仍列压缩
+    expect(multi).toContain('/context');
+  });
+
+  it('claude-acp：欢迎卡不列 /goal /resume /compact —— 话题内只剩「/context → 看上下文」', () => {
+    const multi = JSON.stringify(buildWelcomeCard('multi', undefined, true, acpCaps));
+    expect(multi).not.toContain('/goal');
+    expect(multi).not.toContain('/resume');
+    expect(multi).not.toContain('/compact');
+    expect(multi).toContain('/context'); // 看占用仍在
+    expect(multi).toContain('/model');
+  });
+
+  it('codex（caps undefined ⇒ 全 true）：欢迎卡仍全列 /goal /resume /compact（向后兼容）', () => {
+    const multi = JSON.stringify(buildWelcomeCard('multi'));
+    expect(multi).toContain('/goal');
+    expect(multi).toContain('/resume');
+    expect(multi).toContain('/compact');
   });
 });

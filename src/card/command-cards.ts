@@ -281,7 +281,24 @@ export function buildHelpCard(scope: HelpScope, noMention = true, isAdmin = fals
  * single-session group, which defaults off, doesn't promise免@). Adds a
  * "查看完整手册" link button when a doc URL is configured.
  */
-export function buildWelcomeCard(kind: 'multi' | 'single', docUrl?: string, noMention = true): CardObject {
+/**
+ * 欢迎卡按会话后端能力裁剪命令（与 {@link buildHelpCard} 同源 caps，三后端一致性）：
+ * claude 系不支持 /goal /resume 就不在欢迎卡里列；claude-acp 不支持 /compact 也剔除，
+ * claude-sdk 支持 /compact 则保留。codex（caps undefined ⇒ 全 true）保持全列。避免
+ * 用户第一眼的「使用说明」就推销点了不支持的命令。
+ */
+export function buildWelcomeCard(
+  kind: 'multi' | 'single',
+  docUrl?: string,
+  noMention = true,
+  caps?: HelpCaps,
+): CardObject {
+  const showGoal = caps?.goal ?? true;
+  const showCompact = caps?.compact ?? true;
+  const showResume = caps?.resume ?? true;
+  const goalLine = '· `/goal <目标>` → 自主多轮跑到完成（卡上 ⏹ 终止 / 🎯 结束目标）';
+  // /context 总在；/compact 仅后端支持时合并进同一行。
+  const ctxLine = showCompact ? '· `/context` · `/compact` → 看 / 压缩上下文' : '· `/context` → 看上下文占比';
   const elements: CardElement[] = [
     md('👋 **欢迎使用 Codex Bridge** — 本群已绑定一个项目目录，在群里就能驱动本机 Codex 干活。'),
     hr(),
@@ -290,28 +307,28 @@ export function buildWelcomeCard(kind: 'multi' | 'single', docUrl?: string, noMe
     elements.push(
       md('💬 **单会话群**（整群一个会话，上下文连续）'),
       md(
-        `${talkLine(noMention, '交给我处理')}\n` +
-          '· `/goal <目标>` → 自主多轮跑到完成（卡上 ⏹ 终止 / 🎯 结束目标）\n' +
-          '· `/model` → 切换模型 / 推理强度\n' +
-          '· `/settings` → 群设置（免@ 开关）\n' +
+        [
+          talkLine(noMention, '交给我处理'),
+          ...(showGoal ? [goalLine] : []),
+          '· `/model` → 切换模型 / 推理强度',
+          '· `/settings` → 群设置（免@ 开关）',
           '· `/help` → 命令速查卡',
+        ].join('\n'),
       ),
     );
   } else {
     elements.push(
       md('👥 **主群区**'),
       md(
-        '· **@我 + 内容** → 开一个新话题并开始（每话题独立会话）\n' +
-          '· `/goal <目标>` → 自主多轮跑到完成（卡上 ⏹ 终止 / 🎯 结束目标）\n' +
-          '· `/resume` → 恢复历史会话\n' +
+        [
+          '· **@我 + 内容** → 开一个新话题并开始（每话题独立会话）',
+          ...(showGoal ? [goalLine] : []),
+          ...(showResume ? ['· `/resume` → 恢复历史会话'] : []),
           '· `/settings` → 群设置（免@ 开关）',
+        ].join('\n'),
       ),
       md('🧵 **话题内**'),
-      md(
-        '· 直接发消息（免@）→ 继续当前会话\n' +
-          '· `/model` → 切换模型 / 推理强度\n' +
-          '· `/context` · `/compact` → 看 / 压缩上下文',
-      ),
+      md(['· 直接发消息（免@）→ 继续当前会话', '· `/model` → 切换模型 / 推理强度', ctxLine].join('\n')),
       note('任意场景发 `/help` 看当前可用命令。'),
     );
   }
