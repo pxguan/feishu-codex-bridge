@@ -32,8 +32,8 @@ export interface ModelCardState {
   models: ModelInfo[];
   model: string;
   effort: ReasoningEffort;
-  /** the backend whose models this card lists（写回会话前复核，防跨后端把
-   * codex model id 持久化进 claude 会话——resume 时会喂坏 CLI）。旧卡缺省。 */
+  /** the backend whose models this card lists（写回会话前复核，防跨后端把一个后端的
+   * model id 持久化进另一后端的会话——resume 时会喂坏 CLI）。旧卡缺省。 */
   backend?: string;
   createdAt: number;
   /** transient confirmation line */
@@ -42,14 +42,11 @@ export interface ModelCardState {
 
 /**
  * The `/model` card —— **按后端能力自适应**，对齐 Codex 的诚实体验：
- *   - 只在「当前模型真的有 supportedEfforts」时才显示 effort 下拉。旧版在 effort 为空
- *     时回退成假的 low/medium/high，于是 claude-sdk / claude-acp（都 supportedEfforts:[]、
- *     运行期忽略 effort）也显示一个**点了没用的 effort 下拉** —— 这正是用户说的「和
- *     Codex 不一致」。
- *   - 只在「有多个可见模型」时才显示模型下拉（单模型如 ACP 用文字呈现，不给一个只有
- *     一项的下拉）。
- *   - 既不能切模型也不能调 effort（ACP）→ 纯信息卡 + 明确「此后端不支持在此切换」。
- * 这样三后端都用同一张卡，能调的给控件、不能调的给清晰说明（不静默、不造假）。
+ *   - 只在「当前模型真的有 supportedEfforts」时才显示 effort 下拉（没有就不显示，不
+ *     回退成点了没用的假 low/medium/high）。
+ *   - 只在「有多个可见模型」时才显示模型下拉（单模型用文字呈现，不给只有一项的下拉）。
+ *   - 既不能切模型也不能调 effort 的后端 → 纯信息卡 + 明确「此后端不支持在此切换」。
+ * 能调的给控件、不能调的给清晰说明（不静默、不造假）。
  */
 export function buildModelCard(state: ModelCardState): CardObject {
   const visible = state.models.filter((m) => !m.hidden);
@@ -90,9 +87,9 @@ export function buildModelCard(state: ModelCardState): CardObject {
       elements.push(note('该后端不调节推理强度（思考由模型自动调度，无 Codex 那样的 effort 档）'));
     }
   } else {
-    // 既不能切模型也不能调 effort（如 claude-acp）→ 信息卡，明确「此后端不支持」。
+    // 既不能切模型也不能调 effort 的后端 → 信息卡，明确「此后端不支持」。
     elements.push(hr(), md(`当前模型：**${curLabel}**`));
-    elements.push(note('该后端不支持在此切换模型或推理强度 —— 由订阅版 Claude Code 自身配置决定。'));
+    elements.push(note('该后端不支持在此切换模型或推理强度。'));
   }
 
   if (state.note) elements.push(note(state.note));
@@ -221,7 +218,7 @@ function talkLine(noMention: boolean, tail: string): string {
 }
 
 /** 后端能力（只取 /help 关心的三项）。undefined ⇒ 全支持（codex 不声明
- * capabilities，约定 undefined=全能；claude-sdk/acp 显式标 false）。 */
+ * capabilities，约定 undefined=全能；不支持某命令的后端显式标 false）。 */
 export interface HelpCaps {
   goal?: boolean;
   compact?: boolean;
@@ -232,7 +229,7 @@ export interface HelpCaps {
  * `noMention` is the group's effective 免@ state (`noMention ?? defaultNoMention`).
  * `isAdmin` gates the owner-only commands (`/settings`、`/resume`): non-admins
  * don't see them listed (they'd be denied anyway — see handle-message 的门控).
- * `caps` 按会话后端能力裁剪：claude-sdk/claude-acp 不支持 /goal、/compact、/resume
+ * `caps` 按会话后端能力裁剪：不支持 /goal、/compact、/resume 的后端
  * （能力守卫会拒），就不在速查卡里列出来——避免「列了点了才发现不支持」的不一致。
  * 缺省（undefined 或不传）= 全列（codex 行为，向后兼容）。 */
 export function buildHelpCard(scope: HelpScope, noMention = true, isAdmin = false, caps?: HelpCaps): CardObject {
@@ -282,10 +279,9 @@ export function buildHelpCard(scope: HelpScope, noMention = true, isAdmin = fals
  * "查看完整手册" link button when a doc URL is configured.
  */
 /**
- * 欢迎卡按会话后端能力裁剪命令（与 {@link buildHelpCard} 同源 caps，三后端一致性）：
- * claude 系不支持 /goal /resume 就不在欢迎卡里列；claude-acp 不支持 /compact 也剔除，
- * claude-sdk 支持 /compact 则保留。codex（caps undefined ⇒ 全 true）保持全列。避免
- * 用户第一眼的「使用说明」就推销点了不支持的命令。
+ * 欢迎卡按会话后端能力裁剪命令（与 {@link buildHelpCard} 同源 caps）：不支持
+ * /goal /compact /resume 的后端就不在欢迎卡里列；codex（caps undefined ⇒ 全 true）
+ * 保持全列。避免用户第一眼的「使用说明」就推销点了不支持的命令。
  */
 export function buildWelcomeCard(
   kind: 'multi' | 'single',

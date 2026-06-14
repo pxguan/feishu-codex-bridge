@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { killProcessGroup } from '../src/platform/spawn';
 
-// bug B：claude-pty-acp 是 npx→tsx→node→claude 进程树，npm 不转发信号 → 单杀 child
-// 外壳留孤儿。killProcessGroup 用负 pid 杀整组（child 须 detached 起）。注入 kill/sleep，
-// 绝不真杀。
+// bug B：detached 子进程可能是多层进程树（如 npx→tsx→node→…），中间外壳不转发信号 →
+// 单杀 child 会留孤儿。killProcessGroup 用负 pid 杀整组（child 须 detached 起）。注入
+// kill/sleep，绝不真杀。
 
 const noSleep = async (): Promise<void> => {};
 

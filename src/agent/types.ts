@@ -41,7 +41,7 @@ export interface ModelInfo {
 
 /** A past agent session, for the "恢复历史会话" picker (codex: thread/list). */
 export interface ThreadSummary {
-  /** backend session id（codex 的 thread id / claude 的 session UUID），传给 resumeThread */
+  /** backend session id（codex 的 thread id，其它后端可能是 session UUID），传给 resumeThread */
   sessionId: string;
   /** first user message preview */
   preview: string;
@@ -128,7 +128,7 @@ export type AgentEvent =
       tokenBudget: number | null;
     }
   // A backend tool call awaits user approval —— 占位（L-1 审批转发切片）：
-  // claude-sdk 的 canUseTool 将挂起工具调用并 emit 这个事件，由 orchestrator
+  // 将来支持工具审批的后端可挂起工具调用并 emit 这个事件，由 orchestrator
   // 渲染飞书审批卡（先响应再延迟更新），用 requestId 把批/拒回执关联回去。
   // codex 后端在 approvalPolicy 'never' 下永不 emit；run-state 的 reduce 对
   // 未知事件走 default no-op，所以提前声明是安全的。
@@ -184,7 +184,7 @@ export interface TurnOptions {
 }
 
 export interface AgentThread {
-  /** backend session id（codex 的 thread id / claude 的 session UUID）——持久化进
+  /** backend session id（codex 的 thread id，其它后端可能是 session UUID）——持久化进
    * SessionRecord.sessionId，重启后经 resumeThread 找回同一会话。 */
   readonly sessionId: string;
   /** start a turn, streaming events until turn completion/error */

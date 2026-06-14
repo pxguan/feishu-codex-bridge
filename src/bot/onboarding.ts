@@ -29,10 +29,9 @@ export interface OnboardResult {
 }
 
 /**
- * Verify SOME agent backend is runnable — codex OR claude（按需化后只有 claude 的
- * 机器也能启动；Web 引导下载重后端）。探 codex/claude 两个 agent（detectAgents），
- * 任一后端可用即放行；都不可用时**仍只告警不阻塞**（与缺权限策略一致——零交互纯
- * 告知，因为要同时支持人 + codex 安装/升级），让用户在 Web 控制台引导下载。
+ * Verify the agent backend (codex) is runnable。探 codex agent（detectAgents），
+ * 可用即放行；不可用时**仍只告警不阻塞**（与缺权限策略一致——零交互纯告知，因为
+ * 要同时支持人 + codex 安装/升级），让用户装好 codex 后再用。
  *
  * 返回 true 始终放行（不再拒启）。布尔仍保留给调用方签名（早期返回点用得到）。
  */
@@ -40,13 +39,11 @@ export async function ensureAnyAgent(): Promise<boolean> {
   const agents = await detectAgents().catch(() => []);
   const anyAvailable = agents.some((a) => a.backends.some((b) => b.available));
   if (anyAvailable) return true;
-  // 都无：告警但不阻塞（Web 控制台可引导下载 Claude SDK / 装 codex）。
+  // 都无：告警但不阻塞。
   const rule = '-'.repeat(64);
   console.error(`\n${rule}`);
-  console.error('⚠️  未检测到任何可用 agent 后端（codex / claude 都没就绪）——仍会启动，但群里发消息会报后端不可用。');
-  console.error('   选一个装上：');
-  console.error('    • codex（能力最全）：npm i -g @openai/codex，然后 codex login');
-  console.error('    • Claude SDK（开箱即用，约 224M）：启动后在 Web 控制台点「下载 Claude SDK」');
+  console.error('⚠️  未检测到可用的 codex 后端——仍会启动，但群里发消息会报后端不可用。');
+  console.error('   装上 codex：npm i -g @openai/codex，然后 codex login');
   console.error('   装好后用 `feishu-codex-bridge doctor` 自检。');
   console.error(`${rule}\n`);
   return true;

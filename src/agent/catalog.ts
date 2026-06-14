@@ -10,7 +10,7 @@ import { DEFAULT_BACKEND_ID, type PermissionMode } from './types';
  * catalog（设计 §3.5）。Web 后端页 / DM picker / doctor / 按需下载按钮全自动出现。
  */
 
-/** 底层 agent 家族（picker 按此分组：Codex 组 / Claude 组；string 为未来 agent 预留）。 */
+/** 底层 agent 家族（picker 按此分组；当前仅 Codex 组；string 为未来 agent 预留）。 */
 export type AgentFamily = 'codex' | 'claude' | (string & {});
 
 /** 后端进程的接入方式（仅描述/分组用，不参与运行路由）。 */
@@ -19,9 +19,10 @@ export type BackendAccess = 'app-server' | 'sdk' | 'acp';
 /**
  * 依赖类型 —— 决定「装哪 / 怎么检测 / 能不能一键按需装」。
  *   'external-cli'  外部 CLI（codex / 未来 gemini-cli），bridge 不负责装，doctor 探 PATH。
- *   'npm-ondemand'  npm 包，按需装到用户私装目录（claude-agent-sdk 库 / claude-pty-acp bin）。
+ *   'npm-ondemand'  npm 包，按需装到用户私装目录（库类 / bin 类两形态）。
  *                   **唯一可一键下载的类型。** 库类（无 binName）走 import + require.resolve；
  *                   bin 类（有 binName）被 spawn、走 node_modules/.bin 路径（见 backend-loader）。
+ *                   当前内置后端均非此类（codex 是 external-cli），保留以备将来挂新后端。
  *   'npm-external'  外部 npm 包，用户自管（当前内置后端无此类，保留给未来不便按需装的包）。
  */
 export type DepKind = 'external-cli' | 'npm-ondemand' | 'npm-external';
@@ -32,9 +33,9 @@ export interface BackendDep {
   pkg?: string;
   /**
    * 该包作为「被 spawn 的可执行文件」消费时的 bin 名（npm 装包生成 node_modules/.bin/<binName>）。
-   * 有此字段 ⇒ bin 类后端（claude-pty-acp）：已装判定/命令解析走 .bin 路径而非 require.resolve
-   *   （bin-only 包通常无 main 入口，resolve 必失败——claude-pty-acp 正是只有 bin）。
-   * 无此字段 ⇒ 库类后端（claude-agent-sdk）：走 import() + require.resolve。
+   * 有此字段 ⇒ bin 类后端：已装判定/命令解析走 .bin 路径而非 require.resolve
+   *   （bin-only 包通常无 main 入口，resolve 必失败）。
+   * 无此字段 ⇒ 库类后端：走 import() + require.resolve。
    */
   binName?: string;
   /** pin 版本（npm-ondemand，避免漂移）；undefined ⇒ latest。 */
@@ -59,11 +60,12 @@ export interface BackendCatalogEntry {
   /** picker 副标题（一句话接入说明）。 */
   blurb?: string;
   /**
-   * 「用户不可见」闸（产品门：claude 两后端尚未完整验证，先对用户全隐藏）。
+   * 「用户不可见」闸（通用机制：把尚未就绪的后端先对用户全隐藏；当前无隐藏后端，
+   * 保留以备将来挂新后端）。
    * true ⇒ 不进任何**用户可见面**：Feishu 新建/绑定卡的后端选择器、Web 后端页、
    *        宿主机体检页、智能默认后端的候选集。但**仍保留在 catalog/REGISTRY**
    *        （catalogBackendIds 仍含它 → 与 REGISTRY 的配对单测不破；代码在仓、
-   *        只是无入口可达）。验证完毕要点亮：把对应条目的 `hidden: true` 删掉即可，零返工。
+   *        只是无入口可达）。要点亮：把对应条目的 `hidden: true` 删掉即可，零返工。
    * 设计：曝光过滤集中在 {@link projectCreatableBackends} / pickDefaultBackend(detect.ts) /
    *      listBackendCatalog(admin/service.ts) / doctorBackends(admin/host.ts) 四处。
    */
@@ -92,44 +94,6 @@ export const BACKEND_CATALOG: readonly BackendCatalogEntry[] = [
     },
     // supportedModes undefined ⇒ 全档（qa/write/full）。
     blurb: '能力最全（goal/steer/compact/resume + 真沙箱只读档）',
-  },
-  {
-    id: 'claude-sdk',
-    agentFamily: 'claude',
-    displayName: 'Claude（Agent SDK）',
-    access: 'sdk',
-    dep: {
-      kind: 'npm-ondemand',
-      pkg: '@anthropic-ai/claude-agent-sdk',
-      // version 省略 ⇒ latest：下载/更新都取最新（让「检查更新」有意义；坏发布风险由上游控）。
-      approxSizeMB: 224,
-      detectHint: '未安装 @anthropic-ai/claude-agent-sdk（在控制台点「下载」即按需装到用户目录）',
-      installCmd: '在 Web 控制台点「下载 Claude SDK」（约 224M，按需装到用户目录）',
-    },
-    supportedModes: ['full'],
-    blurb: '开箱即用（SDK 自带 Claude Code 二进制，约 224M，按需下载）',
-    hidden: true, // 用户不可见闸：claude 后端尚未完整验证，先全隐藏（验证后删此行点亮）
-  },
-  {
-    id: 'claude-acp',
-    agentFamily: 'claude',
-    displayName: 'Claude（订阅·ACP）',
-    access: 'acp',
-    dep: {
-      kind: 'npm-ondemand',
-      pkg: 'claude-pty-acp',
-      binName: 'claude-pty-acp',
-      // version 省略 ⇒ latest：claude-pty-acp 是本项目自管的适配器、迭代快，跟 latest 比
-      // pin 死省去每次发版改 catalog 的摩擦（坏发布的风险由我们自己控）。
-      // node-pty 多数平台走 prebuilds（darwin/win 预编译、无需现场编译），可按需装到用户目录；
-      // 仍需本机 claude CLI 已登录（适配器把交互式 Claude Code 暴露成 ACP agent → 走订阅）。
-      approxSizeMB: 75,
-      detectHint: '未安装 claude-pty-acp（在控制台点「下载」即按需装到用户目录；另需本机 claude 已登录）',
-      installCmd: '在 Web 控制台点「下载 Claude 订阅适配器」（约 75M·node-pty 多平台免编译）；或 npm i -g claude-pty-acp',
-    },
-    supportedModes: ['full'],
-    blurb: '走订阅计费（不烧 SDK credit），按需下载适配器 + 需本机 claude 已登录',
-    hidden: true, // 用户不可见闸：claude 后端尚未完整验证，先全隐藏（验证后删此行点亮）
   },
 ];
 
@@ -162,8 +126,8 @@ export function catalogBackendIds(): string[] {
  *   ① codex（DEFAULT_BACKEND_ID）始终可选 —— 它是 external-cli 基线（全局 codex / Codex.app），
  *      isBackendEntryInstalled 对 external-cli 恒 false，但作为默认后端必须始终能选；
  *   ② 其余后端「已下载」才列（isInstalled 注入，本模块不碰文件系统、便于单测）；
- *   ③ 再按项目权限档过滤：后端 supportedModes 不含该档则剔除（claude 系仅 full，
- *      外部群 qa 档下自然不出现）。
+ *   ③ 再按项目权限档过滤：后端 supportedModes 不含该档则剔除（仅支持部分档的后端，
+ *      在不支持的档下自然不出现）。
  * 卡片里下不了后端 → 未下载的直接不显示，引导去 Web「后端 Agent」页下载。
  */
 export function projectCreatableBackends(
@@ -171,7 +135,7 @@ export function projectCreatableBackends(
   isInstalled: (entry: BackendCatalogEntry) => boolean,
 ): BackendCatalogEntry[] {
   return BACKEND_CATALOG.filter((e) => {
-    if (e.hidden) return false; // 用户不可见闸：隐藏后端不进 picker（claude 暂全隐藏）
+    if (e.hidden) return false; // 用户不可见闸：隐藏后端不进 picker
     const installed = e.id === DEFAULT_BACKEND_ID || isInstalled(e);
     if (!installed) return false;
     if (e.supportedModes && !e.supportedModes.includes(mode)) return false;

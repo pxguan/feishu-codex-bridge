@@ -125,6 +125,7 @@ function stubService(): AdminService {
       };
     },
     async listBackendCatalog() {
+      // codex-only：catalog 只剩 codex-appserver（external-cli，不可一键装）。
       return {
         defaultBackend: 'codex-appserver',
         entries: [
@@ -141,35 +142,17 @@ function stubService(): AdminService {
             canUninstall: false,
             isDefault: true,
           },
-          {
-            id: 'claude-sdk',
-            agentFamily: 'claude',
-            displayName: 'Claude（Agent SDK）',
-            access: 'sdk',
-            depKind: 'npm-ondemand',
-            depState: 'not-installed' as const,
-            installable: true,
-            approxSizeMB: 224,
-            version: null,
-            installedVersion: null,
-            canUninstall: false,
-            hint: '未安装，点下载',
-            isDefault: false,
-            supportedModes: ['full'] as const,
-          },
         ],
       };
     },
-    async installBackend(id, onProgress, signal) {
-      if (id === 'claude-acp') {
-        return { ok: false as const, code: null, aborted: false, tail: '「Claude（订阅·ACP）」不支持一键下载。手动安装：…' };
-      }
+    async installBackend(_id, onProgress, signal) {
+      // 默认 stub 走「成功推进」路径，验证 install SSE 的 log→done 路由管道。
       onProgress?.('added 1 package\n');
       if (signal?.aborted) return { ok: false as const, code: null, aborted: true, tail: '安装已取消' };
       return { ok: true as const, code: 0, aborted: false, tail: 'added 1 package' };
     },
     async uninstallBackend(id) {
-      return id === 'claude-sdk' ? { ok: true, message: '已卸载' } : { ok: false, message: '无法卸载' };
+      return id === 'codex-appserver' ? { ok: true, message: '已卸载' } : { ok: false, message: '无法卸载' };
     },
     async backendVersion() {
       return { installed: '0.3.1', latest: '0.3.2', hasUpdate: true };
@@ -407,7 +390,7 @@ describe('web server · 写操作占位（只读预览：daemon 未跑）', () =
     const res = await authed(`/api/project/demo/${action}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ backend: 'claude-sdk', mode: 'qa', on: true }),
+      body: JSON.stringify({ backend: 'codex-appserver', mode: 'qa', on: true }),
     });
     expect(res.status).toBe(501);
     const body = await jsonOf(res);
@@ -449,11 +432,11 @@ describe('web server · 写操作真实现（daemon 进程内 service）', () =>
     const res = await fetch(`${writeBase}/api/project/demo/backend?bot=cli_a`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ backend: 'claude-sdk' }),
+      body: JSON.stringify({ backend: 'codex-appserver' }),
     });
     expect(res.status).toBe(200);
     expect((await jsonOf(res)).ok).toBe(true);
-    expect(written).toEqual([{ botId: 'cli_a', project: 'demo', backend: 'claude-sdk' }]);
+    expect(written).toEqual([{ botId: 'cli_a', project: 'demo', backend: 'codex-appserver' }]);
   });
 
   it('校验拒绝（AdminWriteError）→ 409 write_rejected + 中文原因', async () => {
@@ -743,18 +726,16 @@ describe('web server · 扫码注册 SSE', () => {
 });
 
 describe('web server · 后端 catalog + 按需安装', () => {
-  it('GET /api/backends：catalog + depState/installable/approxSize/version + 默认', async () => {
+  it('GET /api/backends：catalog + depState/installable/version + 默认（codex-only）', async () => {
     const body = await jsonOf(await authed('/api/backends'));
     expect(body.defaultBackend).toBe('codex-appserver');
-    expect(body.entries).toHaveLength(2);
+    expect(body.entries).toHaveLength(1);
     const codex = body.entries.find((e: { id: string }) => e.id === 'codex-appserver');
-    expect(codex).toMatchObject({ depState: 'installed', installable: false, isDefault: true });
-    const sdk = body.entries.find((e: { id: string }) => e.id === 'claude-sdk');
-    expect(sdk).toMatchObject({ depState: 'not-installed', installable: true, approxSizeMB: 224, version: null });
+    expect(codex).toMatchObject({ depState: 'installed', installable: false, isDefault: true, version: '1.0.0' });
   });
 
-  it('POST /api/backends/claude-sdk/install：SSE 推 log → done', async () => {
-    const res = await authed('/api/backends/claude-sdk/install', { method: 'POST' });
+  it('POST /api/backends/:id/install：SSE 推 log → done', async () => {
+    const res = await authed('/api/backends/codex-appserver/install', { method: 'POST' });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/event-stream');
     const buf = await readSseUntil(res, '"type":"done"', 4000);
@@ -763,22 +744,39 @@ describe('web server · 后端 catalog + 按需安装', () => {
     expect(buf).toContain('"type":"done"');
   }, 8000);
 
-  it('POST /api/backends/claude-acp/install：external 不真装 → error', async () => {
-    const res = await authed('/api/backends/claude-acp/install', { method: 'POST' });
-    const buf = await readSseUntil(res, '"type":"error"', 4000);
-    expect(buf).toContain('"type":"error"');
-    expect(buf).toContain('不支持一键下载');
+  it('POST /api/backends/:id/install：external 不真装 → error', async () => {
+    // external-cli 后端（codex）不可一键装：installBackend 返回 {ok:false}，路由吐 error 帧。
+    const svc = stubService();
+    svc.installBackend = async () => ({
+      ok: false as const,
+      code: null,
+      aborted: false,
+      tail: '「Codex」不支持一键下载。手动安装：…',
+    });
+    const extWeb = createWebServer({ service: svc, token: TOKEN, logDir });
+    const { port } = await extWeb.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/backends/codex-appserver/install`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      const buf = await readSseUntil(res, '"type":"error"', 4000);
+      expect(buf).toContain('"type":"error"');
+      expect(buf).toContain('不支持一键下载');
+    } finally {
+      await extWeb.close();
+    }
   }, 8000);
 
   it('只读预览（installBackend 抛 NotWiredYetError）→ error code=not_wired_yet', async () => {
     const svc = stubService();
     svc.installBackend = async () => {
-      throw new NotWiredYetError('⬇️ 下载「Claude（Agent SDK）」');
+      throw new NotWiredYetError('⬇️ 下载「Codex」');
     };
     const previewWeb = createWebServer({ service: svc, token: TOKEN, logDir });
     const { port } = await previewWeb.listen(0);
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/backends/claude-sdk/install`, {
+      const res = await fetch(`http://127.0.0.1:${port}/api/backends/codex-appserver/install`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${TOKEN}` },
       });
@@ -792,7 +790,7 @@ describe('web server · 后端 catalog + 按需安装', () => {
 
   it('后端 API 同样要鉴权：无 token → 401', async () => {
     expect((await get('/api/backends')).status).toBe(401);
-    expect((await get('/api/backends/claude-sdk/install', { method: 'POST' })).status).toBe(401);
+    expect((await get('/api/backends/codex-appserver/install', { method: 'POST' })).status).toBe(401);
   });
 });
 

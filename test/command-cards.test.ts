@@ -56,8 +56,8 @@ describe('buildResumeCard', () => {
     const threads: ThreadSummary[] = [
       { sessionId: 'c1', preview: 'x', createdAt: NOW - 60, updatedAt: NOW - 60 },
     ];
-    const withBackend = buildResumeCard({ ...state(threads), backend: 'claude-sdk' });
-    expect(buttons(withBackend)[0].behaviors[0].value).toMatchObject({ t: 'c1', b: 'claude-sdk' });
+    const withBackend = buildResumeCard({ ...state(threads), backend: 'codex-appserver' });
+    expect(buttons(withBackend)[0].behaviors[0].value).toMatchObject({ t: 'c1', b: 'codex-appserver' });
     // 旧 state（无 backend）→ 不带 b，handler 落回默认后端
     const legacy = buildResumeCard(state(threads));
     expect(buttons(legacy)[0].behaviors[0].value.b).toBeUndefined();
@@ -100,26 +100,24 @@ describe('/goal 可发现性', () => {
   });
 });
 
-describe('buildWelcomeCard 按后端能力裁剪命令（三后端一致性，与 /help 同源 caps）', () => {
-  // claude-sdk：compact 已实现(true)，但 goal/resume 仍未支持。
-  const sdkCaps = { goal: false, compact: true, resume: false };
-  // claude-acp：goal/compact/resume 全不支持。
-  const acpCaps = { goal: false, compact: false, resume: false };
-
-  it('claude-sdk：欢迎卡不列 /goal、不列 /resume，但仍列 /compact 与 /context（compact 已实现）', () => {
+describe('buildWelcomeCard 按后端能力裁剪命令（与 /help 同源 caps）', () => {
+  it('caps 标 goal/resume:false 时欢迎卡不列 /goal、/resume，但 compact:true 仍列 /compact 与 /context', () => {
+    // 局部能力：compact 已实现(true)，但 goal/resume 显式 false。
+    const caps = { goal: false, compact: true, resume: false };
     for (const kind of ['multi', 'single'] as const) {
-      const j = JSON.stringify(buildWelcomeCard(kind, undefined, true, sdkCaps));
+      const j = JSON.stringify(buildWelcomeCard(kind, undefined, true, caps));
       expect(j).not.toContain('/goal');
       expect(j).not.toContain('/resume');
       expect(j).toContain('/model'); // 共享能力仍在
     }
-    const multi = JSON.stringify(buildWelcomeCard('multi', undefined, true, sdkCaps));
-    expect(multi).toContain('/compact'); // sdk 支持 → 话题内仍列压缩
+    const multi = JSON.stringify(buildWelcomeCard('multi', undefined, true, caps));
+    expect(multi).toContain('/compact'); // compact:true → 话题内仍列压缩
     expect(multi).toContain('/context');
   });
 
-  it('claude-acp：欢迎卡不列 /goal /resume /compact —— 话题内只剩「/context → 看上下文」', () => {
-    const multi = JSON.stringify(buildWelcomeCard('multi', undefined, true, acpCaps));
+  it('caps 全 false 时欢迎卡不列 /goal /resume /compact —— 话题内只剩「/context → 看上下文」', () => {
+    const caps = { goal: false, compact: false, resume: false };
+    const multi = JSON.stringify(buildWelcomeCard('multi', undefined, true, caps));
     expect(multi).not.toContain('/goal');
     expect(multi).not.toContain('/resume');
     expect(multi).not.toContain('/compact');

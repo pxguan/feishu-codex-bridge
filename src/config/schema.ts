@@ -75,10 +75,6 @@ export interface AppPreferences {
   access?: AppAccess;
   /** SIGTERM→SIGKILL grace (ms) for the app-server child. Default 5000. */
   agentStopGraceMs?: number;
-  /** ACP 后端（claude-acp）的 server 启动命令覆盖——开源安装不能写死任何本机路径，
-   * 默认在 PATH 上找 `claude-pty-acp`；装在别处/要走 `node dist/index.js` 时在
-   * 这里指定。形态对齐 SecretsConfig ProviderConfig 的 command/args。 */
-  acpCommand?: { command: string; args?: string[] };
 }
 
 export interface AppConfig {
@@ -131,17 +127,6 @@ export function getRequireMentionInGroup(cfg: AppConfig): boolean {
 
 export function getPendingPolicy(cfg: AppConfig): PendingPolicy {
   return cfg.preferences?.pendingPolicy === 'queue' ? 'queue' : 'steer';
-}
-
-/** claude-acp 后端的 server 命令覆盖（preferences.acpCommand）。未配置或形态
- * 不对 → undefined（后端落回 PATH 查找 `claude-pty-acp`）。 */
-export function getAcpCommand(cfg: Partial<AppConfig>): { command: string; args: string[] } | undefined {
-  const raw = cfg.preferences?.acpCommand;
-  if (!raw || typeof raw !== 'object' || typeof raw.command !== 'string' || !raw.command.trim()) {
-    return undefined;
-  }
-  const args = Array.isArray(raw.args) ? raw.args.filter((a): a is string => typeof a === 'string') : [];
-  return { command: raw.command, args };
 }
 
 export function getAgentStopGraceMs(cfg: AppConfig): number {

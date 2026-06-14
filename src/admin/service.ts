@@ -152,8 +152,8 @@ export interface AdminService {
    */
   listBackendCatalog(): Promise<AdminBackendCatalog>;
   /**
-   * 按需安装一个后端依赖（npm-ondemand，如 claude-agent-sdk）到用户私装目录。
-   * 仅 installable 的后端可装；external（claude-acp / codex）调用即 {ok:false} 带手动装法。
+   * 按需安装一个后端依赖（npm-ondemand 包）到用户私装目录。
+   * 仅 installable 的后端可装；external-cli（codex）调用即 {ok:false} 带手动装法。
    * onProgress 透传 npm 输出（SSE {type:'log'}），signal 取消（kill 子进程 + 回滚半装）。
    * **install 是 daemon 注入态能力**（owns runtime）：只读预览进程无 installer 注入 →
    * 抛 {@link NotWiredYetError}（HTTP 501），引导先起 daemon。绝不 throw 其它错。
@@ -717,7 +717,7 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
     },
 
     async listBackendCatalog(): Promise<AdminBackendCatalog> {
-      // force：用户刚装完后要看「现在」的默认（装好 SDK 后 claude 才进候选）。
+      // force：用户刚装完后要看「现在」的默认（绕过探测缓存）。
       const defaultBackend = await effectiveDefaultBackend({ force: true }).catch(() => DEFAULT_BACKEND_ID);
       const entries = await Promise.all(
         visibleCatalog().map((entry) => catalogEntryStatus(entry, defaultBackend)),
@@ -730,7 +730,7 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       if (!entry) {
         return { ok: false, code: null, aborted: false, tail: `未知后端「${id}」` };
       }
-      // 仅 installable（npm-ondemand）可一键装；external（codex / claude-acp）给手动装法。
+      // 仅 installable（npm-ondemand）可一键装；external-cli（codex）给手动装法。
       if (!isInstallable(entry)) {
         return {
           ok: false,
@@ -745,7 +745,7 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       const verb = opts?.update ? '🔄 更新' : '⬇️ 下载';
       // install/update 是 daemon 注入态能力（owns runtime）；只读预览无注入 → 501 引导起 daemon。
       if (!deps.installBackend) throw new NotWiredYetError(`${verb}「${entry.displayName}」`);
-      // binName ⇒ bin 类后端（claude-pty-acp）：装完按 .bin 校验而非 require.resolve。
+      // binName ⇒ bin 类后端：装完按 .bin 校验而非 require.resolve。
       return deps.installBackend(pkg, onProgress, signal, { binName: entry.dep.binName });
     },
 
@@ -940,7 +940,7 @@ async function catalogEntryStatus(
   const ok = probe?.ok === true;
   // depState：installed（探测通过）/ not-installed（npm-ondemand 可一键装）/
   // external-missing（external-cli / npm-external 缺失，需手动装）。优先用 doctor
-  // 自报的 depState（claude-sdk 的 not-installed），否则按 ok + installable 推。
+  // 自报的 depState（npm-ondemand 未装时的 not-installed），否则按 ok + installable 推。
   const installable = ok ? false : isInstallable(entry);
   const depState: BackendDepState =
     probe?.depState ?? (ok ? 'installed' : installable ? 'not-installed' : 'external-missing');
@@ -965,8 +965,8 @@ async function catalogEntryStatus(
 
 /** 与 DM 🧠 后端检测卡同源：按注册表动态探测全部后端，绝不硬编码列表；绝不抛错。 */
 async function probeAllBackends(): Promise<AdminBackendStatus[]> {
-  // 只探**用户可见**后端：hidden 闸隐藏的 claude 两后端不出现在接入诊断 / 宿主机体检里
-  // （与 listBackendCatalog / host.doctorBackends 同口径，走 visibleCatalog 单一过滤源）。
+  // 只探**用户可见**后端（visibleCatalog 过滤 hidden 闸）：与 listBackendCatalog /
+  // host.doctorBackends 同口径，走 visibleCatalog 单一过滤源。
   return Promise.all(
     visibleCatalog().map((e) => e.id).map(async (id) => {
       const backend = createBackend(id);

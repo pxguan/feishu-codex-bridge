@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import { fixNativeHelperPerms } from '../src/agent/native-helpers';
 
 // node-pty 的 macOS spawn-helper 经 npm 装后偶发丢 +x（变 0644）→ posix_spawnp failed
-// → ACP 后端必挂。fixNativeHelperPerms 把所有 node-pty/prebuilds/<平台>/spawn-helper
-// 补回 0755。这里用临时目录真实建文件 + chmod 验证（不 mock fs）。
+// → 任何依赖 node-pty 的按需后端必挂。fixNativeHelperPerms 把顶层
+// node_modules/node-pty/prebuilds/<平台>/spawn-helper 补回 0755。
+// 这里用临时目录真实建文件 + chmod 验证（不 mock fs）。
 
 let root: string;
 
@@ -43,13 +44,14 @@ describe('fixNativeHelperPerms', () => {
     expect(await isExec(b)).toBe(true);
   });
 
-  it('未 hoist：嵌在 claude-pty-acp/node_modules 下的 node-pty 也修', async () => {
+  it('只扫顶层 node_modules/node-pty：嵌在其他包 node_modules 下的不动', async () => {
+    // npm 默认 hoist，node-pty 在顶层 node_modules；src 只扫顶层那一处。
     const nested = await makeHelper(
-      'node_modules/claude-pty-acp/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper',
+      'node_modules/some-backend/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper',
       0o644,
     );
     await fixNativeHelperPerms(root);
-    expect(await isExec(nested)).toBe(true);
+    expect(await isExec(nested)).toBe(false);
   });
 
   it('已是可执行 → 幂等不报错', async () => {

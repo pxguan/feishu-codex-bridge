@@ -75,16 +75,21 @@ describe('depTriState —— 后端依赖三态', () => {
 });
 
 describe('groupBackends —— catalog 按 agentFamily 分组', () => {
-  const entries = [
-    { id: 'codex-appserver', agentFamily: 'codex' },
-    { id: 'claude-sdk', agentFamily: 'claude' },
-    { id: 'claude-acp', agentFamily: 'claude' },
-  ];
-  it('codex 单组 + claude 两接入一组，保首次出现顺序', () => {
+  // codex-only：catalog 只剩 codex-appserver，分组结果只有一个 codex family 组。
+  const entries = [{ id: 'codex-appserver', agentFamily: 'codex' }];
+  it('codex 单组，保首次出现顺序', () => {
     const groups = pure.groupBackends(entries);
-    expect(groups.map((g) => g.family)).toEqual(['codex', 'claude']);
+    expect(groups.map((g) => g.family)).toEqual(['codex']);
     expect(groups[0]!.entries).toHaveLength(1);
-    expect(groups[1]!.entries).toHaveLength(2);
+  });
+  it('同 family 多接入归一组（分组逻辑通用性）', () => {
+    // 用合成的同 family 多条目验证「按 agentFamily 聚合 + 保首次出现顺序」的通用逻辑。
+    const groups = pure.groupBackends([
+      { agentFamily: 'codex' },
+      { agentFamily: 'codex' },
+    ]);
+    expect(groups.map((g) => g.family)).toEqual(['codex']);
+    expect(groups[0]!.entries).toHaveLength(2);
   });
   it('空入参 → 空分组', () => {
     expect(pure.groupBackends([])).toEqual([]);

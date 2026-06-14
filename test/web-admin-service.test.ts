@@ -84,7 +84,7 @@ beforeAll(async () => {
     createdAt: 100,
     kind: 'multi',
     mode: 'write',
-    backend: 'claude-sdk',
+    backend: 'codex-appserver',
     allowedUsers: ['ou_1'],
   });
   for (const [threadId, chatId] of [
@@ -154,7 +154,7 @@ describe('createReadonlyAdminService · 只读方法（显式路径，不碰全�
     expect(p.noMention).toBe(true); // created+multi 默认免@ 开
     expect(p.autoCompact).toBe(true);
     expect(p.network).toBe(false);
-    expect(p.backend).toBe('claude-sdk');
+    expect(p.backend).toBe('codex-appserver'); // 显式设的后端原样透传
     expect(p.allowedUsersCount).toBe(1);
     expect(p.sessionCount).toBe(2); // oc_other 的 t3 不算
   });
@@ -199,7 +199,7 @@ describe('createReadonlyAdminService · 只读方法（显式路径，不碰全�
 
 describe('createReadonlyAdminService · 写方法（只读预览占位）', () => {
   it('四个写方法一律抛 NotWiredYetError', async () => {
-    await expect(service.switchBackend(BOT_A, 'proj-a', 'claude-sdk')).rejects.toBeInstanceOf(NotWiredYetError);
+    await expect(service.switchBackend(BOT_A, 'proj-a', 'codex-appserver')).rejects.toBeInstanceOf(NotWiredYetError);
     await expect(service.setPermissionMode(BOT_A, 'proj-a', { mode: 'qa' })).rejects.toBeInstanceOf(NotWiredYetError);
     await expect(service.setNoMention(BOT_A, 'proj-a', true)).rejects.toBeInstanceOf(NotWiredYetError);
     await expect(service.setAutoCompact(BOT_A, 'proj-a', false)).rejects.toBeInstanceOf(NotWiredYetError);
@@ -220,12 +220,12 @@ describe('createAdminService · daemon 进程内（executeWrite + liveStatus 注
     const daemon = createAdminService({
       executeWrite: async (botId, op) => void calls.push({ botId, op }),
     });
-    await daemon.switchBackend(BOT_A, 'proj-a', 'claude-sdk');
+    await daemon.switchBackend(BOT_A, 'proj-a', 'codex-appserver');
     await daemon.setPermissionMode(BOT_A, 'proj-a', { mode: 'qa', guestMode: 'write', network: true });
     await daemon.setNoMention(BOT_A, 'proj-a', false);
     await daemon.setAutoCompact(BOT_A, 'proj-a', true);
     expect(calls).toEqual([
-      { botId: BOT_A, op: { kind: 'switchBackend', project: 'proj-a', backend: 'claude-sdk' } },
+      { botId: BOT_A, op: { kind: 'switchBackend', project: 'proj-a', backend: 'codex-appserver' } },
       {
         botId: BOT_A,
         op: { kind: 'setPermissionMode', project: 'proj-a', mode: 'qa', guestMode: 'write', network: true },

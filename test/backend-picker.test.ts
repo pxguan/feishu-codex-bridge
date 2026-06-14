@@ -6,7 +6,7 @@ import {
   type BackendProbeRow,
 } from '../src/card/dm-cards';
 import { probeBackends, validateBackendSwitch } from '../src/bot/handle-message';
-import { backendIds, createBackend } from '../src/agent';
+import { createBackend } from '../src/agent';
 import type { BackendProbe } from '../src/agent/types';
 
 
@@ -71,9 +71,9 @@ describe('buildProjectSettingsCard 的 🧠 后端区块', () => {
 
   it('调用方传入展示名时优先用展示名', () => {
     const json = JSON.stringify(
-      buildProjectSettingsCard({ ...base, backend: 'claude-sdk' }, 'Claude Code (Agent SDK)'),
+      buildProjectSettingsCard({ ...base, backend: 'codex-appserver' }, 'Codex (app-server)'),
     );
-    expect(json).toContain('Claude Code (Agent SDK)');
+    expect(json).toContain('Codex (app-server)');
   });
 
   it('notice 提示行渲染在卡顶（切换成功后的「✅ 已切到 xxx · 新话题生效」留痕）', () => {
@@ -85,24 +85,24 @@ describe('buildProjectSettingsCard 的 🧠 后端区块', () => {
 });
 
 describe('buildNewProjectFormCard 的后端选择（创建时选定）', () => {
-  const two = [
-    { label: 'Codex App Server', value: 'codex-appserver' },
-    { label: 'Claude（SDK）', value: 'claude-sdk' },
-  ];
+  // codex-only 现实：「可选后端」只有 codex 一个。下面单后端用例即默认主路径。
+  const codexOnly = [{ label: 'Codex App Server', value: 'codex-appserver' }];
 
-  it('多个可选后端 → 渲染 select_static 下拉（name=backend，预选第一个 codex）+ 固定文案', () => {
-    const json = JSON.stringify(buildNewProjectFormCard({ backends: two }));
-    expect(json).toContain('select_static');
-    expect(json).toContain('claude-sdk');
-    expect(json).toContain('固定不可切换');
-    // 预选默认 codex
-    expect(json).toContain('"initial_option":"codex-appserver"');
-  });
-
-  it('仅一个可选后端（只有 codex）→ 不出下拉，改静态文案显示默认后端名', () => {
-    const json = JSON.stringify(buildNewProjectFormCard({ backends: [two[0]!] }));
+  it('仅一个可选后端（codex）→ 不出下拉，改静态文案显示默认后端名（默认主路径）', () => {
+    const json = JSON.stringify(buildNewProjectFormCard({ backends: codexOnly }));
     expect(json).not.toContain('select_static');
     expect(json).toContain('Codex App Server');
+  });
+
+  it('多个可选后端 → 渲染 select_static 下拉（name=backend，预选第一个 codex）+ 固定文案', () => {
+    // 渲染分支保留（backends.length > 1 走下拉），用一个泛化第二项触发，不引用已删后端。
+    const multi = [...codexOnly, { label: '其它后端', value: 'other-backend' }];
+    const json = JSON.stringify(buildNewProjectFormCard({ backends: multi }));
+    expect(json).toContain('select_static');
+    expect(json).toContain('other-backend');
+    expect(json).toContain('固定不可切换');
+    // 预选第一个（codex）
+    expect(json).toContain('"initial_option":"codex-appserver"');
   });
 
   it('未传 backends → 不渲染后端选择块（向后兼容）', () => {
@@ -112,17 +112,20 @@ describe('buildNewProjectFormCard 的后端选择（创建时选定）', () => {
   });
 
   it('完成卡显示选定后端（按 id 解析展示名；缺省回退默认 codex 名）', () => {
-    const withSdk = JSON.stringify(
-      buildNewProjectDoneCard({ name: 'P', cwd: '/x', kind: 'multi', origin: 'created', backend: 'claude-sdk' } as never),
+    const done = JSON.stringify(
+      buildNewProjectDoneCard({ name: 'P', cwd: '/x', kind: 'multi', origin: 'created', backend: 'codex-appserver' } as never),
     );
-    expect(withSdk).toContain('🧠');
-    expect(withSdk).toContain('Claude'); // claude-sdk 的展示名含 Claude
+    expect(done).toContain('🧠');
+    expect(done).toContain('Codex'); // codex-appserver 的展示名 = Codex
   });
 });
 
 describe('validateBackendSwitch（切换校验的纯函数）', () => {
   const ok: BackendProbe = { ok: true, version: '1.0' };
-  const registered = ['codex-appserver', 'claude-sdk'];
+  // 纯函数：registered/supportedModes 都是入参，不读真注册表。codex-only 现实下真注册表
+  // 只有 codex-appserver；这里额外塞一个泛化 'full-only' 占位 id 以保住「仅支持 full」分支的覆盖
+  // （不引用任何已删后端）。
+  const registered = ['codex-appserver', 'full-only'];
 
   it('注册表里没有的 id 拒绝，并列出可用后端', () => {
     const reason = validateBackendSwitch({ target: 'no-such', registered, project: {}, probe: ok });
@@ -132,28 +135,28 @@ describe('validateBackendSwitch（切换校验的纯函数）', () => {
 
   it('doctor 探测不通过拒绝，并把 hint（装法/登录提示）带给用户', () => {
     const reason = validateBackendSwitch({
-      target: 'claude-sdk',
+      target: 'codex-appserver',
       registered,
       project: {},
-      probe: { ok: false, version: null, hint: '未安装 @anthropic-ai/claude-agent-sdk' },
+      probe: { ok: false, version: null, hint: '未找到 codex CLI' },
     });
     expect(reason).toContain('不可用');
-    expect(reason).toContain('未安装 @anthropic-ai/claude-agent-sdk');
+    expect(reason).toContain('未找到 codex CLI');
   });
 
   it('探测没跑成（probe undefined）按不可用拒绝，绝不放行', () => {
-    expect(validateBackendSwitch({ target: 'claude-sdk', registered, project: {} })).toContain('不可用');
+    expect(validateBackendSwitch({ target: 'codex-appserver', registered, project: {} })).toContain('不可用');
   });
 
   it('目标后端仅支持 full 时：项目任一档不是 full 都拒绝并说明（含 guestMode 分档）', () => {
     const supportedModes = ['full'] as const;
     // 管理员档非 full
     expect(
-      validateBackendSwitch({ target: 'claude-sdk', registered, project: { mode: 'qa' }, supportedModes, probe: ok }),
+      validateBackendSwitch({ target: 'full-only', registered, project: { mode: 'qa' }, supportedModes, probe: ok }),
     ).toContain('仅支持');
     // 管理员档 full 但普通用户档 qa —— guest 档也必须被支持
     const reason = validateBackendSwitch({
-      target: 'claude-sdk',
+      target: 'full-only',
       registered,
       project: { mode: 'full', guestMode: 'qa' },
       supportedModes,
@@ -166,7 +169,7 @@ describe('validateBackendSwitch（切换校验的纯函数）', () => {
   it('全过返回 null：注册 + 探活 + 档位支持（缺省档 = full 视为 full）', () => {
     expect(
       validateBackendSwitch({
-        target: 'claude-sdk',
+        target: 'full-only',
         registered,
         project: {}, // 旧数据缺省 → effectiveMode 'full'
         supportedModes: ['full'],
@@ -186,8 +189,7 @@ describe('validateBackendSwitch（切换校验的纯函数）', () => {
     ).toBeNull();
   });
 
-  it('claude-sdk 后端实例声明 supportedModes=[full]（切换 UI 的提前拦截与硬守卫同源）', () => {
-    expect(createBackend('claude-sdk').supportedModes).toEqual(['full']);
+  it('codex-appserver 后端实例 supportedModes 未声明（全档）—— 切换 UI 提前拦截与硬守卫同源', () => {
     expect(createBackend('codex-appserver').supportedModes).toBeUndefined();
   });
 });

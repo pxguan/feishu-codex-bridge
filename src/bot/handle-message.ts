@@ -487,7 +487,9 @@ export function createOrchestrator(
    * bridge (mirrors the old single-instance shape; codex stays the default). */
   const backends = new Map<string, AgentBackend>();
   function backendFor(id?: string): AgentBackend {
-    const key = id ?? DEFAULT_BACKEND_ID;
+    // 指向已移除后端（如历史 claude-*）的旧项目配置回退到默认 codex，避免 createBackend
+    // 抛「未知后端」让该群消息处理崩。
+    const key = id && catalogById(id) ? id : DEFAULT_BACKEND_ID;
     let be = backends.get(key);
     if (!be) {
       be = createBackend(key);
@@ -502,13 +504,13 @@ export function createOrchestrator(
   }
 
   /** 后端不支持 `/goal` 时的统一回执。关键：在「加 OKR reaction / 起 reserved run」之前
-   * 拦截 —— 否则 claude 系会先贴上 🎯OKR 受理回执、再被能力守卫拒绝，留下一个自相矛盾的
-   * 假信号（e2e 实测发现）。claude 每轮本就 agentic，引导用户直接派活即可。 */
+   * 拦截 —— 否则会先贴上 🎯OKR 受理回执、再被能力守卫拒绝，留下一个自相矛盾的假信号
+   * （e2e 实测发现）。引导用户直接派活即可。 */
   async function denyGoal(msg: NormalizedMessage, inThread: boolean): Promise<void> {
     await channel
       .send(
         msg.chatId,
-        { markdown: '当前后端不支持 `/goal` 自治目标（codex 专属能力）。直接 @我描述任务即可 —— Claude 每轮本就会自主多步骤跑到完成。' },
+        { markdown: '当前后端不支持 `/goal` 自治目标。直接 @我描述任务即可。' },
         { replyTo: msg.messageId, replyInThread: inThread },
       )
       .catch(() => undefined);
@@ -1581,7 +1583,7 @@ export function createOrchestrator(
     project?: Project,
   ): Promise<void> {
     const noMention = project ? (project.noMention ?? defaultNoMention(project)) : true;
-    // 按本群项目的后端能力裁剪命令清单：claude-sdk/acp 不列 /goal、/compact、/resume
+    // 按本群项目的后端能力裁剪命令清单：不支持的后端不列 /goal、/compact、/resume
     // （能力守卫会拒），避免「列了点了才发现不支持」。codex(capabilities undefined)=全列。
     const caps = backendFor(project?.backend).capabilities;
     await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {

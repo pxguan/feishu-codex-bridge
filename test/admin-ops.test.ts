@@ -50,6 +50,28 @@ vi.mock('../src/config/paths', async () => {
   };
 });
 
+// performSetPermissionMode 的「后端档位兼容守门」直接从 catalog 读 supportedModes
+// （非 backendFor 注入），故用 mock 给真实 catalog 追加一个泛化的「仅 full」后端条目
+// 'fake-fullonly'，以保留该守卫的通用覆盖——而不绑定任何具体后端名。其余 catalog
+// 行为（codex-appserver 全档、catalogBackendIds 等）走 importActual 原样保留。
+vi.mock('../src/agent/catalog', async () => {
+  const actual = await vi.importActual<typeof import('../src/agent/catalog')>('../src/agent/catalog');
+  const fakeFullOnly = {
+    id: 'fake-fullonly',
+    agentFamily: 'codex' as const,
+    displayName: '仅完全访问后端',
+    access: 'app-server' as const,
+    dep: { kind: 'external-cli' as const, detectHint: 'test-only' },
+    supportedModes: ['full'] as const,
+  };
+  const catalog = [...actual.BACKEND_CATALOG, fakeFullOnly];
+  return {
+    ...actual,
+    BACKEND_CATALOG: catalog,
+    catalogById: (id: string) => catalog.find((e) => e.id === id),
+  };
+});
+
 afterAll(() => {
   rmSync(paths.appDir, { recursive: true, force: true });
 });
@@ -57,8 +79,8 @@ afterAll(() => {
 /** 可用的假后端（doctor ok、全档支持，除非显式收窄）。 */
 function fakeBackend(over: Partial<AgentBackend> = {}): AgentBackend {
   return {
-    id: 'claude-sdk',
-    displayName: 'Claude (SDK)',
+    id: 'codex-appserver',
+    displayName: 'Codex',
     doctor: async () => ({ ok: true, version: '1.0.0' }),
     ...over,
   } as unknown as AgentBackend;
@@ -149,10 +171,11 @@ describe('performSetPermissionMode', () => {
     expect((await getProjectByName('demo'))?.mode).toBe('full');
   });
 
-  // 后端档位兼容守门（review wf_28088b2e #2/#5）：claude 系仅「完全访问」，把档改到其
-  // supportedModes 之外应被前置拦住，否则新话题在 backend 的 fail-closed 守卫处整群卡死。
+  // 后端档位兼容守门（review wf_28088b2e #2/#5）：若后端 supportedModes 仅「完全访问」，
+  // 把档改到其支持面之外应被前置拦住，否则新话题在 backend 的 fail-closed 守卫处整群卡死。
+  // 用泛化的「仅 full」后端 fake-fullonly（见顶部 catalog mock）覆盖该守卫，不绑定具体后端名。
   it('后端只支持 full，把权限档改到 qa → 前置拒绝且不落盘、不驱逐', async () => {
-    await addProject({ name: 'cl', chatId: 'oc_cl', cwd: '/tmp/cl', blank: false, createdAt: 1, mode: 'full', backend: 'claude-sdk' });
+    await addProject({ name: 'cl', chatId: 'oc_cl', cwd: '/tmp/cl', blank: false, createdAt: 1, mode: 'full', backend: 'fake-fullonly' });
     const evict = vi.fn(async () => undefined);
     const r = await performSetPermissionMode({ projectName: 'cl', mode: 'qa', evictLiveSessionsForChat: evict });
     expect(r.ok).toBe(false);
@@ -163,7 +186,7 @@ describe('performSetPermissionMode', () => {
   });
 
   it('guestMode 改到后端不支持的档同样被拦（普通用户档也要兼容后端）', async () => {
-    await addProject({ name: 'cl2', chatId: 'oc_cl2', cwd: '/tmp/cl2', blank: false, createdAt: 1, mode: 'full', backend: 'claude-sdk' });
+    await addProject({ name: 'cl2', chatId: 'oc_cl2', cwd: '/tmp/cl2', blank: false, createdAt: 1, mode: 'full', backend: 'fake-fullonly' });
     const r = await performSetPermissionMode({ projectName: 'cl2', guestMode: 'qa', evictLiveSessionsForChat: async () => undefined });
     expect(r.ok).toBe(false);
     await removeProject('cl2');
@@ -180,7 +203,7 @@ describe('performSetPermissionMode', () => {
 
 describe('performBackendSwitch（注册表 → doctor 探活 → 档位支持面，全过才写盘）', () => {
   it('项目不存在 → 拒绝（防御式 IPC/HTTP 入口的脏请求）', async () => {
-    const r = await performBackendSwitch({ projectName: 'ghost', target: 'claude-sdk', backendFor: () => fakeBackend() });
+    const r = await performBackendSwitch({ projectName: 'ghost', target: 'codex-appserver', backendFor: () => fakeBackend() });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain('不存在');
   });
@@ -194,7 +217,7 @@ describe('performBackendSwitch（注册表 → doctor 探活 → 档位支持面
 
   it('doctor 探活失败 → 拒绝（切过去才报错是事故，这里提前拦）', async () => {
     const be = fakeBackend({ doctor: async () => ({ ok: false, hint: '未登录' }) } as Partial<AgentBackend>);
-    const r = await performBackendSwitch({ projectName: 'demo', target: 'claude-sdk', backendFor: () => be });
+    const r = await performBackendSwitch({ projectName: 'demo', target: 'codex-appserver', backendFor: () => be });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain('不可用');
   });
@@ -206,22 +229,23 @@ describe('performBackendSwitch（注册表 → doctor 探活 → 档位支持面
       evictLiveSessionsForChat: async () => undefined,
     });
     const be = fakeBackend({ supportedModes: ['full'] } as Partial<AgentBackend>);
-    const r = await performBackendSwitch({ projectName: 'demo', target: 'claude-sdk', backendFor: () => be });
+    const r = await performBackendSwitch({ projectName: 'demo', target: 'codex-appserver', backendFor: () => be });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain('权限档');
   });
 
   it('全过 → 写盘 + 写后回读（legacy：backend 未设时一次性落地）', async () => {
-    const r = await performBackendSwitch({ projectName: 'demo', target: 'claude-sdk', backendFor: () => fakeBackend() });
+    const r = await performBackendSwitch({ projectName: 'demo', target: 'codex-appserver', backendFor: () => fakeBackend() });
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.project.backend).toBe('claude-sdk');
-    expect((await getProjectByName('demo'))?.backend).toBe('claude-sdk');
+    if (r.ok) expect(r.project.backend).toBe('codex-appserver');
+    expect((await getProjectByName('demo'))?.backend).toBe('codex-appserver');
   });
 
   it('已设后端再切到异值 → 防御式拒绝「创建时选定，不支持切换」且不写盘', async () => {
-    // 模拟「创建时已选定 codex」的项目：先落地一个后端，再尝试切到别的。
+    // 模拟「创建时已选定 codex」的项目：先落地一个后端，再尝试切到别的（异值）。
+    // 防御拦截在注册表/doctor 校验之前，故目标取任意异值（不必是已注册 id）即可触发。
     await performBackendSwitch({ projectName: 'demo', target: 'codex-appserver', backendFor: () => fakeBackend() });
-    const r = await performBackendSwitch({ projectName: 'demo', target: 'claude-sdk', backendFor: () => fakeBackend() });
+    const r = await performBackendSwitch({ projectName: 'demo', target: 'gpt-9', backendFor: () => fakeBackend() });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain('不支持切换');
     // 写盘未变：仍是创建时选定的 codex（防御拦截在 doctor/校验之前）。

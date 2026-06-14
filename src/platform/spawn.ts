@@ -42,9 +42,9 @@ export interface KillProcessGroupOpts {
  * 杀掉一个 **detached 起的**子进程的**整个进程组**（连根拔起 npm/npx/tsx → node →
  * 孙子进程）。
  *
- * 【为什么需要】像 claude-pty-acp 这种 bin 用 `npx tsx` 起，spawn 出来的是
+ * 【为什么需要】像用 `npx tsx` 起的 bin 类后端，spawn 出来的是
  * `npx → tsx → node` 一棵树；npm/npx **不转发信号给孙子**，所以 `child.kill('SIGTERM')`
- * 只打到外壳，node（及它经 PTY 拉起的 claude）会变孤儿。POSIX 上子进程以
+ * 只打到外壳，node（及它经 PTY 拉起的子进程）会变孤儿。POSIX 上子进程以
  * `detached:true` 起即自成进程组（组长 pid = child.pid），`process.kill(-pid, …)`
  * 一次干掉整组。先 SIGTERM 给优雅窗口，超时 SIGKILL。Windows 无 POSIX 进程组 →
  * `taskkill /T /F` 杀进程树。绝不抛错。

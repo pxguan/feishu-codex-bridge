@@ -72,8 +72,9 @@ export const paths = {
   keystoreSaltFile: join(appDir, '.keystore.salt'),
   npmCacheDir: join(appDir, 'npm-cache'),
   /**
-   * 按需重后端（claude-sdk 等 npm-ondemand 包）私装目录：一个扁平
+   * 按需后端（npm-ondemand 包）私装目录：一个扁平
    * `~/.feishu-codex-bridge/backends/node_modules` 放所有按需后端的 npm 包。
+   * （通用基础设施；当前内置后端 codex 是 external-cli，不落此目录，保留以备将来。）
    * 永远在用户 HOME 下、用户可写（零 sudo/brew），与全局包目录的权限死结解耦。
    * 解析靠 createRequire(backendsDir/...).resolve（见 agent/backend-loader）；
    * 安装靠 `npm install --prefix backendsDir`（见 agent/installer）。 */

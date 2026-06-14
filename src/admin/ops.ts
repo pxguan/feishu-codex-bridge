@@ -58,7 +58,7 @@ const TIERS: readonly PermissionMode[] = ['qa', 'write', 'full'];
  * 项目后端切换的纯校验（exported for tests）：① 目标 id 在注册表里；② 目标后端
  * doctor() 探测通过（未装 CLI / SDK 不可用要在这里拦住，而不是切过去后每条消息
  * 报错）；③ 项目两档权限（管理员档 + 普通用户档）都在目标后端声明的支持面内
- * （如 claude-sdk 仅「完全访问」——其 startThread 的 fail-closed 硬守卫不变，这里
+ * （某后端若仅支持部分权限档——其 startThread 的 fail-closed 硬守卫不变，这里
  * 只是把拒绝提前到切换时并讲清原因）。返回首个不满足的原因（中文，直接上卡）；
  * 全过返回 null。切换本身不驱逐活跃会话：SessionRecord.backend 让已有话题会话
  * 仍走原后端，新话题才用新值（resolveThread 按记录路由的既有语义）。
@@ -184,7 +184,7 @@ export async function performSetPermissionMode(opts: {
   const p = await getProjectByName(opts.projectName);
   if (!p) return { ok: false, reason: `项目「${opts.projectName}」不存在` };
   // 后端档位兼容守门：后端在创建时选定、运行时固定（不支持切换），但权限档可改。
-  // 若把档改到该后端的 supportedModes 之外（如 claude 系只支持「完全访问」，却改成只读），
+  // 若把档改到该后端的 supportedModes 之外（某后端若只支持部分档，却改到档外），
   // 新话题会在 backend.startThread 的 fail-closed 守卫处直接抛错、整群卡死。提前在这里拦住，
   // 给清晰原因，而不是让用户改完才发现聊不了。codex（supportedModes undefined）全档放行。
   const entry = p.backend ? catalogById(p.backend) : undefined;

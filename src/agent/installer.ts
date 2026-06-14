@@ -8,7 +8,7 @@ import { isBackendDepInstalled, isBackendBinInstalled } from './backend-loader';
 import { fixNativeHelperPerms } from './native-helpers';
 
 /**
- * 按需后端依赖的安装执行器（npm-ondemand 包，如 @anthropic-ai/claude-agent-sdk）。
+ * 按需后端依赖的安装执行器（npm-ondemand 包；通用基础设施，当前内置后端未用）。
  *
  * 装到用户私装目录 {@link paths.backendsDir}（永远用户可写，零 sudo/brew——见
  * design/backend-catalog-ondemand.md §2.2 方案A）。流程：
@@ -93,9 +93,9 @@ export async function ensureBackendsDir(): Promise<void> {
  * **用默认 --save（不加 --no-save）**：backendsDir 是多后端共享的一个 node_modules + 一个
  * package.json。npm install 会按 package.json reconcile，把「不在 package.json 里」的包当
  * extraneous 删掉。所以若用 --no-save + 最小 package.json，装第二个后端会把第一个 prune
- * 掉（实测：装 SDK 后 claude-acp 的 .bin 消失）——后端变互斥。默认 --save 把每个装过的包
- * 记进 package.json，多后端因此**共存**：从空目录装 claude-acp 只有它自己（~72M），之后再
- * 装 SDK 两者并存（按需下载、各自体积如实呈现）。代价是「重装/修复一个」会按 package.json
+ * 掉（实测：装第二个后端后第一个的 .bin 消失）——后端变互斥。默认 --save 把每个装过的包
+ * 记进 package.json，多后端因此**共存**：从空目录装一个后端只有它自己，之后再装另一个
+ * 两者并存（按需下载、各自体积如实呈现）。代价是「重装/修复一个」会按 package.json
  * 重装全部（缓存热则已装的近乎 no-op）。卸载见 {@link uninstallBackendDep}（连带 --save 移除
  * package.json 条目，避免下次装别的又把它带回）。
  */
@@ -130,7 +130,7 @@ export function buildInstallCommand(
  * @param pkg     npm 包名（catalog 的 installSpec.pkg；可带 @version）
  * @param onProgress npm 输出流回调（每块）
  * @param signal  取消信号（abort → kill 子进程 + rm 半装子目录）
- * @param opts.binName  bin 类后端的 bin 名（claude-pty-acp）。给了 ⇒ 安装后校验走
+ * @param opts.binName  bin 类后端的 bin 名。给了 ⇒ 安装后校验走
  *   node_modules/.bin 存在性而非 require.resolve（bin-only 包无 main 入口，resolve 必失败）。
  */
 export async function installBackendDep(
@@ -218,7 +218,7 @@ export async function installBackendDep(
     };
   }
 
-  // 治本：修 node-pty spawn-helper 的可执行位（npm 安装偶发丢 +x → ACP posix_spawnp
+  // 治本：修 node-pty spawn-helper 的可执行位（npm 安装偶发丢 +x → posix_spawnp
   // failed）。在 verify 通过后跑——绝不抛错，不影响安装结果。
   await fixNativeHelperPerms().catch(() => undefined);
 

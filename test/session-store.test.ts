@@ -94,9 +94,11 @@ describe('session-store', () => {
     expect(onDisk.sessions[0].backend).toBe('codex-appserver');
   });
 
-  it('keeps an explicit non-default backend (no backfill clobber)', async () => {
-    await upsertSession({ ...rec('t-claude', 'sess-uuid'), backend: 'claude-sdk' });
-    expect((await getSession('t-claude'))?.backend).toBe('claude-sdk');
+  it('keeps an explicit stored backend as-is (no backfill clobber)', async () => {
+    // session-store 只存字符串、不校验后端是否注册；这里用一个非默认值验证
+    // 已存在的 backend 字段不会被 backfill 覆盖（migrate 只在缺字段时回填默认）。
+    await upsertSession({ ...rec('t-other', 'sess-uuid'), backend: 'some-other-backend' });
+    expect((await getSession('t-other'))?.backend).toBe('some-other-backend');
   });
 
   it('patchSession skips undefined fields and is a no-op for an unknown threadId', async () => {

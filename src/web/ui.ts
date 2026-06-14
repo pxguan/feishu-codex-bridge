@@ -1151,7 +1151,7 @@ ${UI_PURE_JS}
     title.appendChild(document.createTextNode('Codex '));
     title.appendChild(el('span', 'em', 'Bridge'));
     hero.appendChild(title);
-    hero.appendChild(el('div', 'home-sub', '把飞书接到本机的 Codex / Claude —— 一个群一个项目，@一句话就开干。多机器人、多后端，全程跑在你这台机器上，私有可控。'));
+    hero.appendChild(el('div', 'home-sub', '把飞书接到本机的 Codex —— 一个群一个项目，@一句话就开干。多机器人、多群并行，全程跑在你这台机器上，私有可控。'));
     var ctaRow = el('div', 'home-cta-row');
     var primary = el('button', 'btn primary home-cta', hasBots ? '进入控制台' : '➕ 扫码创建第一个机器人');
     primary.onclick = function () { if (hasBots) go({ tab: 'overview' }); else tryAddBot(); };
@@ -1179,7 +1179,7 @@ ${UI_PURE_JS}
     // 跑马灯（gsap.com 招牌）：同一组词复制两份首尾相接，GSAP 把整条向左无缝平移。
     var marquee = el('div', 'marquee');
     var track = el('div', 'marquee-track');
-    var words = ['CODEX', 'CLAUDE CODE', '订阅 · ACP', '一群一项目', '@ 一句话开干', '多后端可插拔', '私有可控', '127.0.0.1'];
+    var words = ['CODEX', '一群一项目', '话题即会话', '@ 一句话开干', '流式卡片', '私有可控', '127.0.0.1'];
     for (var mq = 0; mq < 2; mq++) words.forEach(function (wd) { track.appendChild(el('span', null, wd)); });
     marquee.appendChild(track);
     home.appendChild(marquee);
@@ -1187,7 +1187,7 @@ ${UI_PURE_JS}
     var feats = el('div', 'home-feats');
     [
       { i: 'bot', t: '一群一项目', d: '把机器人拉进群，群就是项目；@它提需求，它在绑定的目录里干活。' },
-      { i: 'cube', t: '多后端可插拔', d: 'Codex / Claude SDK / 订阅·ACP，按需下载、随时更新或卸载，各项目各选各的。' },
+      { i: 'cube', t: '轻核心·本机 Codex', d: '只依赖本机的 Codex CLI，不捆任何重运行时；每会话独立进程，卡死有 watchdog 兜底。' },
       { i: 'shield', t: '私有可控', d: '全程跑在你这台机器上，凭据进本地加密库，控制台只听 127.0.0.1。' },
     ].forEach(function (f) {
       var c = el('div', 'glass home-feat');

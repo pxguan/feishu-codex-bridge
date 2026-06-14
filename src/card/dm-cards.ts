@@ -497,9 +497,7 @@ export function buildNewProjectFormCard(
       selectMenu({ name: 'backend', placeholder: '选择后端 Agent', options: backends, initial: backends[0]?.value }),
     );
   } else if (backends.length === 1) {
-    formItems.push(
-      note(`🧠 后端 Agent：**${backends[0]!.label}**（创建后固定。下载更多后端到 Web「后端 Agent」页即可在此选择）`),
-    );
+    formItems.push(note(`🧠 后端 Agent：**${backends[0]!.label}**（创建后固定）`));
   }
   formItems.push(
     note('选群类型(直接点对应按钮创建)：👥 多话题群 = @我开话题、每话题独立会话；💬 单会话群 = 整群一个会话、连续上下文。'),
@@ -535,10 +533,7 @@ export function buildJoinGroupFormCard(
   ];
   if (backends.length > 1) {
     formItems.push(
-      note(
-        '🧠 后端 Agent（绑定后**固定不可切换**）。默认 **Codex** 以「只读」档绑定（外部群安全）；' +
-          '选 **Claude** 系则以「完全访问」档绑定（Claude 暂不支持只读档）—— 给自己的内部群用 Claude 时直接选即可。',
-      ),
+      note('🧠 后端 Agent（绑定后**固定不可切换**）。默认 **Codex** 以「只读」档绑定（外部群安全）。'),
       selectMenu({ name: 'backend', placeholder: '选择后端 Agent', options: backends, initial: backends[0]?.value }),
     );
   } else if (backends.length === 1) {

@@ -2,8 +2,6 @@ import type { AgentBackend } from './types';
 import { DEFAULT_BACKEND_ID } from './types';
 import { catalogBackendIds } from './catalog';
 import { CodexAppServerBackend } from './codex-appserver/backend';
-import { ClaudeSdkBackend } from './claude-sdk/backend';
-import { AcpBackend } from './acp/backend';
 
 export { DEFAULT_BACKEND_ID } from './types';
 
@@ -19,13 +17,6 @@ export { DEFAULT_BACKEND_ID } from './types';
  */
 const REGISTRY = new Map<string, () => AgentBackend>([
   ['codex-appserver', () => new CodexAppServerBackend()],
-  // Claude Code via the official Agent SDK — minimal slice (capability-guarded:
-  // goal/steer/compact/resume off). The SDK itself loads lazily inside the
-  // backend, so registering it here costs nothing for codex-only deployments.
-  ['claude-sdk', () => new ClaudeSdkBackend()],
-  // Claude Code via ACP（spawn claude-pty-acp，订阅计费路径）。ACP SDK 同样在
-  // backend 内懒加载；server 命令解析见 acp/backend（配置覆盖 → PATH → doctor 提示）。
-  ['claude-acp', () => new AcpBackend()],
 ]);
 
 /** Registered backend ids（从 catalog 派生 —— catalog 是单一注册入口）。 */

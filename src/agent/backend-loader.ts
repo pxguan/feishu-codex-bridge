@@ -6,12 +6,12 @@ import { paths } from '../config/paths';
 import type { BackendCatalogEntry } from './catalog';
 
 /**
- * 按需后端依赖的加载器（npm-ondemand 包，如 @anthropic-ai/claude-agent-sdk）。
+ * 按需后端依赖的加载器（npm-ondemand 包，库类 / bin 类；通用基础设施，当前内置后端未用）。
  *
  * 真机验证过的解析方案（design/backend-catalog-ondemand.md §2.1，实验 C/D/F）：
  *   ① 先试 bridge 自身的 node_modules —— 直接 `await import(pkg)`（bare specifier）。
  *      这条兜 dev / worktree 模式：源码 checkout 里 `npm i` 把包装进仓库
- *      node_modules，命中此条，**绝不破坏当前 worktree 的 claude-sdk 测试/运行**。
+ *      node_modules，命中此条，**绝不破坏当前 worktree 的测试/运行**。
  *      （ESM bare import 只认 importer 自身的 node_modules 链——实验 A/B。）
  *   ② catch ERR_MODULE_NOT_FOUND → 用户私装目录解析：
  *      `createRequire(backendsDir 下的锚点).resolve(pkg)`（honors exports map，实验 D）
@@ -99,7 +99,7 @@ export function isBackendDepInstalled(pkg: string): boolean {
 
 /**
  * 用户私装目录里某个 npm bin 的绝对路径（npm 装包时生成 node_modules/.bin/<name>[.cmd]）。
- * bin 类后端（claude-pty-acp）被 **spawn** 而非 import —— 已装判定/命令解析走这里，
+ * bin 类后端被 **spawn** 而非 import —— 已装判定/命令解析走这里，
  * 不走 {@link isBackendDepInstalled}（bin-only 包通常无 main 入口，require.resolve 必失败）。
  * 命中需 existsSync 复验（卸载/移动自动失效）。找不到 → null。
  */
