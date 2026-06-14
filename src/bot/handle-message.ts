@@ -698,7 +698,7 @@ export function createOrchestrator(
       }
       const ts = turnSession(msg.chatId, project, msg.senderId);
       if (cmd === 'model') {
-        postModelCard(msg, ts.sessionKey);
+        postModelCard(msg, ts.sessionKey, false); // 单会话群：扁平引用回复，卡片直接出现在会话里，不另起话题
         return;
       }
       if (cmd === 'compact') {
@@ -738,7 +738,7 @@ export function createOrchestrator(
       }
       const ts = turnSession(msg.threadId, project, msg.senderId);
       if (cmd === 'model') {
-        postModelCard(msg, ts.sessionKey);
+        postModelCard(msg, ts.sessionKey, true); // 已在话题里：卡片就发在当前话题内
         return;
       }
       if (cmd === 'compact') {
@@ -1404,7 +1404,7 @@ export function createOrchestrator(
   /** @bot /model: post the model/effort picker for the session keyed by
    * `sessionKey` (topic threadId for multi, chatId for single).
    * Detached — listModels can cold-spawn an app-server; see postResumeCard. */
-  function postModelCard(msg: NormalizedMessage, sessionKey: string): void {
+  function postModelCard(msg: NormalizedMessage, sessionKey: string, inThread: boolean): void {
     void withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
       try {
         // 按会话/项目后端路由（已有会话以记录为准，未开张的用项目配置）：
@@ -1427,7 +1427,7 @@ export function createOrchestrator(
           backend: be.id,
           createdAt: Date.now(),
         };
-        const res = await sendManagedCard(channel, msg.chatId, buildModelCard(state), msg.messageId, true);
+        const res = await sendManagedCard(channel, msg.chatId, buildModelCard(state), msg.messageId, inThread);
         pruneModelPending();
         modelPending.set(res.messageId, state);
         log.info('card', 'model', { threadId: sessionKey, model: state.model, effort: state.effort });
