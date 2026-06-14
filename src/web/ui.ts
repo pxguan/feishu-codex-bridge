@@ -1052,7 +1052,7 @@ ${UI_PURE_JS}
     bots.forEach(function (b) {
       nav.appendChild(navItem({ icon: 'bot', label: botTitle(b), on: r.tab === 'bot' && r.botId === b.appId, dot: !!b.running, onClick: function () { go({ tab: 'bot', botId: b.appId }); } }));
     });
-    nav.appendChild(navItem({ icon: 'add', label: '添加机器人', add: true, onClick: function () { openWizard(); } }));
+    nav.appendChild(navItem({ icon: 'add', label: '添加机器人', add: true, onClick: function () { tryAddBot(); } }));
     nav.appendChild(el('div', 'nav-sec', '配置'));
     nav.appendChild(navItem({ icon: 'backend', label: '后端 Agent', on: r.tab === 'backends', onClick: function () { go({ tab: 'backends' }); } }));
     nav.appendChild(navItem({ icon: 'doctor', label: '宿主机体检', on: r.tab === 'doctor', onClick: function () { go({ tab: 'doctor' }); } }));
@@ -1080,7 +1080,7 @@ ${UI_PURE_JS}
       act.textContent = '';
       if (r.tab === 'overview' || r.tab === 'bot') {
         var add = el('button', 'btn primary sm', '➕ 添加机器人');
-        add.onclick = function () { openWizard(); };
+        add.onclick = function () { tryAddBot(); };
         act.appendChild(add);
       }
     }
@@ -1154,7 +1154,7 @@ ${UI_PURE_JS}
     hero.appendChild(el('div', 'home-sub', '把飞书接到本机的 Codex / Claude —— 一个群一个项目，@一句话就开干。多机器人、多后端，全程跑在你这台机器上，私有可控。'));
     var ctaRow = el('div', 'home-cta-row');
     var primary = el('button', 'btn primary home-cta', hasBots ? '进入控制台' : '➕ 扫码创建第一个机器人');
-    primary.onclick = function () { if (hasBots) go({ tab: 'overview' }); else openWizard(); };
+    primary.onclick = function () { if (hasBots) go({ tab: 'overview' }); else tryAddBot(); };
     ctaRow.appendChild(primary);
     if (hasBots) {
       var sec = el('button', 'btn home-cta', '后端管理');
@@ -1605,6 +1605,10 @@ ${UI_PURE_JS}
       } else {
         var pb = el('button', 'btn sm primary', '▶️ 启动'); pb.onclick = askStart; acts.appendChild(pb);
       }
+      // 检查更新入口：始终在（不管跑没跑）。没启动时能做的就是「启动」+「更新」。
+      var ub = el('button', 'btn sm', '🔄 检查更新'); ub.style.marginLeft = '6px';
+      ub.onclick = function () { var bx = $('updateBody'); if (bx) { bx.textContent = '版本检查中…'; loadUpdate(bx); } toast('🔄 正在检查更新…'); };
+      acts.appendChild(ub);
     }
     var line = el('div', 'statline');
     if (d.running) line.appendChild(el('span', 'tag green', '✅ 运行中' + (d.pid ? ' · pid ' + d.pid : '')));
@@ -1718,7 +1722,7 @@ ${UI_PURE_JS}
       hero.appendChild(el('div', 'fr-title', '欢迎！还差最后一步：创建你的第一个飞书机器人'));
       hero.appendChild(el('div', 'fr-sub', '点下面的按钮，用飞书扫码即可创建并授权——全程在这个网页里完成，不用碰终端。'));
       var cta = el('button', 'btn primary fr-cta', '➕ 扫码创建第一个机器人');
-      cta.onclick = function () { openWizard(); };
+      cta.onclick = function () { tryAddBot(); };
       hero.appendChild(cta);
       box.appendChild(hero);
       if (countEl) countEl.textContent = '';
@@ -2231,6 +2235,21 @@ ${UI_PURE_JS}
   var wizAutoEnabled = false;    // 新 bot 是否已自动加入活跃集（一次性）
   var wizRestartPrompted = false; // 完成步是否已弹过「重启拉起」确认（一次性）
 
+  // 添加机器人是写操作：Feishu Bridge 没在跑时控制台为只读，不能加（与「没启动只读」一致）。
+  // 没在跑就引导先启动，而不是打开向导让用户白填一通再被 501 挡回。
+  function tryAddBot() {
+    if (daemon && daemon.running) { openWizard(); return; }
+    confirmDialog({
+      title: '需要先启动 Feishu Bridge',
+      lines: [
+        'Feishu Bridge 未在运行时控制台为只读，无法添加机器人。',
+        '先启动 Feishu Bridge，再回来添加。',
+      ],
+      confirmLabel: '立即启动',
+      onConfirm: function () { postAction('/api/daemon/start', '启动'); },
+    });
+  }
+
   function openWizard() {
     wizStep = 1; wizBotId = null; wizSetup = null; wizManualOpen = false;
     wizAutoEnabled = false; wizRestartPrompted = false;
@@ -2282,6 +2301,11 @@ ${UI_PURE_JS}
     qrWrap.id = 'wizQrWrap';
     qrWrap.appendChild(el('div', 'note', '正在生成二维码…'));
     w.appendChild(qrWrap);
+
+    var steps = el('div', 'note');
+    steps.style.cssText = 'margin-top:6px;line-height:1.7';
+    steps.textContent = '① 用飞书 App 扫码 → ② 在飞书里点「创建并授权」 → ③ 回到本页（无需手动刷新），创建成功会自动进入第②步「接入检测」。';
+    w.appendChild(steps);
 
     var statusLine = el('div', 'note'); statusLine.id = 'wizScanStatus';
     statusLine.style.textAlign = 'center';
@@ -2514,16 +2538,8 @@ ${UI_PURE_JS}
         w.appendChild(checkItem('⚠️', '缺 ' + miss.length + ' 项必需权限', miss.join('、'), grant));
       }
     }
-    var conn = s.connection || {};
-    if (conn.running && conn.connection === 'connected') {
-      w.appendChild(checkItem('✅', '长连接在线', 'bridge 已连上飞书，可实时收发'));
-    } else if (conn.running) {
-      w.appendChild(checkItem('spin', 'bridge 运行中', '长连接' + (conn.connection ? '（' + conn.connection + '）' : '建立中…')));
-    } else {
-      // 新 bot 已自动加入活跃集（见 pollWizSetup）；不再让用户点按钮 / 复制命令。真正拉起
-      // 上线靠最后一步「完成」时弹窗确认重启 Feishu Bridge。
-      w.appendChild(checkItem('spin', '待拉起上线', '已自动加入活跃集 · 点「下一步」到完成页，确认重启 Feishu Bridge 即上线。'));
-    }
+    // 「加入活跃集 + 拉起上线」全程静默：新 bot 已在 pollWizSetup 自动加入活跃集，真正拉起
+    // 靠最后一步「完成」弹窗确认重启——这里不再显示「待拉起上线」之类的中间态项。
     // 事件订阅：系统无法可靠检测（长连接订阅在已发布版本里的体现不稳定），故只做提醒、不下结论、
     // 不阻塞「下一步」。用户自行去后台核对。
     var evHint = el('div');
@@ -2547,33 +2563,6 @@ ${UI_PURE_JS}
     return actions;
   }
 
-  // 完成步：新 bot 已自动加入活跃集，但要重启 Feishu Bridge 才真正拉起上线。弹窗确认
-  // （重启会短暂影响其它在线 bot，所以不静默重启）；daemon 没在跑就改为「启动」。一次性。
-  function maybePromptRestartAtDone() {
-    if (wizRestartPrompted) return;
-    var conn = (wizSetup && wizSetup.connection) || {};
-    if (conn.running && conn.connection === 'connected') return; // 已经在线，无需重启
-    wizRestartPrompted = true;
-    if (daemon && daemon.running) {
-      confirmDialog({
-        title: '🔄 立即重启 Feishu Bridge 让新机器人上线？',
-        lines: [
-          '新机器人已加入活跃集，重启 Feishu Bridge 后即可上线。',
-          '重启约数秒，期间所有在线机器人的长连接会短暂断开并自动重连。',
-        ],
-        confirmLabel: '立即重启',
-        onConfirm: function () { postAction('/api/daemon/restart', '重启'); },
-      });
-    } else {
-      confirmDialog({
-        title: '🚀 立即启动 Feishu Bridge 让机器人上线？',
-        lines: ['Feishu Bridge 当前未在运行，启动后新机器人即可上线。'],
-        confirmLabel: '立即启动',
-        onConfirm: function () { postAction('/api/daemon/start', '启动'); },
-      });
-    }
-  }
-
   function copyRow(text) {
     var row = el('div', 'copybox');
     row.appendChild(el('code', null, text));
@@ -2594,35 +2583,20 @@ ${UI_PURE_JS}
     w.textContent = '';
     w.appendChild(el('h3', null, '🎉 接入完成'));
     w.appendChild(wizStepBar(3));
-    w.appendChild(el('div', 'note', '机器人「' + ((wizSetup && wizSetup.botName) || wizBotId || '') + '」已加入活跃集。'));
-    // 进入完成页即弹窗确认重启 Feishu Bridge 把新 bot 拉起上线（一次性；已在线则不弹）。
-    maybePromptRestartAtDone();
-    var ul = el('div'); ul.style.margin = '12px 0';
-    [
-      '① 在飞书里私聊这个机器人，点「➕ 新建项目」把一个目录绑成项目群；',
-      '② 或把机器人拉进一个已有群（需开「加入存量群」相关权限）自动绑定；',
-      '③ 然后在群里 @机器人 提需求，它就在绑定的目录里干活。',
-    ].forEach(function (line) {
-      var d = el('div'); d.style.padding = '4px 0'; d.textContent = line;
-      ul.appendChild(d);
-    });
-    w.appendChild(ul);
-    w.appendChild(el('div', 'note', '提示：私聊机器人发任意消息即可唤出私聊管理台；Web 控制台与私聊卡片共享同一套设置，双端实时一致。'));
-    // 新建的机器人要等 daemon 重启、被 supervisor 接管后才真正上线（尤其「引导控制台」是
-    // 零 bot 起的，得重启才会连上这个新 bot）。给一条醒目提示 + 一键重启（确认弹窗里会说明
-    // 重启会短暂打断其它在跑的机器人）。
-    var liveTip = el('div', 'note');
-    liveTip.style.cssText = 'margin-top:10px;padding:10px 12px;background:var(--blue-tint);border-radius:8px;color:var(--text-2)';
-    liveTip.textContent = '⚡ 让它上线：新机器人需重启 Feishu Bridge 后由后台接管。点下面「重启使其上线」即可（首次创建时重启很安全，不影响别的机器人）。';
-    w.appendChild(liveTip);
+    var who = (wizSetup && wizSetup.botName) || wizBotId || '';
+    // 到这一步只剩一件事：重启 Feishu Bridge 让新 bot 上线。不再堆「新建项目/拉群/@」那套
+    // 引导（那会让人以为得先做完才能继续）。重启入口**只此一处**：主按钮「重启使其上线」；
+    // 想晚点再说就点「稍后再重启」。
+    w.appendChild(el('div', 'note', '机器人「' + who + '」已加入活跃集。最后一步：重启 Feishu Bridge 让它上线（约数秒，其它在线机器人会短暂断连后自动重连）。'));
+    var gotoBot = function () { var id = wizBotId; closeWizard(); if (id) go({ tab: 'bot', botId: id }); };
     var actions = el('div', 'actions');
-    var restart = el('button', 'btn', '🔁 重启使其上线');
-    restart.onclick = askRestart;
-    actions.appendChild(restart);
+    var later = el('button', 'btn', '稍后再重启');
+    later.onclick = gotoBot;
+    actions.appendChild(later);
     actions.appendChild(el('div', 'grow'));
-    var done = el('button', 'btn primary', '完成并进入该机器人 →');
-    done.onclick = function () { var id = wizBotId; closeWizard(); if (id) go({ tab: 'bot', botId: id }); };
-    actions.appendChild(done);
+    var restart = el('button', 'btn primary', '🔁 重启使其上线');
+    restart.onclick = function () { postAction('/api/daemon/restart', '重启'); gotoBot(); };
+    actions.appendChild(restart);
     w.appendChild(actions);
   }
 
