@@ -2043,7 +2043,7 @@ ${UI_PURE_JS}
     box.textContent = '';
     box.className = 'note';
     if (!diag) return;
-    box.appendChild(el('div', null, '事件订阅：' + eventDiagText(diag.event)));
+    box.appendChild(el('div', null, 'ℹ️ 事件订阅：请自行到「事件与回调」确认已订阅 im.message.receive_v1（长连接）；此项系统无法可靠检测，仅作提醒。'));
     var title = el('div', null, '🧠 后端环境：');
     title.style.marginTop = '6px';
     box.appendChild(title);
@@ -2228,9 +2228,12 @@ ${UI_PURE_JS}
   var wizEs = null;         // 扫码 SSE EventSource
   var wizQrSessionId = null;
   var wizCountdown = null;  // 二维码过期倒计时
+  var wizAutoEnabled = false;    // 新 bot 是否已自动加入活跃集（一次性）
+  var wizRestartPrompted = false; // 完成步是否已弹过「重启拉起」确认（一次性）
 
   function openWizard() {
     wizStep = 1; wizBotId = null; wizSetup = null; wizManualOpen = false;
+    wizAutoEnabled = false; wizRestartPrompted = false;
     stopWizPoll(); stopWizQr();
     $('wizMask').classList.add('open');
     renderWizard();
@@ -2448,12 +2451,21 @@ ${UI_PURE_JS}
   function startWizPoll() { stopWizPoll(); pollWizSetup(); wizPoll = setInterval(pollWizSetup, 5000); }
   function pollWizSetup() {
     if (!wizBotId) return;
+    // 新 bot 默认就加入活跃集——用户不必手动点按钮 / 跑 bot use。一次性；失败下周期重试。
+    // 真正「拉起上线」要重启 Feishu Bridge，那一步留到「完成」时弹窗确认（重启会短暂
+    // 影响其它在线 bot，所以不静默重启）。
+    if (!wizAutoEnabled) {
+      wizAutoEnabled = true;
+      fetch('/api/bots/' + encodeURIComponent(wizBotId), {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: true }),
+      }).catch(function () { wizAutoEnabled = false; });
+    }
     fetch('/api/bots/' + encodeURIComponent(wizBotId) + '/setup-status')
       .then(function (r) { return r.json(); })
       .then(function (s) {
         wizSetup = s;
         if (wizStep === 2) renderWizChecklist();
-        if (s.event && s.event.state === 'ok') stopWizPoll();
       })
       .catch(function () { /* 下个周期重试 */ });
   }
@@ -2480,7 +2492,7 @@ ${UI_PURE_JS}
     var s = wizSetup;
     if (!s || !s.credentials) {
       w.appendChild(checkItem('spin', '正在检测…', '首次拉取约 2~3 秒'));
-      w.appendChild(wizChecklistActions(false));
+      w.appendChild(wizChecklistActions());
       return;
     }
     w.appendChild(checkItem(
@@ -2508,81 +2520,58 @@ ${UI_PURE_JS}
     } else if (conn.running) {
       w.appendChild(checkItem('spin', 'bridge 运行中', '长连接' + (conn.connection ? '（' + conn.connection + '）' : '建立中…')));
     } else {
-      var cmd = el('div');
-      var act = el('div', 'actions');
-      var go1 = el('button', 'btn primary', '⚡ 一键启用并拉起');
-      go1.onclick = function () { wizEnableAndLaunch(); };
-      act.appendChild(go1);
-      cmd.appendChild(act);
-      cmd.appendChild(el('div', 'note', '一键：把它加入活跃集并自动'
-        + ((daemon && daemon.running) ? '重启' : '启动') + ' Feishu Bridge'
-        + ((daemon && daemon.running) ? '（约数秒，其它在线机器人会短暂断连后自动重连）' : '') + '。'));
-      cmd.appendChild(el('div', 'note', '或手动在终端执行：'));
-      cmd.appendChild(copyRow('feishu-codex-bridge bot use ' + (wizBotId || '<appId>')));
-      cmd.appendChild(copyRow('feishu-codex-bridge start'));
-      w.appendChild(checkItem('🟠', '长连接未建立', '需要 Feishu Bridge 拉起这个 bot', cmd));
+      // 新 bot 已自动加入活跃集（见 pollWizSetup）；不再让用户点按钮 / 复制命令。真正拉起
+      // 上线靠最后一步「完成」时弹窗确认重启 Feishu Bridge。
+      w.appendChild(checkItem('spin', '待拉起上线', '已自动加入活跃集 · 点「下一步」到完成页，确认重启 Feishu Bridge 即上线。'));
     }
-    var ev = s.event || { state: 'unchecked' };
-    if (ev.state === 'ok') {
-      w.appendChild(checkItem('✅', '事件订阅已生效', eventDiagText(ev)));
-    } else {
-      var evExtra = el('div');
-      evExtra.appendChild(el('div', 'note', ev.state === 'unchecked'
-        ? '（缺 application:app_version 只读 scope 或网络不通时无法自动检测；按下方深链手动核对「事件配置」。）'
-        : '去开发者后台「事件与回调」：事件配置改「长连接」→ 添加 im.message.receive_v1 → 应用发布里创建并发布版本。'));
-      var ea = el('a', null, '打开「事件与回调」配置页 ↗');
-      ea.href = s.eventConfigUrl; ea.target = '_blank'; ea.rel = 'noopener';
-      evExtra.appendChild(ea);
-      evExtra.appendChild(el('div', 'note', '配置好后无需手动刷新——本页每 5 秒自动复检，生效会变 ✅。'));
-      w.appendChild(checkItem(ev.state === 'unchecked' ? '⚠️' : 'spin',
-        ev.state === 'unchecked' ? '事件订阅未能自动检测' : '事件订阅尚未生效',
-        eventDiagText(ev), evExtra));
-    }
-    w.appendChild(wizChecklistActions(ev.state === 'ok'));
+    // 事件订阅：系统无法可靠检测（长连接订阅在已发布版本里的体现不稳定），故只做提醒、不下结论、
+    // 不阻塞「下一步」。用户自行去后台核对。
+    var evHint = el('div');
+    var ea = el('a', null, '打开「事件与回调」配置页 ↗');
+    ea.href = (s.eventConfigUrl || '#'); ea.target = '_blank'; ea.rel = 'noopener';
+    evHint.appendChild(ea);
+    w.appendChild(checkItem('ℹ️', '事件订阅（请自行确认）',
+      '请到「事件与回调」确认已订阅 im.message.receive_v1（长连接模式）并已发布版本，否则 @机器人不会有反应。此项系统无法可靠检测，仅作提醒。', evHint));
+    w.appendChild(wizChecklistActions());
   }
 
-  function wizChecklistActions(eventOk) {
+  function wizChecklistActions() {
     var actions = el('div', 'actions');
     var back = el('button', 'btn', '稍后再说');
     back.onclick = closeWizard;
     actions.appendChild(back);
     actions.appendChild(el('div', 'grow'));
-    var next = el('button', 'btn' + (eventOk ? ' primary' : ''), eventOk ? '下一步' : '事件生效后再继续');
-    if (eventOk) { next.onclick = function () { wizStep = 3; stopWizPoll(); renderWizard(); }; }
-    else { next.className = 'btn disabled'; next.disabled = true; }
+    var next = el('button', 'btn primary', '下一步');
+    next.onclick = function () { wizStep = 3; stopWizPoll(); renderWizard(); };
     actions.appendChild(next);
     return actions;
   }
 
-  // 「长连接未建立」一键：启用（加入活跃集）→ daemon 在跑就确认重启、没跑就直接启动，
-  // 省去终端 bot use + start。复用 confirmDialog / postAction，与仪表盘重启同一套。
-  function wizEnableAndLaunch() {
-    if (!wizBotId) { toast('❌ 缺少机器人 ID'); return; }
-    var who = (wizSetup && wizSetup.botName) || wizBotId;
-    fetch('/api/bots/' + encodeURIComponent(wizBotId), {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: true }),
-    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
-      .then(function (resp) {
-        if (resp.status !== 200) { toast('❌ ' + (resp.body.message || ('HTTP ' + resp.status))); return; }
-        toast('✅ 已加入活跃集');
-        if (daemon && daemon.running) {
-          confirmDialog({
-            title: '🔄 立即重启 Feishu Bridge 拉起「' + who + '」？',
-            lines: [
-              '已加入活跃集，重启后即可上线。',
-              '重启约数秒，期间所有在线机器人的长连接会短暂断开并自动重连。',
-            ],
-            confirmLabel: '立即重启',
-            onConfirm: function () { postAction('/api/daemon/restart', '重启'); },
-          });
-        } else {
-          // daemon 没在跑（只读预览）→ 启动它（read-only preview 注入了 startDaemon）；
-          // 起来后 /api/console/live 轮询会把页面自动带去可写控制台。
-          postAction('/api/daemon/start', '启动');
-        }
-      })
-      .catch(function () { toast('❌ 请求失败'); });
+  // 完成步：新 bot 已自动加入活跃集，但要重启 Feishu Bridge 才真正拉起上线。弹窗确认
+  // （重启会短暂影响其它在线 bot，所以不静默重启）；daemon 没在跑就改为「启动」。一次性。
+  function maybePromptRestartAtDone() {
+    if (wizRestartPrompted) return;
+    var conn = (wizSetup && wizSetup.connection) || {};
+    if (conn.running && conn.connection === 'connected') return; // 已经在线，无需重启
+    wizRestartPrompted = true;
+    if (daemon && daemon.running) {
+      confirmDialog({
+        title: '🔄 立即重启 Feishu Bridge 让新机器人上线？',
+        lines: [
+          '新机器人已加入活跃集，重启 Feishu Bridge 后即可上线。',
+          '重启约数秒，期间所有在线机器人的长连接会短暂断开并自动重连。',
+        ],
+        confirmLabel: '立即重启',
+        onConfirm: function () { postAction('/api/daemon/restart', '重启'); },
+      });
+    } else {
+      confirmDialog({
+        title: '🚀 立即启动 Feishu Bridge 让机器人上线？',
+        lines: ['Feishu Bridge 当前未在运行，启动后新机器人即可上线。'],
+        confirmLabel: '立即启动',
+        onConfirm: function () { postAction('/api/daemon/start', '启动'); },
+      });
+    }
   }
 
   function copyRow(text) {
@@ -2605,7 +2594,9 @@ ${UI_PURE_JS}
     w.textContent = '';
     w.appendChild(el('h3', null, '🎉 接入完成'));
     w.appendChild(wizStepBar(3));
-    w.appendChild(el('div', 'note', '机器人「' + ((wizSetup && wizSetup.botName) || wizBotId || '') + '」已就绪，事件订阅已生效。'));
+    w.appendChild(el('div', 'note', '机器人「' + ((wizSetup && wizSetup.botName) || wizBotId || '') + '」已加入活跃集。'));
+    // 进入完成页即弹窗确认重启 Feishu Bridge 把新 bot 拉起上线（一次性；已在线则不弹）。
+    maybePromptRestartAtDone();
     var ul = el('div'); ul.style.margin = '12px 0';
     [
       '① 在飞书里私聊这个机器人，点「➕ 新建项目」把一个目录绑成项目群；',
