@@ -70,20 +70,34 @@ async function doStart(): Promise<void> {
  * 收尾走完。
  *
  * ① service manager 托管的 → uninstall（launchctl bootout + rm plist，连带移除自启）。
+ *    判据用「**已安装**」（plist/unit 在盘上）而非「**在跑**」：launchd KeepAlive=true
+ *    会在任何退出后立刻重启，若某个时刻 daemon 正被 SIGTERM、launchd 正重生它，
+ *    `isServiceRunning()` 会瞬时读成 false——这时若只发裸 SIGTERM（走 ②），KeepAlive
+ *    马上把它拉回来 →「停止不了」。只要服务定义还在就 uninstall（bootout 把它移出
+ *    domain，KeepAlive 随之失效），才停得干净。
  * ② **自托管 daemon**（手动 `run` / nohup / 引导控制台 / 多 bot supervisor，全都不在
  *    service manager 里）→ 按 web-console.json 记的 pid 优雅停。**这是历史 bug：旧版
  *    doStop 在 `!isServiceRunning()` 时直接 return，对自托管 daemon 完全 no-op——用户
  *    在 Web 点「停止」毫无反应**。daemon 自己的 SIGTERM handler 会级联关闭所有 bot 子
  *    进程 + 后端 app-server/ACP（不留孤儿），所以发 SIGTERM 即可，超时再 SIGKILL。
+ *
+ * adapter 段整体兜在 try 里：不支持后台服务的平台 `getServiceAdapter()` 会抛——绝不能
+ * 因此跳过 ② 的自托管兜底（否则那些平台上前台 run 的 daemon 永远停不掉）。
  */
 async function doStop(): Promise<void> {
-  const serviceWasRunning = isServiceRunning();
-  if (serviceWasRunning) {
-    await getServiceAdapter().uninstall();
-    log.info('daemon-control', 'stop-issued', {});
+  let installed = false;
+  try {
+    const adapter = getServiceAdapter();
+    installed = (await adapter.status()).installed;
+    if (installed) {
+      await adapter.uninstall();
+      log.info('daemon-control', 'stop-issued', {});
+    }
+  } catch (err) {
+    log.fail('daemon-control', err, { phase: 'stop-uninstall' });
   }
   const self = await stopSelfHostedDaemon();
-  if (!serviceWasRunning && self === 'no-daemon') {
+  if (!installed && self === 'no-daemon') {
     // service manager 没托管、也没探到在跑的自托管 daemon → 真的没东西可停。
     log.info('daemon-control', 'stop-skipped-no-daemon', {});
   }

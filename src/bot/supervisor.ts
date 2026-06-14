@@ -156,9 +156,13 @@ export async function runSupervisor(bots: BotEntry[]): Promise<void> {
         };
       },
       daemonStartedAt: supervisorStartedAt,
-      // 重启 / 升级走 detached helper：supervisor 被 service stop 杀掉后由 helper 续命。
+      // 重启 / 升级 / 停止走 detached helper：supervisor 被 service stop 杀掉后由 helper
+      // 续命/收尾。stopDaemon **必须**在此注入——漏了它，多 bot（supervisor）下 Web 点
+      // 「停止」会抛 NotWiredYetError（501，文案误导成「只读预览」），用户根本停不掉。
+      // supervisor 的 SIGTERM handler 会级联 SIGTERM→SIGKILL 所有 bot 子进程，不留孤儿。
       restartDaemon: () => spawnDaemonControl('restart'),
       applyUpdate: () => spawnDaemonControl('update'),
+      stopDaemon: () => spawnDaemonControl('stop'),
       // 按需后端安装在 daemon 进程内直跑（owns runtime，装完即能解析加载）。
       installBackend: installBackendDep,
       uninstallBackend: uninstallBackendDep,
