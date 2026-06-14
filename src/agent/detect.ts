@@ -1,6 +1,6 @@
 import type { BackendProbe, PermissionMode } from './types';
 import { DEFAULT_BACKEND_ID } from './types';
-import { BACKEND_CATALOG, type AgentFamily } from './catalog';
+import { BACKEND_CATALOG, catalogById, type AgentFamily } from './catalog';
 import { isBackendDepInstalled } from './backend-loader';
 import { resolveCodexBin, codexVersionAsync } from './codex-appserver/locate';
 import { resolveAcpCommand } from './acp/backend';
@@ -112,9 +112,11 @@ export async function detectAgents(): Promise<AgentRuntime[]> {
 export function pickDefaultBackend(agents: AgentRuntime[]): string {
   const find = (id: string): BackendAvailability | undefined =>
     agents.flatMap((a) => a.backends).find((b) => b.backendId === id);
-  if (find('codex-appserver')?.available) return 'codex-appserver';
-  if (find('claude-sdk')?.available) return 'claude-sdk';
-  if (find('claude-acp')?.available) return 'claude-acp';
+  // 用户不可见闸：隐藏后端绝不当默认（否则没装 codex 的机器会自动路由到 claude）。
+  const pickable = (id: string) => !catalogById(id)?.hidden && find(id)?.available;
+  if (pickable('codex-appserver')) return 'codex-appserver';
+  if (pickable('claude-sdk')) return 'claude-sdk';
+  if (pickable('claude-acp')) return 'claude-acp';
   return DEFAULT_BACKEND_ID; // 都无 → codex 占位（doctor 会报需安装）
 }
 

@@ -5,7 +5,7 @@ import { arch, platform, release } from 'node:os';
 import { paths } from '../config/paths';
 import { bridgeVersion } from '../core/version';
 import {
-  BACKEND_CATALOG,
+  visibleCatalog,
   createBackend,
   effectiveDefaultBackend,
   isInstallable,
@@ -193,7 +193,7 @@ function depStateFor(entry: BackendCatalogEntry, ok: boolean): BackendDepState {
 export async function doctorBackends(): Promise<BackendDoctorRow[]> {
   const def = await effectiveDefaultBackend({ force: true }).catch(() => undefined);
   return Promise.all(
-    BACKEND_CATALOG.map(async (entry) => {
+    visibleCatalog().map(async (entry) => {
       const probe = await createBackend(entry.id)
         .doctor({ force: true })
         .catch(() => undefined);

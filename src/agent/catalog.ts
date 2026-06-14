@@ -58,6 +58,16 @@ export interface BackendCatalogEntry {
   supportedModes?: readonly PermissionMode[];
   /** picker 副标题（一句话接入说明）。 */
   blurb?: string;
+  /**
+   * 「用户不可见」闸（产品门：claude 两后端尚未完整验证，先对用户全隐藏）。
+   * true ⇒ 不进任何**用户可见面**：Feishu 新建/绑定卡的后端选择器、Web 后端页、
+   *        宿主机体检页、智能默认后端的候选集。但**仍保留在 catalog/REGISTRY**
+   *        （catalogBackendIds 仍含它 → 与 REGISTRY 的配对单测不破；代码在仓、
+   *        只是无入口可达）。验证完毕要点亮：把对应条目的 `hidden: true` 删掉即可，零返工。
+   * 设计：曝光过滤集中在 {@link projectCreatableBackends} / pickDefaultBackend(detect.ts) /
+   *      listBackendCatalog(admin/service.ts) / doctorBackends(admin/host.ts) 四处。
+   */
+  hidden?: boolean;
 }
 
 /**
@@ -98,6 +108,7 @@ export const BACKEND_CATALOG: readonly BackendCatalogEntry[] = [
     },
     supportedModes: ['full'],
     blurb: '开箱即用（SDK 自带 Claude Code 二进制，约 224M，按需下载）',
+    hidden: true, // 用户不可见闸：claude 后端尚未完整验证，先全隐藏（验证后删此行点亮）
   },
   {
     id: 'claude-acp',
@@ -118,8 +129,18 @@ export const BACKEND_CATALOG: readonly BackendCatalogEntry[] = [
     },
     supportedModes: ['full'],
     blurb: '走订阅计费（不烧 SDK credit），按需下载适配器 + 需本机 claude 已登录',
+    hidden: true, // 用户不可见闸：claude 后端尚未完整验证，先全隐藏（验证后删此行点亮）
   },
 ];
+
+/**
+ * 用户可见的后端 catalog（滤掉 {@link BackendCatalogEntry.hidden}）——Web 后端页 /
+ * 宿主机体检页等「用户可见面」的列举从此取，而非裸 BACKEND_CATALOG。catalogBackendIds /
+ * REGISTRY 配对仍走全量（hidden 只挡曝光、不退注册）。
+ */
+export function visibleCatalog(): BackendCatalogEntry[] {
+  return BACKEND_CATALOG.filter((e) => !e.hidden);
+}
 
 /** 按 id 取一条 catalog（未注册返回 undefined）。 */
 export function catalogById(id: string): BackendCatalogEntry | undefined {
@@ -150,6 +171,7 @@ export function projectCreatableBackends(
   isInstalled: (entry: BackendCatalogEntry) => boolean,
 ): BackendCatalogEntry[] {
   return BACKEND_CATALOG.filter((e) => {
+    if (e.hidden) return false; // 用户不可见闸：隐藏后端不进 picker（claude 暂全隐藏）
     const installed = e.id === DEFAULT_BACKEND_ID || isInstalled(e);
     if (!installed) return false;
     if (e.supportedModes && !e.supportedModes.includes(mode)) return false;

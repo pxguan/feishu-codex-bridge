@@ -61,6 +61,9 @@ const { CATALOG, doctorResults } = vi.hoisted(() => {
 vi.mock('../src/agent', () => ({
   DEFAULT_BACKEND_ID: 'codex-appserver',
   BACKEND_CATALOG: CATALOG,
+  // 镜像真实 visibleCatalog：滤掉 hidden（本 mock 三条均不 hidden → 全列，验证聚合机制本身，
+  // 与产品的「claude 用户不可见闸」解耦——那条由 backend-catalog.test.ts 专测）。
+  visibleCatalog: () => CATALOG.filter((e) => !(e as { hidden?: boolean }).hidden),
   backendIds: () => CATALOG.map((e) => e.id),
   createBackend: (id: string) => ({
     id,

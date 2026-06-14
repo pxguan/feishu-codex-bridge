@@ -32,7 +32,7 @@ import {
   backendIds,
   createBackend,
   DEFAULT_BACKEND_ID,
-  BACKEND_CATALOG,
+  visibleCatalog,
   catalogById,
   isInstallable,
   effectiveDefaultBackend,
@@ -711,7 +711,7 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       // force：用户刚装完后要看「现在」的默认（装好 SDK 后 claude 才进候选）。
       const defaultBackend = await effectiveDefaultBackend({ force: true }).catch(() => DEFAULT_BACKEND_ID);
       const entries = await Promise.all(
-        BACKEND_CATALOG.map((entry) => catalogEntryStatus(entry, defaultBackend)),
+        visibleCatalog().map((entry) => catalogEntryStatus(entry, defaultBackend)),
       );
       return { defaultBackend, entries };
     },

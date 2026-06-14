@@ -88,17 +88,17 @@ describe('智能默认 effectiveDefaultBackend（detect 推导）', () => {
     expect(await effectiveDefaultBackend({ force: true })).toBe('codex-appserver');
   });
 
-  it('无 codex、SDK dep 装了 → claude-sdk', async () => {
+  it('用户不可见闸：无 codex、SDK 装了 → 仍回退 codex-appserver 占位（hidden 后端绝不当默认；删 hidden 后应回 claude-sdk）', async () => {
     detectState.codexBin = null;
     loaderState.sdkInstalled = true;
-    expect(await effectiveDefaultBackend({ force: true })).toBe('claude-sdk');
+    expect(await effectiveDefaultBackend({ force: true })).toBe('codex-appserver');
   });
 
-  it('无 codex、SDK 未装、ACP 适配器在 → claude-acp', async () => {
+  it('用户不可见闸：无 codex、SDK 未装、ACP 适配器在 → 仍回退 codex-appserver 占位（hidden 后端绝不当默认）', async () => {
     detectState.codexBin = null;
     loaderState.sdkInstalled = false;
     detectState.acpCmd = { command: '/opt/bin/claude-pty-acp', args: [] };
-    expect(await effectiveDefaultBackend({ force: true })).toBe('claude-acp');
+    expect(await effectiveDefaultBackend({ force: true })).toBe('codex-appserver');
   });
 
   it('都无 → 回退 codex-appserver 占位（doctor 会报需安装）', async () => {
@@ -108,11 +108,11 @@ describe('智能默认 effectiveDefaultBackend（detect 推导）', () => {
     expect(await effectiveDefaultBackend({ force: true })).toBe('codex-appserver');
   });
 
-  it('codex 装了但 --version 失败（不可用）→ 落 SDK', async () => {
+  it('用户不可见闸：codex --version 失败（不可用）+ SDK 装了 → 仍 codex-appserver（hidden 后端不顶默认；删 hidden 后应落 claude-sdk）', async () => {
     detectState.codexBin = '/usr/bin/codex';
     detectState.codexVersion = null;
     loaderState.sdkInstalled = true;
-    expect(await effectiveDefaultBackend({ force: true })).toBe('claude-sdk');
+    expect(await effectiveDefaultBackend({ force: true })).toBe('codex-appserver');
   });
 });
 

@@ -45,6 +45,7 @@ export function createBackend(id: string = DEFAULT_BACKEND_ID): AgentBackend {
 export type * from './types';
 export {
   BACKEND_CATALOG,
+  visibleCatalog,
   catalogById,
   catalogByFamily,
   catalogBackendIds,

@@ -265,7 +265,9 @@ function asTier(v: string | undefined): PermissionMode | undefined {
  * 'full'、绑定外部群默认档 'qa'，过滤面随之不同（claude 系仅 full，qa 下自然只剩 codex）。
  */
 function backendOptionsFor(mode: PermissionMode): SelectOption[] {
-  return projectCreatableBackends(mode, isBackendEntryInstalled).map((e) => ({ label: e.displayName, value: e.id }));
+  const opts = projectCreatableBackends(mode, isBackendEntryInstalled).map((e) => ({ label: e.displayName, value: e.id }));
+  // 用户不可见闸：只剩默认 codex（无真实选择）时不渲染后端区，卡片回到「无后端概念」形态。
+  return opts.length > 1 ? opts : [];
 }
 
 /**

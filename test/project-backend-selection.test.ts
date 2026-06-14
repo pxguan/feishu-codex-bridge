@@ -34,13 +34,13 @@ describe('bindModeFor —— 绑定『已有群』按所选后端定档（claude
     expect(bindModeFor(undefined)).toBeUndefined();
   });
 
-  it('claude 系（supportedModes=[full]，不含 qa）→ full：显式选了才以完全访问档绑定，' +
-    '否则 assertBackendUsable 会当场拒「不支持 qa 档」', () => {
+  it('claude 系：bindModeFor 仍算出 full（档位推导与 hidden 无关）；但「用户不可见闸」下 ' +
+    'assertBackendUsable 现在拒 claude（hidden 后端不可选；删 catalog 的 hidden 后恢复放行）', () => {
     expect(bindModeFor('claude-sdk')).toBe('full');
     expect(bindModeFor('claude-acp')).toBe('full');
-    // 选了 claude → full，assertBackendUsable 放行（之前 qa 写死会拒、根本选不了）。
-    expect(() => assertBackendUsable('claude-sdk', bindModeFor('claude-sdk') ?? 'qa')).not.toThrow();
-    expect(() => assertBackendUsable('claude-acp', bindModeFor('claude-acp') ?? 'qa')).not.toThrow();
+    // 用户不可见闸：claude 被 hidden 隐藏 → projectCreatableBackends 不含它 → assertBackendUsable 当场拒。
+    expect(() => assertBackendUsable('claude-sdk', bindModeFor('claude-sdk') ?? 'qa')).toThrow(/不可用/);
+    expect(() => assertBackendUsable('claude-acp', bindModeFor('claude-acp') ?? 'qa')).toThrow(/不可用/);
   });
 
   it('未知 id → undefined（不臆造档；落地时 assertBackendUsable 再兜底拒绝）', () => {
