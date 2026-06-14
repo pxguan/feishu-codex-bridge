@@ -42,7 +42,12 @@ export async function runWeb(opts: { port?: number } = {}): Promise<void> {
   // 拉起（与本预览进程脱钩）。预览不占 51847，daemon 起来即可拿到 51847；注入 liveConsole
   // （readWebConsole）后前端检测到 daemon 已起就自动把页面带去那条可写控制台（见
   // server.ts /api/console/live）。token 用稳定 token——切过去后那条 URL 长期有效不 401。
-  const service = createReadonlyAdminService({ startDaemon: () => spawnDaemonControl('start') });
+  // 没启动只读，但放行两个宿主级动作：启动 + 更新（升级 npm 包；没 daemon 在跑时
+  // doUpdate 装最新版即可，重启那步是 no-op）。其余写仍 501。
+  const service = createReadonlyAdminService({
+    startDaemon: () => spawnDaemonControl('start'),
+    applyUpdate: () => spawnDaemonControl('update'),
+  });
   const web = createWebServer({ service, token: stableWebConsoleToken(), liveConsole: () => readWebConsole() });
 
   let url: string;

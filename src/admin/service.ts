@@ -414,6 +414,12 @@ export interface AdminServiceDeps {
   /** 停止后台服务的执行器（detached helper，service uninstall）。daemon 进程注入，缺省抛 NotWiredYetError。 */
   stopDaemon?: () => void;
   /**
+   * 只读预览标记（仅 {@link createReadonlyAdminService} 置 true）。置 true 时**注册机器人**
+   * （registerBot / registerBotByQr，属写操作）一律 NotWiredYetError——「没启动只读」：加机器人
+   * 必须先有 daemon 在跑。daemon 托管的服务不置此标记，注册照常。
+   */
+  readonlyPreview?: boolean;
+  /**
    * 按需后端依赖的安装执行器（npm-ondemand → 用户私装目录）。daemon 进程注入
    * {@link installBackendDep}（它 owns runtime，装完即能解析加载）；只读预览进程
    * 不注入 → installBackend 抛 {@link NotWiredYetError}（HTTP 501）。测试可注入 mock
@@ -591,8 +597,9 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
     },
 
     registerBot(input): Promise<RegisterBotResult | RegisterBotFailure> {
-      // 纯写宿主机级 keystore + bots.json，与 daemon/预览进程形态无关——不走
-      // executeWrite，预览进程也能注册（day-0 的全部意义就在这里）。
+      // 「没启动只读」：只读预览不许加机器人——必须先有 daemon 在跑（前台 run 的引导控制台
+      // 本身就是个在跑的 daemon，第一个 bot 在那里加）。
+      if (deps.readonlyPreview) throw new NotWiredYetError('➕ 添加机器人');
       return registerBotFromCredentials({
         appId: input.appId,
         appSecret: input.appSecret,
@@ -672,6 +679,8 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
     },
 
     async registerBotByQr(opts): Promise<QrRegisterResult | QrRegisterFailure> {
+      // 「没启动只读」：只读预览不许扫码加机器人——必须先有 daemon 在跑（见 registerBot）。
+      if (deps.readonlyPreview) throw new NotWiredYetError('➕ 添加机器人');
       // ① 扫码会话：透传 onQr/onStatus 给上层做 SSE；signal 取消 → SDK reject code='abort'。
       let creds;
       try {
@@ -982,8 +991,10 @@ async function probeAllBackends(): Promise<AdminBackendStatus[]> {
  * 「启动」是预览唯一该能做的宿主级动作（detached helper 把 service 装起来，与预览进程脱钩），
  * 故允许调用方注入。其余 deps 一律不放行，保持「只读」语义。
  */
-export function createReadonlyAdminService(deps: Pick<AdminServiceDeps, 'startDaemon'> = {}): AdminService {
-  return createAdminService({ startDaemon: deps.startDaemon });
+export function createReadonlyAdminService(deps: Pick<AdminServiceDeps, 'startDaemon' | 'applyUpdate'> = {}): AdminService {
+  // 只读预览能做的宿主级写操作只有「启动」和「更新」（没启动只读，但这俩是为了让用户能
+  // 起 / 升级 daemon）；readonlyPreview 闸挡掉注册机器人等其余写。
+  return createAdminService({ startDaemon: deps.startDaemon, applyUpdate: deps.applyUpdate, readonlyPreview: true });
 }
 
 function isAlive(pid: number): boolean {

@@ -502,7 +502,17 @@ export function createWebServer(opts: WebServerOptions): WebServer {
     const tenant = body.tenant === 'lark' ? 'lark' : 'feishu';
     const desiredName = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : undefined;
 
-    const result = await opts.service.registerBot({ appId, appSecret, tenant, desiredName });
+    let result;
+    try {
+      result = await opts.service.registerBot({ appId, appSecret, tenant, desiredName });
+    } catch (err) {
+      // 只读预览（没启动）不许加机器人 → 501（前端已先用 daemon 状态拦在按钮处，这是兜底）。
+      if (err instanceof NotWiredYetError) {
+        sendJson(res, 501, { error: 'not_wired_yet', message: err.message });
+        return;
+      }
+      throw err;
+    }
     if (result.ok) {
       sendJson(res, 201, {
         ok: true,
