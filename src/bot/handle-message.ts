@@ -120,6 +120,7 @@ import {
 } from '../card/usage-cards';
 import { serviceStdoutPath, serviceStderrPath } from '../service/common';
 import { bridgeVersion } from '../core/version';
+import { webConsoleUrl } from '../web/discovery';
 import { paths } from '../config/paths';
 import { getSecret } from '../config/keystore';
 import { buildScopeGrantUrl, JOIN_GROUP_SCOPES } from '../config/scopes';
@@ -1883,7 +1884,7 @@ export function createOrchestrator(
   // new-project form isn't locked until it's submitted, so 返回 always lands on
   // a card we can update in place — no recall, no fresh entity needed.
   const freshMenu = (evt: CardActionEvent): void => {
-    patch(evt, buildDmMenuCard());
+    patch(evt, buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() }));
   };
 
   // 📊 Codex 用量：loading 卡先落地（取数走网络 1~3s），结果再原地覆盖。错误按
@@ -2337,7 +2338,7 @@ export function createOrchestrator(
       const name = typeof value.n === 'string' ? value.n : '';
       patch(evt, async () => {
         const p = await getProjectByName(name);
-        if (!p) return buildDmMenuCard();
+        if (!p) return buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() });
         return buildAllowlistCard(p, await namesWithOperator(evt, p.allowedUsers ?? []));
       });
     })
@@ -2373,7 +2374,7 @@ export function createOrchestrator(
       patch(evt, async () => {
         await updateProject(name, (p) => ({ allowedUsers: (p.allowedUsers ?? []).filter((x) => x !== id) }));
         const fresh = await getProjectByName(name); // 写后回读，与盘上一致
-        if (!fresh) return buildDmMenuCard();
+        if (!fresh) return buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() });
         return buildAllowlistCard(fresh, await namesWithOperator(evt, fresh.allowedUsers ?? []));
       });
     })
@@ -2383,7 +2384,7 @@ export function createOrchestrator(
       const name = typeof value.n === 'string' ? value.n : '';
       patch(evt, async () => {
         const p = await getProjectByName(name);
-        return p ? buildProjectSettingsCard(p, backendDisplayName(p.backend)) : buildDmMenuCard();
+        return p ? buildProjectSettingsCard(p, backendDisplayName(p.backend)) : buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() });
       });
     })
     .on(DM.projectTopics, ({ evt, value }) => {
@@ -2391,7 +2392,7 @@ export function createOrchestrator(
       const name = typeof value.n === 'string' ? value.n : '';
       patch(evt, async () => {
         const p = await getProjectByName(name);
-        if (!p) return buildDmMenuCard();
+        if (!p) return buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() });
         const sessions = (await listSessions()).filter((s) => s.chatId === p.chatId);
         return buildProjectTopicsCard(p, sessions);
       });
@@ -2403,7 +2404,7 @@ export function createOrchestrator(
       const on = value.v === 'on';
       patch(evt, async () => {
         const r = await performSetNoMention({ projectName: name, on });
-        if (!r.ok) return buildDmMenuCard();
+        if (!r.ok) return buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() });
         return buildProjectSettingsCard(r.project, backendDisplayName(r.project.backend));
       });
     })
@@ -2415,7 +2416,7 @@ export function createOrchestrator(
         // 共享层落盘 + 驱逐活跃会话（压缩上限在 thread/start 绑定，驱逐后下一条
         // 消息重绑生效——mirrors 群设置）。
         const r = await performSetAutoCompact({ projectName: name, on, evictLiveSessionsForChat });
-        if (!r.ok) return buildDmMenuCard();
+        if (!r.ok) return buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() });
         log.info('console', 'project-autocompact', { project: name, on });
         return buildProjectSettingsCard(r.project, backendDisplayName(r.project.backend));
       });
@@ -2426,7 +2427,7 @@ export function createOrchestrator(
       const name = typeof value.n === 'string' ? value.n : '';
       patch(evt, async () => {
         const p = await getProjectByName(name);
-        return p ? buildPermissionCard(p) : buildDmMenuCard();
+        return p ? buildPermissionCard(p) : buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() });
       });
     })
     // 提交权限表单：落盘 管理员档 mode / 普通用户档 guestMode / 联网，再驱逐本项目活跃会话
@@ -3630,7 +3631,7 @@ export function createOrchestrator(
         .catch(() => undefined);
       return;
     }
-    await sendManagedCard(channel, op, buildDmMenuCard(), undefined, false, 'open_id').catch((err) =>
+    await sendManagedCard(channel, op, buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() }), undefined, false, 'open_id').catch((err) =>
       log.fail('console', err, { cmd: 'menu-card' }),
     );
   };

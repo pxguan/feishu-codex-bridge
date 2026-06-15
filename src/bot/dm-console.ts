@@ -3,6 +3,8 @@ import { isAdmin, type AppConfig } from '../config/schema';
 import { buildDmMenuCard } from '../card/dm-cards';
 import { sendManagedCard } from '../card/managed';
 import { log, withTrace } from '../core/logger';
+import { bridgeVersion } from '../core/version';
+import { webConsoleUrl } from '../web/discovery';
 
 /**
  * p2p (DM) console. Admin-gated (design §5: only admins may create / manage
@@ -21,7 +23,7 @@ export async function handleDmConsole(channel: LarkChannel, cfg: AppConfig, msg:
     }
     // The menu is a CardKit entity so dm.* button clicks can update it in place
     // (raw-JSON cards can't be patched — they flash and revert).
-    await sendManagedCard(channel, msg.chatId, buildDmMenuCard(), msg.messageId).catch((err) =>
+    await sendManagedCard(channel, msg.chatId, buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() }), msg.messageId).catch((err) =>
       log.fail('console', err, { cmd: 'menu-send' }),
     );
   });

@@ -53,6 +53,20 @@ export function readWebConsole(file: string = paths.webConsoleFile): WebConsoleR
   }
 }
 
+/**
+ * 本机 Web 控制台的可点直达 URL（`http://127.0.0.1:<port>/?token=...`），给飞书
+ * 私聊菜单卡的「🌐 网页控制台」按钮用。读发现文件：daemon / 控制台没在跑
+ * （{@link readWebConsole} 对缺失 / 损坏 / 持有 pid 已死的记录都回 undefined）就回
+ * undefined，让菜单卡不渲染死链。token 只随这条 127.0.0.1 链接出现、且只发给已经过
+ * admin 鉴权的操作者，与 web-console.json 0600 同信任域（见模块注释）。每次渲染都现读，
+ * 不缓存——这样 daemon 重启 / 端口与 token 轮换后链接始终有效，控制台停了按钮也随之消失。
+ */
+export function webConsoleUrl(file: string = paths.webConsoleFile): string | undefined {
+  const rec = readWebConsole(file);
+  if (!rec) return undefined;
+  return `http://127.0.0.1:${rec.port}/?token=${encodeURIComponent(rec.token)}`;
+}
+
 /** 清理发现记录——只删**本进程**写下的那条（pid 归属校验，见模块注释）。 */
 export function clearWebConsole(file: string = paths.webConsoleFile): void {
   try {

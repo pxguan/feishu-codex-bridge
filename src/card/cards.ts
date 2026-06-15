@@ -29,7 +29,14 @@ export interface ActionValue {
 export function card(
   elements: CardElement[],
   opts: {
-    header?: { title: string; template?: HeaderTemplate; subtitle?: string };
+    header?: {
+      title: string;
+      template?: HeaderTemplate;
+      subtitle?: string;
+      /** Status pills on the header's right side (schema 2.0 `text_tag_list`),
+       * e.g. a version badge. `color` is a feishu tag color (blue/green/grey/…). */
+      textTags?: { text: string; color: string }[];
+    };
     /** Live (running) card. Enables streaming_mode so the answer element can be
      * driven by the element-level typewriter (cardkit.v1.cardElement.content). */
     streaming?: boolean;
@@ -72,6 +79,15 @@ export function card(
       title: { tag: 'plain_text', content: opts.header.title },
       ...(opts.header.subtitle
         ? { subtitle: { tag: 'plain_text', content: opts.header.subtitle } }
+        : {}),
+      ...(opts.header.textTags?.length
+        ? {
+            text_tag_list: opts.header.textTags.map((t) => ({
+              tag: 'text_tag',
+              text: { tag: 'plain_text', content: t.text },
+              color: t.color,
+            })),
+          }
         : {}),
     };
   }
@@ -209,6 +225,41 @@ export function actions(items: CardElement[], elementId?: string): CardElement {
   };
 }
 
+/**
+ * Like {@link actions} but every control is pinned to the SAME fixed `width`,
+ * rendered at the taller `size:'large'`, and the row is left-packed with an 8px
+ * gap (`flex_mode:'flow'`) — so buttons form tidy, comfortably tall aligned
+ * columns and leave the right side empty instead of stretching to fill the row.
+ * Callers pick per-row widths so rows with different button counts still span the
+ * same total and share left+right edges (see the menu's MENU_BTN_W_* constants). */
+export function actionsFixed(items: CardElement[], width: string, elementId?: string): CardElement {
+  return {
+    tag: 'column_set',
+    ...(elementId ? { element_id: elementId } : {}),
+    flex_mode: 'flow',
+    horizontal_spacing: '8px',
+    columns: items.map((it) => ({ tag: 'column', width: 'auto', elements: [{ ...it, width, size: 'large' }] })),
+  };
+}
+
+/**
+ * A two-column row: a left control at its natural width, and right-hand content
+ * filling the rest — both vertically centred. Use for a low-key action with an
+ * inline caption beside it (e.g. a small 🌐 网页控制台 button + a grey note
+ * explaining it). `flex_mode:'none'` keeps button and caption on one line. */
+export function splitRow(left: CardElement, right: CardElement, elementId?: string): CardElement {
+  return {
+    tag: 'column_set',
+    ...(elementId ? { element_id: elementId } : {}),
+    flex_mode: 'none',
+    horizontal_spacing: 'medium',
+    columns: [
+      { tag: 'column', width: 'auto', vertical_align: 'center', elements: [left] },
+      { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [right] },
+    ],
+  };
+}
+
 export type ButtonType = 'default' | 'primary' | 'danger';
 
 export function button(label: string, value: ActionValue, type: ButtonType = 'default'): CardElement {
@@ -222,12 +273,19 @@ export function button(label: string, value: ActionValue, type: ButtonType = 'de
 
 /** A button that opens a URL (e.g. an applink) instead of firing a callback.
  * Schema 2.0 buttons take an `open_url` behavior; `default_url` covers all
- * platforms (use the `lark://`/`https://applink.feishu.cn/...` scheme as-is). */
-export function linkButton(label: string, url: string, type: ButtonType = 'default'): CardElement {
+ * platforms (use the `lark://`/`https://applink.feishu.cn/...` scheme as-is).
+ * `size` ('tiny'|'small'|'medium'|'large') tunes the button height. */
+export function linkButton(
+  label: string,
+  url: string,
+  type: ButtonType = 'default',
+  size?: 'tiny' | 'small' | 'medium' | 'large',
+): CardElement {
   return {
     tag: 'button',
     text: { tag: 'plain_text', content: label },
     type,
+    ...(size ? { size } : {}),
     behaviors: [{ type: 'open_url', default_url: url }],
   };
 }
