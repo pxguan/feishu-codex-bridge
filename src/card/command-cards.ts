@@ -288,6 +288,8 @@ export function buildWelcomeCard(
   docUrl?: string,
   noMention = true,
   caps?: HelpCaps,
+  /** 本群后端的展示名（Codex / Claude …）——欢迎语按后端区分；缺省 'Codex'（向后兼容）。 */
+  agentName = 'Codex',
 ): CardObject {
   const showGoal = caps?.goal ?? true;
   const showCompact = caps?.compact ?? true;
@@ -296,7 +298,7 @@ export function buildWelcomeCard(
   // /context 总在；/compact 仅后端支持时合并进同一行。
   const ctxLine = showCompact ? '· `/context` · `/compact` → 看 / 压缩上下文' : '· `/context` → 看上下文占比';
   const elements: CardElement[] = [
-    md('👋 **欢迎使用 Codex Bridge** — 本群已绑定一个项目目录，在群里就能驱动本机 Codex 干活。'),
+    md(`👋 **欢迎使用 ${agentName} Bridge** — 本群已绑定一个项目目录，在群里就能驱动本机 ${agentName} 干活。`),
     hr(),
   ];
   if (kind === 'single') {

@@ -1,7 +1,7 @@
 import type { LarkChannel } from '@larksuiteoapi/node-sdk';
 import { log } from '../core/logger';
 import { buildWelcomeCard } from '../card/command-cards';
-import { createBackend } from '../agent';
+import { createBackend, catalogById } from '../agent';
 import { defaultNoMention, type Project } from './registry';
 
 /** 项目后端的能力位（用于欢迎卡按后端裁剪命令）。未知/手编 id 解析失败 ⇒ undefined
@@ -12,6 +12,12 @@ function welcomeCaps(backend?: string): { goal?: boolean; compact?: boolean; res
   } catch {
     return undefined;
   }
+}
+
+/** 本群后端的展示名（Codex / Claude …），用于欢迎卡与群菜单文案按后端区分。
+ * 未知/未设后端 ⇒ 'Codex'（历史默认）。 */
+function welcomeAgentName(backend?: string): string {
+  return (backend && catalogById(backend)?.displayName) || 'Codex';
 }
 
 /**
@@ -44,6 +50,7 @@ export function sidebarPcUrl(url: string): string {
 export async function onboardGroup(channel: LarkChannel, project: Project): Promise<void> {
   const kind = project.kind ?? 'multi';
   const chatId = project.chatId;
+  const agentName = welcomeAgentName(project.backend);
   // In a 'joined' group the bot is a plain member, not the owner: don't Pin or
   // add a chat tab (those mutate the group's structure and a member may lack the
   // permission anyway). The one-off welcome card is still sent — it's just a
@@ -55,7 +62,9 @@ export async function onboardGroup(channel: LarkChannel, project: Project): Prom
   //    we capture the message_id and Pin it; joined groups skip the Pin.
   try {
     const noMention = project.noMention ?? defaultNoMention(project);
-    const content = JSON.stringify(buildWelcomeCard(kind, HELP_DOC_URL || undefined, noMention, welcomeCaps(project.backend)));
+    const content = JSON.stringify(
+      buildWelcomeCard(kind, HELP_DOC_URL || undefined, noMention, welcomeCaps(project.backend), agentName),
+    );
     const sent = await channel.rawClient.im.v1.message.create({
       params: { receive_id_type: 'chat_id' },
       data: { receive_id: chatId, msg_type: 'interactive', content },
@@ -87,7 +96,7 @@ export async function onboardGroup(channel: LarkChannel, project: Project): Prom
     }
   }
 
-  // 3. 群菜单「🤖 Codex」→ 命令手册（M-6 群内可发现性）。群菜单常驻输入框上方，
+  // 3. 群菜单「🤖 <后端名>」→ 命令手册（M-6 群内可发现性）。群菜单常驻输入框上方，
   //    可见性远高于群 Tab；动作只支持 REDIRECT_LINK —— PC 端加 applink
   //    sidebar-semi 前缀在侧边栏打开，移动端走原链接。需可选 scope
   //    im:chat.menu_tree:write_only：未开通时 create 报错 → log + 跳过，
@@ -102,7 +111,7 @@ export async function onboardGroup(channel: LarkChannel, project: Project): Prom
               {
                 chat_menu_item: {
                   action_type: 'REDIRECT_LINK',
-                  name: '🤖 Codex',
+                  name: `🤖 ${agentName}`,
                   redirect_link: { common_url: HELP_DOC_URL, pc_url: sidebarPcUrl(HELP_DOC_URL) },
                 },
               },

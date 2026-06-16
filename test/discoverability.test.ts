@@ -126,6 +126,14 @@ describe('onboardGroup 群菜单（M-6）', () => {
     expect(item.redirect_link.pc_url).toContain('mode=sidebar-semi');
   });
 
+  it('claude-agent 群：菜单名按后端展示名 → 「🤖 Claude」', async () => {
+    const calls: FakeCalls = { menuPayloads: [], tabCount: 0 };
+    await onboardGroup(fakeChannel(calls), { ...project(), backend: 'claude-agent' });
+    const item = (calls.menuPayloads[0] as { data: { menu_tree: { chat_menu_top_levels: { chat_menu_item: { name: string } }[] } } })
+      .data.menu_tree.chat_menu_top_levels[0]!.chat_menu_item;
+    expect(item.name).toBe('🤖 Claude');
+  });
+
   it('joined 群（bot 是普通成员）不动群结构：不挂菜单也不加 Tab', async () => {
     const calls: FakeCalls = { menuPayloads: [], tabCount: 0 };
     await onboardGroup(fakeChannel(calls), project('joined'));
