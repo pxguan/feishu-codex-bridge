@@ -2,6 +2,7 @@ import type { AgentBackend } from './types';
 import { DEFAULT_BACKEND_ID } from './types';
 import { catalogBackendIds } from './catalog';
 import { CodexAppServerBackend } from './codex-appserver/backend';
+import { ClaudeAgentBackend } from './claude-agent/backend';
 
 export { DEFAULT_BACKEND_ID } from './types';
 
@@ -17,6 +18,7 @@ export { DEFAULT_BACKEND_ID } from './types';
  */
 const REGISTRY = new Map<string, () => AgentBackend>([
   ['codex-appserver', () => new CodexAppServerBackend()],
+  ['claude-agent', () => new ClaudeAgentBackend()],
 ]);
 
 /** Registered backend ids（从 catalog 派生 —— catalog 是单一注册入口）。 */

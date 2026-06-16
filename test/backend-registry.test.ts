@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_BACKEND_ID, backendIds, createBackend } from '../src/agent';
 import { CodexAppServerBackend } from '../src/agent/codex-appserver/backend';
+import { ClaudeAgentBackend } from '../src/agent/claude-agent/backend';
 
 describe('agent backend registry', () => {
   it('defaults to the codex app-server backend (zero-arg call = legacy path)', () => {
@@ -23,7 +24,19 @@ describe('agent backend registry', () => {
     expect(() => createBackend('no-such-backend')).toThrow(/codex-appserver/);
   });
 
-  it('backendIds lists every registered backend（codex-only：仅 codex-appserver）', () => {
-    expect(backendIds()).toEqual(['codex-appserver']);
+  it('resolves an explicit claude-agent id to the Claude Agent SDK backend', () => {
+    const be = createBackend('claude-agent');
+    expect(be).toBeInstanceOf(ClaudeAgentBackend);
+    expect(be.id).toBe('claude-agent');
+  });
+
+  it('claude-agent declares an explicit capabilities object (codex-only affordances off)', () => {
+    const caps = createBackend('claude-agent').capabilities;
+    expect(caps).toBeDefined();
+    expect(caps).toMatchObject({ goal: false, steer: false, compact: false, resume: false });
+  });
+
+  it('backendIds lists every registered backend（codex + claude-agent）', () => {
+    expect(backendIds()).toEqual(['codex-appserver', 'claude-agent']);
   });
 });

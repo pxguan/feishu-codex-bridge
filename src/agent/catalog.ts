@@ -95,6 +95,24 @@ export const BACKEND_CATALOG: readonly BackendCatalogEntry[] = [
     // supportedModes undefined ⇒ 全档（qa/write/full）。
     blurb: '能力最全（goal/steer/compact/resume + 真沙箱只读档）',
   },
+  {
+    id: 'claude-agent',
+    agentFamily: 'claude',
+    displayName: 'Claude',
+    access: 'sdk',
+    dep: {
+      // SDK 是桥的硬依赖（随桥内置），isBackendDepInstalled 路径①经 bridge 自身
+      // node_modules 的 require.resolve 恒命中 → 在 picker 里始终判为「已装」可选。
+      kind: 'npm-ondemand',
+      pkg: '@anthropic-ai/claude-agent-sdk',
+      approxSizeMB: 40,
+      detectHint: '随桥内置（@anthropic-ai/claude-agent-sdk）；复用本机 Claude 登录态',
+      installCmd: '随桥已内置（如缺失：npm i @anthropic-ai/claude-agent-sdk）',
+    },
+    // 必须与 ClaudeAgentBackend.supportedModes 完全一致（单测强制）。
+    supportedModes: ['qa', 'write', 'full'],
+    blurb: 'Claude Code（SDK 内置，复用本机登录；qa/write 走 OS 沙箱，能力较 Codex 精简）',
+  },
 ];
 
 /**
