@@ -93,6 +93,7 @@ import {
   buildProjectListCard,
   buildProjectTopicsCard,
   buildProjectSettingsCard,
+  buildReconnectCard,
   buildRmConfirmCard,
   buildSettingsCard,
   buildUpdateCard,
@@ -1948,6 +1949,43 @@ export function createOrchestrator(
     return buildProjectListCard(projects, byChat);
   };
 
+  // 体检数据收集（codex 探测 + 飞书 scope 自检）：DM.doctor 与私聊菜单 dm.doctor
+  // 直达共用，两处不各写一遍探测。force 绕过探测缓存看「现在」的状态；探测全程
+  // 异步——回调里绝不能 spawnSync（同步 codex --version 会冻住所有话题的流式 pump）。
+  const buildDoctorInfo = async (): Promise<DoctorInfo> => {
+    const codexProbe = await backend.doctor({ force: true });
+    const app = cfg.accounts.app;
+    // 读 keystore 里的 App Secret → 换 token → 查已开通 scope。任一步失败时
+    // missingScopes 留 undefined，卡片显示「无法自动检查」而非误报缺失。
+    const secret = await getSecret(secretKeyForApp(app.id)).catch(() => undefined);
+    const scopeCheck = secret
+      ? await validateAppCredentials(app.id, secret, app.tenant).catch(() => undefined)
+      : undefined;
+    const missingScopes = scopeCheck?.missingScopes;
+    const missingJoinScopes = scopeCheck?.missingJoinScopes;
+    return {
+      codexOk: codexProbe.ok,
+      codexVer: codexProbe.version,
+      conn: channel.getConnectionStatus?.()?.state ?? 'unknown',
+      bridgeVer: bridgeVersion(),
+      node: process.version,
+      platform: `${process.platform}-${process.arch}`,
+      logStdout: serviceStdoutPath(),
+      logStderr: serviceStderrPath(),
+      configFile: paths.configFile,
+      missingScopes,
+      // 缺失时预选缺失项（精准开通）；查不到/全开通时预选全部必需 scope 供核对。
+      scopeGrantUrl: buildScopeGrantUrl(
+        app.id,
+        app.tenant,
+        missingScopes && missingScopes.length ? missingScopes : undefined,
+      ),
+      missingJoinScopes,
+      // 「加入存量群」按钮恒预选这两项 opt-in scope（它们不在必需清单里）。
+      joinScopeGrantUrl: buildScopeGrantUrl(app.id, app.tenant, JOIN_GROUP_SCOPES),
+    };
+  };
+
   dispatcher
     .on(DM.menu, ({ evt }) => {
       if (dmAdmin(evt.operator?.openId)) freshMenu(evt);
@@ -2028,54 +2066,18 @@ export function createOrchestrator(
     })
     .on(DM.doctor, async ({ evt }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
-      // 体检要看「现在」的状态：backend.doctor({force}) 绕过探测缓存重新探测。
-      // 探测全程异步——卡片回调里**绝不能** spawnSync（见 DM.update），同步 codex
-      // --version（~320ms×2）会把所有话题的流式 pump 一起冻住。
-      const codexProbe = await backend.doctor({ force: true });
-      // 飞书权限自检：读 keystore 里的 App Secret → 换 tenant_access_token → 查已开通
-      // scope（application/v6/scopes 的 grant_status，含 im:message.group_msg 等事件订阅
-      // 类）。任一步失败时 missingScopes 留 undefined，卡片显示「无法自动检查」而非误报
-      // 缺失。复用 onboarding 同一条校验路径，单一事实源。
-      const app = cfg.accounts.app;
-      const secret = await getSecret(secretKeyForApp(app.id)).catch(() => undefined);
-      const scopeCheck = secret
-        ? await validateAppCredentials(app.id, secret, app.tenant).catch(() => undefined)
-        : undefined;
-      const missingScopes = scopeCheck?.missingScopes;
-      const missingJoinScopes = scopeCheck?.missingJoinScopes;
-      const info: DoctorInfo = {
-        codexOk: codexProbe.ok,
-        codexVer: codexProbe.version,
-        conn: channel.getConnectionStatus?.()?.state ?? 'unknown',
-        bridgeVer: bridgeVersion(),
-        node: process.version,
-        platform: `${process.platform}-${process.arch}`,
-        logStdout: serviceStdoutPath(),
-        logStderr: serviceStderrPath(),
-        configFile: paths.configFile,
-        missingScopes,
-        // 缺失时预选缺失项（精准开通）；查不到/全开通时预选全部必需 scope 供核对。
-        scopeGrantUrl: buildScopeGrantUrl(
-          app.id,
-          app.tenant,
-          missingScopes && missingScopes.length ? missingScopes : undefined,
-        ),
-        missingJoinScopes,
-        // 「加入存量群」按钮恒预选这两项 opt-in scope（它们不在必需清单里）。
-        joinScopeGrantUrl: buildScopeGrantUrl(app.id, app.tenant, JOIN_GROUP_SCOPES),
-      };
       // A reply card (not a patch of the menu) so the diagnosis persists below
-      // the console; re-open the menu by messaging the bot.
-      await sendManagedCard(channel, evt.chatId, buildDoctorCard(info), evt.messageId).catch((err) =>
+      // the console; re-open the menu by messaging the bot. 探测逻辑见 buildDoctorInfo。
+      await sendManagedCard(channel, evt.chatId, buildDoctorCard(await buildDoctorInfo()), evt.messageId).catch((err) =>
         log.fail('console', err, { cmd: 'doctor' }),
       );
     })
     .on(DM.reconnect, async ({ evt }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
       const conn = channel.getConnectionStatus?.()?.state ?? 'unknown';
-      await channel
-        .send(evt.chatId, { markdown: `🔄 长连接状态：**${conn}**\nSDK 会自动重连；若长期断开，请在终端重跑 \`feishu-codex-bridge run\`（前台）或 \`feishu-codex-bridge restart\`（后台守护）。` }, { replyTo: evt.messageId })
-        .catch(() => undefined);
+      await sendManagedCard(channel, evt.chatId, buildReconnectCard(conn), evt.messageId).catch((err) =>
+        log.fail('console', err, { cmd: 'reconnect' }),
+      );
     })
     // 版本更新（检查）：查 npm 最新版，渲染结果。npm view 走异步 execFile —— 卡片
     // 回调里**绝不能** spawnSync，否则冻结整条 event loop。先 settle 再更新，避开
@@ -3627,9 +3629,12 @@ export function createOrchestrator(
   /**
    * onboarding 一直引导订阅该事件（README / 启动文案）但 bridge 此前没有处理器
    * —— 点菜单毫无反应的半成品（research/04 §4）。bot 菜单仅单聊生效，而 DM 正是
-   * 管理台的地盘：任意 event_key 都打开 DM 菜单卡（与私聊发任意消息等价，菜单项
-   * 无需与代码约定 key）；非管理员回拒绝文案（同 handleDmConsole 语义）。事件
-   * 不带 chat_id，发送走 receive_id_type=open_id。
+   * 管理台的地盘：按 event_key 路由到对应卡——dm.newProject / dm.projects /
+   * dm.settings / dm.usage / dm.doctor / dm.reconnect / dm.update 各自直达对应卡
+   * （与首页卡内同名按钮的渲染同源，单一事实源）；其它 key 或空 key 回退首页菜单卡，
+   * 兼容「只配一个入口」与「私聊发任意消息→首页卡」（handleDmConsole）的旧语义。
+   * 非管理员回拒绝文案（同 handleDmConsole 语义）。事件不带 chat_id，发送走
+   * receive_id_type=open_id。
    */
   const onBotMenu = async (evt: { openId?: string; eventKey?: string; eventId?: string }): Promise<void> => {
     const op = evt.openId;
@@ -3651,9 +3656,70 @@ export function createOrchestrator(
         .catch(() => undefined);
       return;
     }
-    await sendManagedCard(channel, op, buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() }), undefined, false, 'open_id').catch((err) =>
-      log.fail('console', err, { cmd: 'menu-card' }),
-    );
+    // 私聊菜单事件没有可 patch 的源卡，统一「新发一张托管卡」（open_id 投递）。发出去
+    // 的卡都经 sendManagedCard 注册了 byMessageId，卡上按钮的后续 patch/update 回调
+    // 照常工作——从底部菜单进与从首页卡点进完全等价。命中的 key 直达对应卡，其余
+    // （含空 key）回退首页菜单卡。用量/更新是两阶段（先落地 loading/checking 卡，再
+    // 原地更新结果）；探测/取数/IO 可能抛错，统一 try/catch 兜住（bridge 侧 void 调用、
+    // 无上层 catch，否则成 unhandled rejection）。
+    const sendDm = (c: object) => sendManagedCard(channel, op, c, undefined, false, 'open_id');
+    try {
+      switch (evt.eventKey) {
+        case DM.newProject:
+          await sendDm(buildNewProjectFormCard({ backends: backendOptionsFor('full') }));
+          break;
+        case DM.projects:
+          await sendDm(await renderProjectList());
+          break;
+        case DM.settings:
+          await sendDm(buildSettingsCard(cfg));
+          break;
+        case DM.doctor:
+          await sendDm(buildDoctorCard(await buildDoctorInfo()));
+          break;
+        case DM.reconnect:
+          await sendDm(buildReconnectCard(channel.getConnectionStatus?.()?.state ?? 'unknown'));
+          break;
+        case DM.usage: {
+          // 同 runUsage 语义，但锚在自己刚发的 loading 卡上：取数后原地更新；取数失败按
+          // UsageError.kind 渲染错误卡；原地更新失败（极小概率实体失效）兜底再发一张。
+          const { messageId } = await sendDm(buildUsageCard({ phase: 'loading' }));
+          let state: UsageCardState;
+          try {
+            state = { phase: 'ready', data: await fetchUsageBundle(false) };
+          } catch (e) {
+            log.fail('console', e, { phase: 'usage', via: 'menu' });
+            state = {
+              phase: 'error',
+              kind: e instanceof UsageError ? e.kind : 'transient',
+              message: e instanceof Error ? e.message : String(e),
+            };
+          }
+          const ok = await updateManagedCard(channel, messageId, buildUsageCard(state)).catch(() => false);
+          if (!ok) await sendDm(buildUsageCard(state));
+          break;
+        }
+        case DM.update: {
+          // 只「检查」最新版、无副作用；真正安装仍需结果卡上的「立即更新」（DM.updateDo）
+          // 二次确认。latestVersion 走异步 execFile（绝不能 spawnSync 冻住 event loop）。
+          const { messageId } = await sendDm(buildUpdateCard({ phase: 'checking' }));
+          const current = currentVersion();
+          const latest = await latestVersion().catch(() => null);
+          const hasUpdate = !!latest && isNewer(latest, current);
+          log.info('console', 'update-check', { current, latest, hasUpdate, via: 'menu' });
+          await updateManagedCard(
+            channel,
+            messageId,
+            buildUpdateCard({ phase: 'checked', current, latest, hasUpdate, dev: isDevSource() }),
+          ).catch((e) => log.fail('console', e, { phase: 'update-check', via: 'menu' }));
+          break;
+        }
+        default:
+          await sendDm(buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() }));
+      }
+    } catch (err) {
+      log.fail('console', err, { cmd: 'menu-card', key: evt.eventKey });
+    }
   };
 
   // ── M-3 空闲进程 reaper ──────────────────────────────────────────

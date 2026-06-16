@@ -270,6 +270,23 @@ export function buildUpdateCard(state: UpdateCardState): CardObject {
   }
 }
 
+/**
+ * 长连接状态卡（🔄 重连）：只读展示当前连接态 + 自动重连说明，无副作用。SDK 自带
+ * 断线重连，这里不主动 force-reconnect（无可靠 API），只把状态摊给管理员看，长期
+ * 断开就引导去终端重跑/重启。private chat 菜单与首页卡按钮共用这一张，单一事实源。
+ */
+export function buildReconnectCard(conn: string): CardObject {
+  const template = conn === 'connected' ? 'green' : 'orange';
+  return card(
+    [
+      md(`长连接状态：**${conn}**`),
+      note('SDK 会自动重连；若长期断开，请在终端重跑 `feishu-codex-bridge run`（前台）或 `feishu-codex-bridge restart`（后台守护）。'),
+      backToMenu(),
+    ],
+    { header: { title: '🔄 长连接', template } },
+  );
+}
+
 /** Snapshot the doctor card renders + folds into a copy-paste prompt for codex.
  * Gathered by the handler (file checks, versions, live connection state) so the
  * builder stays pure and testable. */
