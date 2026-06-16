@@ -23,6 +23,7 @@ import { isGoalTerminal, UsageError } from '../agent/types';
 import {
   getMaxConcurrentRuns,
   getPendingPolicy,
+  getModelDisplay,
   getRunIdleTimeoutMs,
   getShowToolCalls,
   isAdmin,
@@ -2224,6 +2225,11 @@ export function createOrchestrator(
     .on(DM.setTools, ({ evt, value }) => {
       applyPref(evt, (p) => (p.showToolCalls = value.v === 'on'));
     })
+    .on(DM.setShowModel, ({ evt, value }) => {
+      applyPref(evt, (p) => {
+        p.showModel = value.v === 'running' ? 'running' : value.v === 'always' ? 'always' : 'off';
+      });
+    })
     .on(DM.setWatchdog, ({ evt, value }) => {
       const n = Number(value.v);
       if (Number.isFinite(n)) applyPref(evt, (p) => (p.runIdleTimeoutSeconds = n));
@@ -2704,6 +2710,7 @@ export function createOrchestrator(
         firstRec = undefined;
         const turnModel = rec?.model ?? opts.model;
         const turnEffort = rec?.effort ?? opts.effort;
+        const modelDisp = getModelDisplay(cfg);
         const run = opts.thread.runStreamed(turnInput, { model: turnModel, effort: turnEffort });
         const turnStartAt = Date.now(); // turn/start 已在 runStreamed() 内发出（与下面的建卡并行）
         state.run = run;
@@ -2714,6 +2721,10 @@ export function createOrchestrator(
           rs: render.snapshot(),
           requesterOpenId: opts.requesterOpenId,
           showTools: render.showTools,
+          // 模型显示档位：footnote 本轮 model·推理强度；always 档终态卡也保留。
+          ...(modelDisp !== 'off' && turnModel
+            ? { model: turnModel, effort: turnEffort, modelOnTerminal: modelDisp === 'always' }
+            : {}),
         };
 
         const adoptThreadId = async (messageId: string): Promise<void> => {
@@ -3105,7 +3116,16 @@ export function createOrchestrator(
     const startTurn = (): GoalTurnCtx => {
       const render = new RunRender();
       render.showTools = getShowToolCalls(cfg);
-      const rc: RunCardState = { rs: render.snapshot(), requesterOpenId: opts.requesterOpenId, showTools: render.showTools, goalControls: true };
+      const goalModelDisp = getModelDisplay(cfg);
+      const rc: RunCardState = {
+        rs: render.snapshot(),
+        requesterOpenId: opts.requesterOpenId,
+        showTools: render.showTools,
+        goalControls: true,
+        ...(goalModelDisp !== 'off' && opts.model
+          ? { model: opts.model, effort: opts.effort, modelOnTerminal: goalModelDisp === 'always' }
+          : {}),
+      };
       return { render, rc, stream: null, cardMsgId: null };
     };
 

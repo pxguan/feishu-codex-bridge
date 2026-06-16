@@ -333,3 +333,36 @@ describe('context usage gauge', () => {
     expect(answerIdx).toBeLessThan(els.length - 1);
   });
 });
+
+// 「模型显示」三档：off 都不显示；running 仅运行卡；always 终态卡也保留。
+// 脚注为「模型 · 推理强度」，推理强度按档位着色（low黄/medium绿/high浅紫violet/xhigh深紫purple）。
+describe('模型 · 推理强度 footnote（模型显示三档）', () => {
+  const running = (): RunState => run([{ type: 'text_delta', itemId: 'a', delta: 'hi' }]);
+  const done = (): RunState => run([{ type: 'text', itemId: 'a', text: 'ok' }, { type: 'done', turnId: 't1' }]);
+
+  it('off 档（不传 model）：running / terminal 都无脚注', () => {
+    expect(JSON.stringify(buildRunCard({ rs: running(), cardKey: 'm1' }))).not.toContain('gpt-5.5');
+    expect(JSON.stringify(buildRunCard({ rs: done() }))).not.toContain('gpt-5.5');
+  });
+
+  it('running 卡显示「模型 · 推理强度」，推理强度按档位着色（high→浅紫）', () => {
+    const json = JSON.stringify(
+      buildRunCard({ rs: running(), cardKey: 'm1', model: 'gpt-5.5', effort: 'high', modelOnTerminal: false }),
+    );
+    expect(json).toContain('gpt-5.5');
+    expect(json).toContain('高'); // high → 中文档位
+    expect(json).toContain('violet'); // 浅紫
+  });
+
+  it('仅输出时档（modelOnTerminal=false）：终态卡丢掉脚注', () => {
+    const json = JSON.stringify(buildRunCard({ rs: done(), model: 'gpt-5.5', effort: 'high', modelOnTerminal: false }));
+    expect(json).not.toContain('gpt-5.5');
+  });
+
+  it('始终档（modelOnTerminal=true）：终态卡也保留脚注（xhigh→深紫）', () => {
+    const json = JSON.stringify(buildRunCard({ rs: done(), model: 'gpt-5.5', effort: 'xhigh', modelOnTerminal: true }));
+    expect(json).toContain('gpt-5.5');
+    expect(json).toContain('极高');
+    expect(json).toContain('purple'); // 深紫
+  });
+});

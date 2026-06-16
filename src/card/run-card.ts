@@ -7,9 +7,11 @@ import {
   md,
   mdStream,
   noteMd,
+  splitRow,
   type CardElement,
   type CardObject,
 } from './cards';
+import type { ReasoningEffort } from '../agent/types';
 import {
   reasoningContent,
   type Block,
@@ -74,6 +76,17 @@ export interface RunCardState {
   requesterOpenId?: string;
   /** drop tool blocks from the render (pref) */
   showTools?: boolean;
+  /** model id for the bottom-right「模型 · 推理强度」footnote (e.g. 'gpt-5.5'); set
+   * when 模型显示 is running OR always. Absent ⇒ no footnote (default / off). */
+  model?: string;
+  /** reasoning effort (推理强度) shown alongside {@link model}; colored by tier
+   * (低黄/中绿/高浅紫/极高深紫). Only the 推理强度 word is tinted — the model name
+   * stays grey. */
+  effort?: ReasoningEffort;
+  /** keep the footnote on the TERMINAL card too (模型显示 = always). Running cards
+   * always show it when {@link model} is set; this only gates the terminal render
+   * so the running-only(仅输出时) mode drops it once the turn finishes. */
+  modelOnTerminal?: boolean;
   /** suppress the ⏹ 终止 button (used by non-goal cards that opt out of stop). */
   hideStop?: boolean;
   /** goal run cards: show TWO controls — `⏹ 终止` (clear goal + cut output now)
@@ -109,46 +122,26 @@ export function buildRunCard(rc: RunCardState): CardObject {
 }
 
 /**
- * Live layout: ⏹ controls row pinned at the TOP, then reasoning panel, tool
- * panels, ONE streamed answer element, footer. Text blocks are concatenated
- * into a single {@link mdStream} element ({@link ANSWER_EID}) so the answer can
- * be driven by the element-level typewriter (cardElement.content) — that needs
- * one stable, append-only text element, which is incompatible with
- * interleaving text and tool panels. Tools therefore render above the answer
- * (matching the terminal fold), not inline between text runs.
+ * Live layout: reasoning panel, tool panels, ONE streamed answer element,
+ * footer (status + model), then the ⏹ controls row pinned at the BOTTOM. Text
+ * blocks are concatenated into a single {@link mdStream} element
+ * ({@link ANSWER_EID}) so the answer can be driven by the element-level
+ * typewriter (cardElement.content) — that needs one stable, append-only text
+ * element, which is incompatible with interleaving text and tool panels. Tools
+ * therefore render above the answer (matching the terminal fold), not inline
+ * between text runs.
  *
- * Controls-on-top rationale (e2e 实测痛点): with the row after the answer, a
- * long streamed output keeps pushing ⏹ below the fold — the user can't reach
- * it exactly when they want to stop. The card top never moves while the card
- * grows downward, so the row stays reachable. The row is static across frames,
- * so the pump's structureSig stays stable and answer growth still routes to
- * the element typewriter; the {@link CONTROLS_EID} anchor (M-4 orphan
- * self-heal deletes by element_id) is position-independent.
+ * Controls-at-bottom rationale: a reader's eye tracks the newest output, which
+ * grows at the bottom, so the stop button sits right where they're looking. The
+ * tradeoff (the reason it once lived on top — b3eea45) is that a long streamed
+ * output pushes the row below the fold mid-turn, so you may have to scroll down
+ * to reach ⏹. The {@link CONTROLS_EID} anchor (M-4 orphan self-heal deletes by
+ * element_id) is position-independent, so moving the row doesn't affect it; the
+ * controls are static across frames, so answer growth still routes to the
+ * element typewriter.
  */
 function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
   const elements: CardElement[] = [];
-
-  if (rc.cardKey && rc.goalControls) {
-    if (rc.goalEnding) {
-      // 结束目标 已触发:目标已解除,本轮输出完即停。仅留 ⏹ 终止(可再点掐断)。
-      elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')], CONTROLS_EID));
-      elements.push(noteMd('_🎯 目标已解除，本轮输出完成后停止_'));
-    } else {
-      // Goal: 终止 = clear goal + cut output now; 结束目标 = clear goal, let this
-      // turn finish, then stop (no auto-continue). Both routed by the card's msgId.
-      elements.push(
-        actions(
-          [
-            button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger'),
-            button('🎯 结束目标', { a: RC.endGoal, m: rc.cardKey }, 'default'),
-          ],
-          CONTROLS_EID,
-        ),
-      );
-    }
-  } else if (rc.cardKey && !rc.hideStop) {
-    elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')], CONTROLS_EID));
-  }
 
   const reasoning = reasoningContent(state);
   if (reasoning) elements.push(reasoningPanel(reasoning, state.reasoningActive));
@@ -171,11 +164,42 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
   const answer = textParts.join('\n\n');
   if (answer) elements.push(mdStream(answer, ANSWER_EID));
 
-  if (state.footer) elements.push(footerStatus(state.footer));
-  // Context-usage gauge rides at the very bottom as a footnote (only at/above
-  // the warn tier) so it never pushes the answer down.
+  // Footer: status (left) + 模型·effort footnote (right) share one row when the
+  // 显示模型 pref is on; either alone falls back to a single line.
+  const mEl = modelEl(rc);
+  if (state.footer && mEl) elements.push(splitRow(footerStatus(state.footer), mEl));
+  else if (state.footer) elements.push(footerStatus(state.footer));
+  else if (mEl) elements.push(mEl);
+  // Context-usage gauge sits just above the controls (only at/above the warn
+  // tier) so it never pushes the answer down.
   const gauge = gaugeEl(state);
   if (gauge) elements.push(gauge);
+
+  // ⏹ controls row pinned at the BOTTOM — it tracks the newest output where the
+  // reader is looking (tradeoff: a long stream may push it below the fold; see
+  // the layout note above). CONTROLS_EID anchor is position-independent.
+  if (rc.cardKey && rc.goalControls) {
+    if (rc.goalEnding) {
+      // 结束目标 已触发：目标已解除，本轮输出完即停。仅留 ⏹ 终止（可再点掐断）。
+      elements.push(noteMd('_🎯 目标已解除，本轮输出完成后停止_'));
+      elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')], CONTROLS_EID));
+    } else {
+      // Goal: 终止 = clear goal + cut output now; 结束目标 = clear goal, let this
+      // turn finish, then stop (no auto-continue). Both routed by the card's msgId.
+      elements.push(
+        actions(
+          [
+            button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger'),
+            button('🎯 结束目标', { a: RC.endGoal, m: rc.cardKey }, 'default'),
+          ],
+          CONTROLS_EID,
+        ),
+      );
+    }
+  } else if (rc.cardKey && !rc.hideStop) {
+    elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')], CONTROLS_EID));
+  }
+
   return elements;
 }
 
@@ -233,6 +257,10 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
   // Context-usage gauge as the closing footnote (only at/above the warn tier).
   const gauge = gaugeEl(state);
   if (gauge) elements.push(gauge);
+  // 「模型 · 推理强度」footnote, bottom-right — only the always(始终) mode keeps it
+  // on the terminal card; running(仅输出时) drops it once the turn ends.
+  const mEl = rc.modelOnTerminal ? modelEl(rc) : null;
+  if (mEl) elements.push(mEl);
 
   return elements;
 }
@@ -425,16 +453,57 @@ function collapsedToolSummary(tools: ToolEntry[], finalized: boolean): CardEleme
   });
 }
 
+function footerStatusText(status: Exclude<FooterStatus, null>): string {
+  return status === 'thinking'
+    ? '🧠 正在思考'
+    : status === 'tool_running'
+      ? '🧰 正在调用工具'
+      : status === 'retrying'
+        ? '⚠️ 瞬断，自动重试中…'
+        : '✍️ 正在输出';
+}
+
 function footerStatus(status: Exclude<FooterStatus, null>): CardElement {
-  const text =
-    status === 'thinking'
-      ? '🧠 正在思考'
-      : status === 'tool_running'
-        ? '🧰 正在调用工具'
-        : status === 'retrying'
-          ? '⚠️ 瞬断，自动重试中…'
-          : '✍️ 正在输出';
-  return noteMd(text);
+  return noteMd(footerStatusText(status));
+}
+
+/**
+ * Effort → 中文档位 + 飞书颜色。只给 effort 词上色（模型名保持灰）：低=黄 / 中=绿 /
+ * 高=浅紫(violet) / 极高=深紫(purple)；none·minimal 不强调（灰）。命名色取自飞书
+ * 色板，浅深紫的差异以真机为准（可在此调成色阶或换色名）。
+ */
+const EFFORT_TIER: Record<ReasoningEffort, { label: string; color: string }> = {
+  none: { label: '无', color: 'grey' },
+  minimal: { label: '极简', color: 'grey' },
+  low: { label: '低', color: 'yellow' },
+  medium: { label: '中', color: 'green' },
+  high: { label: '高', color: 'violet' },
+  xhigh: { label: '极高', color: 'purple' },
+};
+
+/**
+ * `<model> · <colored effort>` for the footnote. The effort word is tinted via
+ * lark_md inline `<font color='…'>`; the whole element also carries
+ * text_color:'grey' so the model name is muted and, on any client that ignores
+ * the inline tag, the effort degrades to grey instead of breaking.
+ */
+function modelEffortMd(model: string, effort?: ReasoningEffort): string {
+  if (!effort) return model;
+  const t = EFFORT_TIER[effort];
+  if (!t) return `${model} · ${effort}`;
+  return `${model} · <font color='${t.color}'>${t.label}</font>`;
+}
+
+/** Right-aligned, notation-sized「模型 · effort」footnote, or null when off. */
+function modelEl(rc: RunCardState): CardElement | null {
+  if (!rc.model) return null;
+  return {
+    tag: 'markdown',
+    content: modelEffortMd(rc.model, rc.effort),
+    text_size: 'notation',
+    text_color: 'grey',
+    text_align: 'right',
+  };
 }
 
 function summaryText(state: RunState): string {

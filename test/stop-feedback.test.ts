@@ -51,29 +51,31 @@ function bodyEls(card: unknown): Array<Record<string, any>> {
   return ((card as { body?: { elements?: Array<Record<string, any>> } }).body?.elements ?? []);
 }
 
-// e2e 实测：⏹ 在 footer 位时，长输出流式期间打字机不断把按钮推出视野，用户摸不到。
-// 修复：running 版式控制行固定在卡片顶部（正文之前）——卡片向下增长，顶部不动。
-describe('run card controls row — 顶部固定（长流式可达）', () => {
+// 控制行钉在卡片底部：贴着最新输出、随用户视线下移（取舍：长流式时按钮可能被推到
+// 折叠线下，需滚到底才点得到 —— 见 run-card 顶部 layout 注释里的权衡）。
+describe('run card controls row — 底部固定（贴最新输出）', () => {
   const streamed: RunState = {
     ...initialState,
     blocks: [{ kind: 'text', id: 'a', content: '长输出 '.repeat(50), streaming: true }],
     footer: 'streaming',
   };
 
-  it('running 卡的控制行是 body 第一个元素，答案元素在其后', () => {
+  it('running 卡的控制行是 body 最后一个元素，答案元素在其前', () => {
     const els = bodyEls(buildRunCard({ rs: streamed, cardKey: 'om_1' }));
-    expect(els[0]?.element_id).toBe(CONTROLS_EID);
-    // 流式答案元素（ANSWER_EID）仍存在且在控制行之后 — 打字机元素 id 稳定不受布局影响
+    expect(els[els.length - 1]?.element_id).toBe(CONTROLS_EID);
+    // 流式答案元素（ANSWER_EID）仍存在且在控制行之前 — 打字机元素 id 稳定不受布局影响
     const answerIdx = els.findIndex((e) => e.element_id === ANSWER_EID);
-    expect(answerIdx).toBeGreaterThan(0);
+    const controlsIdx = els.findIndex((e) => e.element_id === CONTROLS_EID);
+    expect(answerIdx).toBeGreaterThanOrEqual(0);
+    expect(answerIdx).toBeLessThan(controlsIdx);
   });
 
-  it('goal 双按钮 / goalEnding 版式同样顶置（goalEnding 的提示行紧随控制行）', () => {
+  it('goal 双按钮 / goalEnding 版式同样底置（goalEnding 的提示行紧在控制行之前）', () => {
     const both = bodyEls(buildRunCard({ rs: streamed, cardKey: 'om_1', goalControls: true }));
-    expect(both[0]?.element_id).toBe(CONTROLS_EID);
+    expect(both[both.length - 1]?.element_id).toBe(CONTROLS_EID);
     const ending = bodyEls(buildRunCard({ rs: streamed, cardKey: 'om_1', goalControls: true, goalEnding: true }));
-    expect(ending[0]?.element_id).toBe(CONTROLS_EID);
-    expect(JSON.stringify(ending[1])).toContain('目标已解除');
+    expect(ending[ending.length - 1]?.element_id).toBe(CONTROLS_EID);
+    expect(JSON.stringify(ending[ending.length - 2])).toContain('目标已解除');
   });
 
   it('terminal 版式不受影响：无控制行，过程折叠 + 答案布局不变', () => {

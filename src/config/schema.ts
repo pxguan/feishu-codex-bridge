@@ -42,6 +42,12 @@ export type MessageReplyMode = 'card' | 'markdown' | 'text';
 export type PendingPolicy = 'steer' | 'queue';
 
 /**
+ * 「模型显示」三档：off(关闭) · running(仅输出时，只在运行卡显示) ·
+ * always(始终，运行卡 + 终态卡都保留)。控制运行卡右下角「模型 · 推理强度」脚注。
+ */
+export type ModelDisplayMode = 'off' | 'running' | 'always';
+
+/**
  * Access control (see design §5):
  *   ownerOpenId   — 扫码注册者(owner)。恒为 admin、不可删；即使 admins 为空也仍是 admin。
  *   admins        — open_ids that may DM the bot (create project / global config /
@@ -63,6 +69,10 @@ export interface AppPreferences {
   messageReply?: MessageReplyMode;
   /** render tool-call blocks in output. Default true. */
   showToolCalls?: boolean;
+  /** 「模型 · 推理强度」脚注的显示档位（运行卡右下角）。off/running/always，
+   * 默认 running（仅输出时显示，生成完即收起）——平时能扫一眼当前模型，又不在终态
+   * 卡上长期留标签。兼容历史布尔值：true→always、false→off（见 {@link getModelDisplay}）。 */
+  showModel?: ModelDisplayMode | boolean;
   /** cap concurrent codex turns across all threads. Default 10. */
   maxConcurrentRuns?: number;
   /** per-turn idle watchdog (seconds). 0 = off. Default 120 (on). */
@@ -113,6 +123,19 @@ export function getMessageReplyMode(cfg: AppConfig): MessageReplyMode {
 
 export function getShowToolCalls(cfg: AppConfig): boolean {
   return cfg.preferences?.showToolCalls !== false;
+}
+
+/**
+ * 「模型显示」档位（默认 running／仅输出时）。兼容历史布尔值：true→always、
+ * false→off。运行卡按此决定右下角「模型 · 推理强度」脚注：running 仅运行卡显示，
+ * always 终态卡也保留，off 不显示。
+ */
+export function getModelDisplay(cfg: AppConfig): ModelDisplayMode {
+  const v = cfg.preferences?.showModel;
+  if (v === 'running' || v === 'always' || v === 'off') return v;
+  if (v === true) return 'always';
+  if (v === false) return 'off';
+  return 'running';
 }
 
 export function getMaxConcurrentRuns(cfg: AppConfig): number {

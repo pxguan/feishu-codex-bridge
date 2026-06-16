@@ -1,5 +1,6 @@
 import {
   getMaxConcurrentRuns,
+  getModelDisplay,
   getPendingPolicy,
   getShowToolCalls,
   resolveOwner,
@@ -55,6 +56,7 @@ export const DM = {
   rmDo: 'dm.rmDo',
   rmCancel: 'dm.rmCancel',
   setTools: 'dm.set.tools',
+  setShowModel: 'dm.set.showModel',
   setWatchdog: 'dm.set.watchdog',
   // 假死超时「自定义…」：watchdogCustom 打开输入卡，watchdogCustomSubmit 保存任意秒数
   watchdogCustom: 'dm.set.watchdog.custom',
@@ -729,45 +731,100 @@ function optionRow(
   ];
 }
 
+/** 设置卡分区小标题（灰、加粗、notation 字号）—— 把设置项按主题分组。 */
+function settingSection(title: string): CardElement {
+  return { tag: 'markdown', content: `**${title}**`, text_size: 'notation', text_color: 'grey' };
+}
+
 /**
- * Global preferences card. Each setting is a row of option buttons — tap the
- * value you want (current one is highlighted). We use buttons, not select_static,
- * on purpose: Feishu locks a card_id once a select has been interacted with,
- * after which *every* button on it (including ⬅️ 菜单) stops firing. Buttons
- * never lock, so this card stays fully interactive and updates in place.
+ * 带说明的设置项：加粗名称 + 灰字说明 + 选项按钮行（当前值高亮 primary）。说明让
+ * 每项自解释（“看不懂这开关是啥”的解法）。按钮而非 select：select 一交互即锁
+ * card_id（见下方 {@link buildSettingsCard} 注释）。
+ */
+function settingItem(
+  name: string,
+  desc: string,
+  actionId: string,
+  current: string,
+  opts: { label: string; value: string }[],
+): CardElement[] {
+  return [
+    md(`**${name}**`),
+    note(desc),
+    actions(opts.map((o) => button(o.label, { a: actionId, v: o.value }, o.value === current ? 'primary' : 'default'))),
+  ];
+}
+
+/**
+ * Global preferences card. Grouped into sections (📤 输出展示 / ⏱ 运行控制), each
+ * setting a self-explaining {@link settingItem} (name + grey caption + option
+ * buttons, current value highlighted). Buttons, not select_static, on purpose:
+ * Feishu locks a card_id once a select has been interacted with, after which
+ * *every* button on it (including ⬅️ 菜单) stops firing. Buttons never lock, so
+ * this card stays fully interactive and updates in place.
  */
 export function buildSettingsCard(cfg: AppConfig): CardObject {
   const watchdogSec = cfg.preferences?.runIdleTimeoutSeconds ?? 120;
   return card(
     [
-      md('**全局设置**（管理员）'),
-      ...optionRow('🔧 工具调用', DM.setTools, getShowToolCalls(cfg) ? 'on' : 'off', [
-        { label: '显示', value: 'on' },
-        { label: '隐藏', value: 'off' },
-      ]),
-      md(`⏱ 假死超时（当前 **${watchdogSec === 0 ? '关闭' : `${watchdogSec} 秒`}**）`),
+      settingSection('📤 输出展示'),
+      ...settingItem(
+        '🔧 工具调用',
+        '输出时显示执行的命令 / 工具调用；关掉只看最终回答。',
+        DM.setTools,
+        getShowToolCalls(cfg) ? 'on' : 'off',
+        [
+          { label: '显示', value: 'on' },
+          { label: '隐藏', value: 'off' },
+        ],
+      ),
+      ...settingItem(
+        '🧠 模型显示',
+        '每条回复右下角显示「模型 · 推理强度」。仅输出时＝只在生成中显示；始终＝生成完后卡片也保留。',
+        DM.setShowModel,
+        getModelDisplay(cfg),
+        [
+          { label: '关闭', value: 'off' },
+          { label: '仅输出时', value: 'running' },
+          { label: '始终', value: 'always' },
+        ],
+      ),
+      hr(),
+      settingSection('⏱ 运行控制'),
+      md(`**⏱ 假死超时** · 当前 **${watchdogSec === 0 ? '关闭' : `${watchdogSec} 秒`}**`),
+      note('多久没有任何输出就自动终止本轮（防卡死）。'),
       actions([
         ...[0, 120, 300].map((v) =>
           button(v === 0 ? '关闭' : `${v}秒`, { a: DM.setWatchdog, v: String(v) }, v === watchdogSec ? 'primary' : 'default'),
         ),
         button('自定义…', { a: DM.watchdogCustom }),
       ]),
-      ...optionRow('📥 运行中新消息', DM.setPending, getPendingPolicy(cfg), [
-        { label: '引导', value: 'steer' },
-        { label: '排队', value: 'queue' },
-      ]),
-      ...optionRow('⚡ 并发上限', DM.setConcurrency, String(getMaxConcurrentRuns(cfg)), [
-        { label: '1', value: '1' },
-        { label: '5', value: '5' },
-        { label: '10', value: '10' },
-        { label: '20', value: '20' },
-      ]),
-      note('⚡ 并发池为**所有群/话题全局共享**：满了新任务按先来后到排队（排队卡可见、可 ⏹ 取消）。'),
-      note('⚠️ 并发上限 改后需**重启**生效；其余设置（含假死超时）即时生效，所有群立即套用。'),
+      ...settingItem(
+        '📥 运行中来新消息',
+        '正在跑时你又发消息：引导＝插进当前轮纠偏；排队＝等这轮跑完再处理。',
+        DM.setPending,
+        getPendingPolicy(cfg),
+        [
+          { label: '引导', value: 'steer' },
+          { label: '排队', value: 'queue' },
+        ],
+      ),
+      ...settingItem(
+        '⚡ 并发上限',
+        '所有群 / 话题全局同时最多跑几个，满了排队（排队卡可 ⏹ 取消）。改后需重启生效。',
+        DM.setConcurrency,
+        String(getMaxConcurrentRuns(cfg)),
+        [
+          { label: '1', value: '1' },
+          { label: '5', value: '5' },
+          { label: '10', value: '10' },
+          { label: '20', value: '20' },
+        ],
+      ),
       hr(),
       actions([button('👮 管理员', { a: DM.admins }), button('⬅️ 菜单', { a: DM.menu })]),
     ],
-    { header: { title: '⚙️ 设置', template: 'blue' } },
+    { header: { title: '⚙️ 全局设置', template: 'blue' } },
   );
 }
 

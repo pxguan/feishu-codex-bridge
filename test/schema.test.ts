@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   getMaxConcurrentRuns,
   getMessageReplyMode,
+  getModelDisplay,
   getPendingPolicy,
   getRunIdleTimeoutMs,
   isAdmin,
@@ -26,6 +27,15 @@ function cfg(preferences: AppConfig['preferences'] = {}): AppConfig {
 }
 
 describe('config schema helpers', () => {
+  it('resolves model display: default running, explicit values, legacy boolean', () => {
+    expect(getModelDisplay(cfg())).toBe('running'); // 默认：仅输出时
+    expect(getModelDisplay(cfg({ showModel: 'off' }))).toBe('off');
+    expect(getModelDisplay(cfg({ showModel: 'running' }))).toBe('running');
+    expect(getModelDisplay(cfg({ showModel: 'always' }))).toBe('always');
+    expect(getModelDisplay(cfg({ showModel: true }))).toBe('always'); // 历史布尔 → always
+    expect(getModelDisplay(cfg({ showModel: false }))).toBe('off'); // 历史布尔 → off
+  });
+
   it('resolves run idle timeout defaults, disabled value, and clamp bounds', () => {
     expect(getRunIdleTimeoutMs(cfg())).toBe(120_000);
     expect(getRunIdleTimeoutMs(cfg({ runIdleTimeoutSeconds: 0 }))).toBeUndefined();
