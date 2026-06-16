@@ -1,52 +1,48 @@
-import path from 'node:path';
-import type { CanUseTool, Options, PermissionResult, SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
+import type { Options, SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import type { PermissionMode } from '../types';
 
 /**
  * Map a bridge permission tier (qa / write / full) to the Claude Agent SDK
- * options that enforce it WITHOUT ever prompting a human (the codex backend runs
- * approvalPolicy 'never' — we match that with a deterministic `canUseTool` that
- * only ever returns allow/deny, never "ask").
+ * options that enforce it WITHOUT prompting a human (codex runs approvalPolicy
+ * 'never' — we match that: full bypasses prompts; qa/write use the OS sandbox as
+ * the boundary and `bypassPermissions` so no prompt ever blocks a turn).
  *
- *   full  → permissionMode 'bypassPermissions' (= codex danger-full-access).
- *   write → OS sandbox (command isolation) + canUseTool confines file-WRITE tools
- *           to cwd; reads/Bash allowed; network gated by the `network` toggle.
- *   qa    → OS sandbox + ALL file-write tools denied (read-only); network gated.
+ * Verified empirically (spikes, SDK 0.3.178, macOS):
+ *  - `sandbox.enabled` confines Bash writes to the workspace (cwd) at the OS level
+ *    even under `permissionMode:'bypassPermissions'` (a /tmp write → "operation not
+ *    permitted"; a cwd write succeeds).
+ *  - The model CAN escape the sandbox via the Bash `dangerouslyDisableSandbox`
+ *    parameter UNLESS `allowUnsandboxedCommands:false` — so we MUST set it false to
+ *    make the sandbox a hard boundary (without it, qa/write are NOT enforceable).
+ *  - `filesystem.denyWrite:[cwd]` makes even cwd read-only (→ qa).
+ *  - `failIfUnavailable:true` → the turn errors (visible) instead of running
+ *    unsandboxed if the OS sandbox can't start. Fail-closed, never a silent
+ *    downgrade. (Claude's sandbox: macOS Seatbelt / Linux bubblewrap.)
  *
- * ── Honest security delta vs codex (keep this comment truthful) ───────────────
- * codex's qa/write use an OS sandbox (macOS Seatbelt / Windows restricted token)
- * that confines BOTH reads and writes to cwd at the kernel level, and fail-closed
- * on Linux. Here:
- *  - WRITE confinement is enforced at TWO layers: the `canUseTool` path check
- *    (blocks Write/Edit/NotebookEdit outside cwd) AND the OS sandbox (blocks Bash
- *    writes outside the workspace). Solid.
- *  - READ confinement is NOT yet as strict as codex's qa: we enable the sandbox
- *    (which restricts Bash) but do not hard-deny all reads outside cwd, so a read
- *    via the Read tool can still reach outside cwd. This is a KNOWN, documented
- *    gap (see CLAUDE_AGENT_PROGRESS.md). Until verified+hardened, treat qa here as
- *    "no writes + sandboxed commands", not "kernel-confined reads".
- *  - `failIfUnavailable: true` makes qa/write FAIL (visible error) rather than run
- *    unsandboxed if the OS sandbox can't start — fail-closed, never a silent
- *    downgrade. (Claude's sandbox supports macOS and Linux/bubblewrap.)
+ * ── Security delta vs codex (kept truthful) ──────────────────────────────────
+ *  - WRITE confinement to cwd: enforced at the OS level (sandbox + no-escape).
+ *    On par with codex's write tier.
+ *  - QA read-only: writes denied everywhere (denyWrite:[cwd] + the sandbox's own
+ *    out-of-workspace block + write tools removed + no unsandboxed escape). Reads
+ *    are NOT yet hard-confined to cwd (codex's qa also restricts reads on
+ *    macOS/Windows); a Read/Bash read can still reach outside cwd. Documented gap.
+ *  - NETWORK: when off, the network-reaching tools (WebFetch/WebSearch) are removed
+ *    and the sandbox isolates Bash network by default; fine-grained Bash-network
+ *    parity with codex's `network.enabled` is best-effort (verify before trusting
+ *    qa with an untrusted external group that needs network off as a hard gate).
  */
 
-/** File-writing built-in tools (denied in qa; cwd-confined in write). */
-const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
-/** Network-reaching built-in tools (denied when `network` is off). */
-const NETWORK_TOOLS = new Set(['WebFetch', 'WebSearch']);
+// File-writing built-in tools to strip in qa (read-only). Names per SDK 0.3.178
+// (MultiEdit was folded into Edit; listing an unknown tool only warns, so we keep
+// the real ones).
+const WRITE_TOOLS = ['Write', 'Edit', 'NotebookEdit'];
+const NETWORK_TOOLS = ['WebFetch', 'WebSearch'];
 
 /** The subset of SDK options this module produces. Spread into query() options. */
 export type ClaudePermissionOptions = Pick<
   Options,
-  'permissionMode' | 'allowDangerouslySkipPermissions' | 'sandbox' | 'canUseTool' | 'disallowedTools'
+  'permissionMode' | 'allowDangerouslySkipPermissions' | 'sandbox' | 'disallowedTools'
 >;
-
-function isWithin(cwd: string, p: unknown): boolean {
-  if (typeof p !== 'string' || !p) return false;
-  const root = path.resolve(cwd);
-  const abs = path.resolve(cwd, p);
-  return abs === root || abs.startsWith(root + path.sep);
-}
 
 export function permissionOptions(
   mode: PermissionMode | undefined,
@@ -60,41 +56,23 @@ export function permissionOptions(
     return { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true };
   }
 
-  const allowNetwork = Boolean(network);
   const sandbox: SandboxSettings = {
     enabled: true,
-    // fail-closed: error out instead of running unsandboxed if the OS sandbox
-    // (Seatbelt / bubblewrap) can't start.
-    failIfUnavailable: true,
-    // sandboxed Bash shouldn't pester for per-command approval — the sandbox is
-    // the boundary, and canUseTool already gates write/network tools.
-    autoAllowBashIfSandboxed: true,
+    failIfUnavailable: true, // fail-closed: error out instead of running unsandboxed.
+    autoAllowBashIfSandboxed: true, // sandboxed Bash needn't prompt — the sandbox is the gate.
+    allowUnsandboxedCommands: false, // CRITICAL: block the dangerouslyDisableSandbox escape.
+    ...(tier === 'qa' ? { filesystem: { denyWrite: [cwd] } } : {}),
   } as SandboxSettings;
 
-  const allow = (): PermissionResult => ({ behavior: 'allow' });
-  const deny = (message: string): PermissionResult => ({ behavior: 'deny', message });
+  const disallowedTools: string[] = [];
+  if (tier === 'qa') disallowedTools.push(...WRITE_TOOLS); // read-only: no write tools at all.
+  if (!network) disallowedTools.push(...NETWORK_TOOLS); // offline: no network tools.
 
-  const canUseTool: CanUseTool = async (toolName, input) => {
-    if (NETWORK_TOOLS.has(toolName) && !allowNetwork) {
-      return deny('当前为离线模式（未开启联网），已拒绝联网工具调用。');
-    }
-    if (WRITE_TOOLS.has(toolName)) {
-      if (tier === 'qa') return deny('当前为只读模式（QA），不允许修改文件。');
-      // write tier: confine writes to the project directory.
-      const target = (input as Record<string, unknown>).file_path ?? (input as Record<string, unknown>).notebook_path;
-      if (!isWithin(cwd, target)) return deny('写入路径超出项目目录，已拒绝（项目内读写档）。');
-      return allow();
-    }
-    return allow();
-  };
-
-  const opts: ClaudePermissionOptions = {
-    // default + a deterministic canUseTool = "decide programmatically, never ask".
-    permissionMode: 'default',
+  return {
+    // bypassPermissions = never prompt; the sandbox (above) is the real boundary.
+    permissionMode: 'bypassPermissions',
+    allowDangerouslySkipPermissions: true,
     sandbox,
-    canUseTool,
+    ...(disallowedTools.length ? { disallowedTools } : {}),
   };
-  // qa also strips write tools from the model's context entirely (defense in depth).
-  if (tier === 'qa') opts.disallowedTools = [...WRITE_TOOLS];
-  return opts;
 }

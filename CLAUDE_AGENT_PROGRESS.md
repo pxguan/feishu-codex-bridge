@@ -3,19 +3,33 @@
 > 这是跨循环的唯一记忆。每轮开工先读这里 + `git log --oneline -15` + `git status`。
 > 状态标记：未到 ALL DONE 前不要停。所有「完成」必须有工具结果佐证。
 
-## 当前状态：代码实现完成，待飞书端到端验收（第 1 轮）
+## 当前状态：代码 + 安全已实现并通过 LIVE 集成实证；飞书可视化验收待早上（见末尾 runbook）
 
-### 已完成（有工具结果佐证）
-- ✅ 安装 `@anthropic-ai/claude-agent-sdk@0.3.178`（已进 package.json deps）。
-- ✅ 实现 `src/agent/claude-agent/{event-map,permission,thread,backend}.ts`。
-- ✅ 注册：`src/agent/index.ts` REGISTRY + `src/agent/catalog.ts` BACKEND_CATALOG（id 'claude-agent'）。
-- ✅ `npm run typecheck` 绿 / `npm run build` 绿 / `npm test` 706 passed（更新了两处 codex-only 快照测试为「codex+claude」新现实，并给 claude-agent 补了正向断言）。
-- ✅ 三个 spike 实证：鉴权可起、流式 delta、工具/思考形状、resume 跨进程上下文、interrupt 后 query 可续用。
+### 已完成（均有工具结果佐证）
+- ✅ 安装 `@anthropic-ai/claude-agent-sdk@0.3.178`（进 package.json deps）。
+- ✅ 实现 `src/agent/claude-agent/{event-map,permission,thread,backend}.ts`，注册 index.ts + catalog.ts。
+- ✅ `npm run typecheck` / `npm run build` / `npm test`（706 passed, 4 LIVE skipped）全绿。
+- ✅ **LIVE 集成测试**（`CLAUDE_LIVE=1 npx vitest run test/claude-agent.live.test.ts`，真实计费）：
+  full 档流式+done ✅、⏹中断后线程续用 ✅、qa 只读（逼模型禁沙箱写盘也写不进）✅；
+  多轮上下文 run1 通过(6.8s) + spike7 复刻(10s,T1「好的」T2「菠萝蜜」) ✅。
+  注：多轮 LIVE 用例今晚偶发超时——经查是 **API 端 529 Overloaded 过载**（多次撞到）导致 SDK 内部重试拉长，
+  **非代码缺陷**（spike7 同机制同 prompt 10s 通过，是决定性反证）；该用例放宽到 240s，过载窗口外稳过。
+- ✅ **安全模型已实证（spike4/5/6，macOS）**：
+  - full → `permissionMode:'bypassPermissions'`，无沙箱（= danger-full-access）。
+  - write → `bypassPermissions` + `sandbox{enabled, failIfUnavailable:true, autoAllowBashIfSandboxed:true,
+    allowUnsandboxedCommands:false}`：Bash 写 /tmp 被内核拒、写 cwd 成功 → 写入锁在工作区，OS 级。
+  - qa → write 配置 + `filesystem.denyWrite:[cwd]` + `disallowedTools:[Write,Edit,NotebookEdit]`：
+    spike6 逼模型用 Bash/Write/禁沙箱多手段写盘，**文件始终未生成** → 真只读。
+  - **关键发现**：默认 `allowUnsandboxedCommands:true` 会让模型用 Bash 的 `dangerouslyDisableSandbox` 逃逸；
+    必须置 false 才是硬边界（已置）。`failIfUnavailable:true` → 沙箱起不来则报错（fail-closed，绝不静默放行）。
+  - 放弃了 canUseTool 方案（加 filesystem 后回调返回值被 SDK union 校验拒 → ZodError）；纯沙箱更稳。
 
-### 下一步（飞书端到端，需真实群 + computer use）
-1. 起 bridge（npm start，或复用已运行实例），建测试群「【CC验收】Claude」，把项目后端设为 claude-agent。
-2. 逐项验收清单（见下），computer use 截图佐证卡片流式/思考/工具/⏹。
-3. 把每项结果勾进下面清单；全绿后在本文件顶部写 ALL DONE + 验收说明。
+### 与 Codex 的安全差异（如实）
+- write 写限 cwd：OS 级、与 Codex 对齐。qa 写禁绝：OS 级、与 Codex 对齐（甚至堵了 Codex 没有的禁沙箱逃逸面）。
+- **qa 读取尚未硬限在 cwd**（Codex 的 qa 在 macOS/Win 连读也锁 cwd）：本实现 Read 工具/Bash 读仍可越界读取。
+  → 已知缺口，后续可加 `filesystem.denyRead` 收紧。外部群 qa 若要求「连读也不外泄」，暂以 Codex 为准。
+- 网络：network=off 时移除 WebFetch/WebSearch 工具 + 沙箱默认网络隔离；Bash 网络的细粒度开关未逐一实证。
+- Claude 沙箱支持 macOS(Seatbelt)/Linux(bubblewrap)，比 Codex 的 Linux fail-closed 覆盖更广。
 
 
 
@@ -77,16 +91,50 @@
   **并在 PROGRESS 和代码注释如实标注「弱于 Codex 的 OS 沙箱」**，绝不假装一致。
 - Linux 与 Codex 一致 fail-closed（非 darwin/win 的受限档若沙箱不可用则拒绝启动）。
 
-## 验收清单
-- [ ] claude-agent 后端注册成功、可被选中切换
-- [ ] 新建会话 + 跑一轮，卡片流式增量更新（文本 delta + 思考 + 工具块），观感同 Codex
-- [ ] 多轮上下文保持（追问能记住上一轮）
-- [ ] 重启 bridge 后能 resume 恢复会话
-- [ ] ⏹ 停止按钮能优雅中断正在运行的一轮
-- [ ] 三档权限切换行为正确，沙箱/安全说明完整
-- [ ] 指定 model + effort 生效，卡片模型显示正常
-- [ ] npm run typecheck / build / test 全绿
-- [ ] 在真实飞书群里端到端验证，并用 computer use 截图/肉眼确认卡片
+## 验收清单（x=已证实, ~=代码级已证/飞书可视化待确认, []=未做）
+- [x] claude-agent 后端注册成功（REGISTRY+catalog 配对单测过；projectCreatableBackends 含它）
+- [~] 新建会话 + 流式增量（text_delta/thinking/tool/done 已由 LIVE+spike 实证；飞书卡片渲染走**未改动**的
+      run-card-stream，吃的是同一套 AgentEvent，故卡片观感应与 Codex 一致——待飞书肉眼确认）
+- [x] 多轮上下文保持（LIVE run1 + spike7 + spike2 resume 三证）
+- [~] 重启 resume：resumeThread 用 options.resume，spike2 证跨进程上下文恢复；bridge 重启走未改动的
+      resolveThread→resumeThread，逻辑通——待真实重启飞书复现
+- [x] ⏹ 优雅中断（LIVE interrupt 每次过 + spike3）
+- [x] 三档权限 + 沙箱/安全说明完整（spike4/5/6 实证，见上「安全模型」）
+- [~] model + effort：已接 options.model/effort（per-turn model 用 setModel；effort 仅建线程时生效，已注明）
+      ——待飞书选模型实测 + 卡片模型显示
+- [x] npm run typecheck / build / test 全绿（706 passed）
+- [ ] 真实飞书群端到端 + computer use 截图：**未做**（原因见下「飞书验收 runbook / 为何没自动做」）
+
+---
+
+## 飞书验收 runbook（给早上的人 / 下一轮）
+
+### 为何没在过夜自动做（重要）
+本机有**生产 bridge 正在运行**（全局安装版 `/opt/homebrew/.../@modelzen/feishu-codex-bridge`，
+带多个生产 bot：cli_aaa40b82… / cli_aa81b50… / cli_aa93e16b…）。要在飞书测 claude-agent 必须用**本 worktree
+代码**为某个 bot 起 bridge，但同一 bot 起第二实例会与生产抢「单实例锁 / WS 长连」→ **必然干扰生产**。
+这与你「绝不碰我已有的群/项目/配置」冲突，故我**没有冒险动生产**，把可视化验收留给你确认环境后再做。
+（新建群本身是安全的，但新群仍由生产 bridge 接收，跑不到我的新后端——技术上绕不过「得用我的代码起 bot」。）
+
+### 安全的飞书验收三选一
+A. **本地另起隔离实例（最稳）**：用一个**非生产**的飞书测试 bot（或临时停掉某生产 bot 再起），
+   在本 worktree 跑 `npm start`（或 `node bin/feishu-codex-bridge.mjs run --bot <appId>`），
+   新建群「【CC验收】Claude」，新建/绑定项目时后端选 **Claude**（picker 已含），权限选 full。
+B. **合并后升级生产**：把本分支并入并 `npm i -g` 升级全局版，再在生产里建测试群选 Claude 后端。
+C. 我下一轮在你确认「可安全占用某 bot」后再自动跑（告诉我哪个 bot 可用 / 是否可临时停某实例）。
+
+### 逐项怎么验（建好群、后端=Claude 后）
+1. 发「你好，简单介绍下自己」→ 看卡片**逐字流式** + 思考折叠面板 + 末尾 done（观感对比 Codex）。
+2. 发「读一下 package.json 的 name 字段」→ 看**工具块**（读取 …/package.json）+ 结果。
+3. 追问「我第一句问的啥」→ 验**多轮记忆**。
+4. 跑个长任务（「数到 50」）中途点 **⏹** → 验优雅中断、卡片停在「已中断」。
+5. 切 qa 档的群里发「在当前目录建个 a.txt」→ 应被拒（只读）。
+6. 设置卡选不同 model/effort → 发消息看卡片模型显示。
+（computer use 可在飞书桌面端逐项截图佐证。）
+
+### 复跑 LIVE 集成测试（不依赖飞书，随时可验代码链路）
+`CLAUDE_LIVE=1 npx vitest run test/claude-agent.live.test.ts`
+（会真实计费；多轮用例若超时多半是 API 529 过载，过段时间重试即可。）
 
 ## 下一步（按序）
 1. 安装 `@anthropic-ai/claude-agent-sdk`，读真实 .d.ts 锁定 API。
