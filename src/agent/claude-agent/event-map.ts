@@ -200,8 +200,9 @@ export function createTurnMapper(ctx: ClaudeMapContext = {}): TurnMapper {
 // ── tool rendering helpers ──────────────────────────────────────────────────
 
 /** A Claude built-in tool call → a short Chinese title, mirroring codex's
- * command-as-title convention (Bash shows the command itself). */
-function toolTitle(name: string, input: Record<string, unknown>, cwd?: string): string {
+ * command-as-title convention (Bash shows the command itself). Exported so the
+ * history folder (resume card) renders tool calls identically to the live stream. */
+export function toolTitle(name: string, input: Record<string, unknown>, cwd?: string): string {
   const s = (k: string): string => (typeof input[k] === 'string' ? (input[k] as string) : '');
   switch (name) {
     case 'Bash':

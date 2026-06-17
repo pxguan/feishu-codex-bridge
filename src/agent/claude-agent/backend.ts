@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { getSessionMessages, listSessions } from '@anthropic-ai/claude-agent-sdk';
+import { log } from '../../core/logger';
 import type {
   AgentBackend,
   AgentCapabilities,
@@ -14,6 +16,7 @@ import type {
 } from '../types';
 import { BRIDGE_DEVELOPER_INSTRUCTIONS } from '../bridge-instructions';
 import { permissionOptions } from './permission';
+import { foldSessionMessages, mapSessionSummary } from './history';
 import { ClaudeAgentThread } from './thread';
 
 /**
@@ -40,7 +43,8 @@ export class ClaudeAgentBackend implements AgentBackend {
     goal: false,
     steer: false,
     compact: false,
-    resume: false,
+    // resume 历史卡：读 ~/.claude/projects 会话存储（与 `claude -r` 同源，双向可见）。
+    resume: true,
     approvals: false,
   };
 
@@ -71,13 +75,30 @@ export class ClaudeAgentBackend implements AgentBackend {
     return STATIC_MODELS;
   }
 
-  // The /resume history picker is gated off (capabilities.resume=false), so these
-  // are never called by the orchestrator; return empty per the never-throw contract.
-  async listThreads(): Promise<ThreadSummary[]> {
-    return [];
+  /** 最近会话（newest first），读 ~/.claude/projects/<cwd-hash> 的 JSONL 存储——
+   * 与 `claude -r` 同源，故能列出本机用 `claude` 手开的会话。绝不抛错（契约）。 */
+  async listThreads(cwd: string, limit = 15): Promise<ThreadSummary[]> {
+    try {
+      const sessions = await listSessions({ dir: cwd, limit });
+      return sessions
+        .map(mapSessionSummary)
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+    } catch (err) {
+      log.fail('agent', err, { backend: 'claude-agent', phase: 'listSessions' });
+      return [];
+    }
   }
-  async readHistory(): Promise<ThreadHistory> {
-    return { turns: [], totalTurns: 0 };
+
+  /** 某会话的转写摘要（resume 历史卡）——读 getSessionMessages 折叠成 turns，不起会话、
+   * 无 token 成本。绝不抛错（返回空）。 */
+  async readHistory(cwd: string, sessionId: string, maxTurns = 10): Promise<ThreadHistory> {
+    try {
+      const messages = await getSessionMessages(sessionId, { dir: cwd });
+      return foldSessionMessages(messages, maxTurns, cwd);
+    } catch (err) {
+      log.fail('agent', err, { backend: 'claude-agent', phase: 'getSessionMessages', sessionId });
+      return { turns: [], totalTurns: 0 };
+    }
   }
 
   async startThread(opts: StartThreadOptions): Promise<AgentThread> {

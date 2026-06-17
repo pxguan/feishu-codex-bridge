@@ -96,8 +96,10 @@
 - [~] 新建会话 + 流式增量（text_delta/thinking/tool/done 已由 LIVE+spike 实证；飞书卡片渲染走**未改动**的
       run-card-stream，吃的是同一套 AgentEvent，故卡片观感应与 Codex 一致——待飞书肉眼确认）
 - [x] 多轮上下文保持（LIVE run1 + spike7 + spike2 resume 三证）
-- [~] 重启 resume：resumeThread 用 options.resume，spike2 证跨进程上下文恢复；bridge 重启走未改动的
-      resolveThread→resumeThread，逻辑通——待真实重启飞书复现
+- [x] 重启 resume + **/resume 历史卡双向发现**：listThreads/readHistory 读 SDK 的本地会话存储
+      （~/.claude/projects，与 `claude -r` 同源）→ 飞书 /resume 能列出本机 `claude` 手开的会话；
+      桥建的会话（默认 persistSession + 设 cwd）也出现在 `claude -r`（spike9 实证双向可见）。
+      capabilities.resume 已开为 true；新增 history.ts 纯映射 + 单测 + 容错冒烟。
 - [x] ⏹ 优雅中断（LIVE interrupt 每次过 + spike3）
 - [x] 三档权限 + 沙箱/安全说明完整（spike4/5/6 实证，见上「安全模型」）
 - [~] model + effort：已接 options.model/effort（per-turn model 用 setModel；effort 仅建线程时生效，已注明）
