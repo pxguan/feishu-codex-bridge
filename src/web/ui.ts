@@ -563,6 +563,9 @@ export const UI_HTML = `<!doctype html>
   .iconbtn svg { width: 15px; height: 15px; }
   .menu { position: absolute; top: 28px; right: 0; background: #1c1c21; border: 1px solid var(--border-2); border-radius: 10px; padding: 5px; min-width: 152px; box-shadow: var(--shadow-md); z-index: 25; display: none; }
   .menu.open { display: block; }
+  /* 末行的下拉向上展开：表格 .bka-tbl 用 overflow:hidden 做圆角，会裁掉最后一行
+     向下展开的菜单（如 Claude 行的「检查更新」被切掉）——末行改为向上弹出即可避开。 */
+  .bka-row:last-child .menu { top: auto; bottom: 30px; }
   .mi { display: flex; align-items: center; gap: 9px; padding: 7px 9px; border-radius: 7px; font-size: 12.5px; color: var(--text); cursor: pointer; }
   .mi svg { width: 14px; height: 14px; color: var(--text-2); }
   .mi:hover { background: var(--hover); }
