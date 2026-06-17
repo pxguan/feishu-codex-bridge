@@ -1,4 +1,4 @@
-import { query, type Options, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { log } from '../../core/logger';
 import type {
   AgentEvent,
@@ -24,6 +24,10 @@ export interface ClaudeThreadConfig {
   permission: ClaudePermissionOptions;
   /** appended to Claude Code's default system prompt (bridge developer guidance). */
   systemPromptAppend?: string;
+  /** the SDK's `query()` function, injected by the backend (lazy-loaded via
+   * loadBackendDep) so thread.ts carries no static runtime dep on the SDK —
+   * the on-demand package can be absent until downloaded. */
+  query: (params: { prompt: AsyncIterable<SDKUserMessage>; options?: Options }) => Query;
 }
 
 /** Hard ceiling on a manual /compact (a summarization turn) so a wedged process
@@ -154,7 +158,7 @@ export class ClaudeAgentThread implements AgentThread {
       },
     };
 
-    this.query = query({ prompt: this.input, options });
+    this.query = cfg.query({ prompt: this.input, options });
     void this.pump();
   }
 

@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { getSessionMessages, listSessions } from '@anthropic-ai/claude-agent-sdk';
 import { log } from '../../core/logger';
 import type {
   AgentBackend,
@@ -15,9 +14,30 @@ import type {
   ThreadSummary,
 } from '../types';
 import { BRIDGE_DEVELOPER_INSTRUCTIONS } from '../bridge-instructions';
+import { isBackendDepInstalled, installedBackendVersion, loadBackendDep } from '../backend-loader';
 import { permissionOptions } from './permission';
 import { foldSessionMessages, mapSessionSummary } from './history';
 import { ClaudeAgentThread } from './thread';
+
+/** The on-demand npm package backing this backend. */
+const SDK_PKG = '@anthropic-ai/claude-agent-sdk';
+
+/** The SDK's runtime surface we use (typed off the package, erased at build). */
+type ClaudeSdk = typeof import('@anthropic-ai/claude-agent-sdk');
+
+let sdkPromise: Promise<ClaudeSdk> | undefined;
+/**
+ * Lazy-load the SDK via the on-demand loader (bridge/global node_modules → user
+ * private install dir). Cached after first success. Throws BackendNotInstalledError
+ * when absent — so a fresh install that hasn't downloaded Claude yet fails with a
+ * clear "未安装" instead of crashing at module import. If the user already has the
+ * package anywhere on the resolve path (e.g. a global `npm i -g`), this finds it
+ * and never re-downloads.
+ */
+function loadSdk(): Promise<ClaudeSdk> {
+  sdkPromise ??= loadBackendDep<ClaudeSdk>(SDK_PKG);
+  return sdkPromise;
+}
 
 /**
  * Claude Agent SDK backend — drives Claude Code in-process via
@@ -25,13 +45,12 @@ import { ClaudeAgentThread } from './thread';
  * backend's contract (see ../codex-appserver/backend.ts) so the bot orchestrator,
  * card streamer, watchdog and session store work unchanged.
  *
- * Capability deltas vs codex (declared below so the orchestrator guards them):
- *   goal/steer/compact/resume(history picker) — not (yet) supported; the SDK has
- *   no codex-style goal or turn-steer, and manual /compact isn't wired (the SDK
- *   auto-compacts). Cross-restart resume STILL works (resumeThread is always
- *   callable); only the /resume HISTORY card is gated off by `resume:false`.
+ * Packaging: the SDK is an ON-DEMAND dependency (not bundled with the bridge) —
+ * loaded lazily via {@link loadSdk}. When absent, the Web 后端页 shows a「下载」
+ * button (catalog marks it npm-ondemand); an already-installed copy (bridge /
+ * global / user dir) is detected and reused, never re-downloaded.
  *
- * Auth: the bundled CLI reuses the host's Claude Code login (verified: a query
+ * Auth: the SDK's bundled CLI reuses the host's Claude login (verified: a query
  * runs with apiKeySource=none when the machine is logged in), else
  * ANTHROPIC_API_KEY. No separate login step in the bridge.
  */
@@ -60,15 +79,24 @@ export class ClaudeAgentBackend implements AgentBackend {
   }
 
   async doctor(): Promise<BackendProbe> {
-    // The SDK bundles its own Claude Code CLI (statically imported by ./thread),
-    // so "available" = the package is present (it's a hard dependency). Auth is
-    // verified lazily at first turn — surfacing a missing login as a run error is
-    // friendlier than a costly probe on every doctor call.
+    // "available" = the on-demand SDK is installed (bridge/global/user dir). When
+    // not, report installable so the Web shows a「下载」button. Auth is verified
+    // lazily at first turn (a missing login surfaces as a friendly run error).
+    if (!isBackendDepInstalled(SDK_PKG)) {
+      return {
+        ok: false,
+        version: null,
+        installable: true,
+        depState: 'not-installed',
+        hint: '点「下载」安装 Claude Agent SDK（零 sudo，装到用户目录）',
+      };
+    }
     return {
       ok: true,
-      version: null,
-      location: '@anthropic-ai/claude-agent-sdk',
-      hint: '复用本机 Claude Code 登录态（未登录请先运行 `claude` 登录，或设置 ANTHROPIC_API_KEY）',
+      version: installedBackendVersion(SDK_PKG),
+      location: SDK_PKG,
+      depState: 'installed',
+      hint: '复用本机 Claude 登录态（未登录请先 `claude` 登录，或设置 ANTHROPIC_API_KEY）',
     };
   }
 
@@ -80,7 +108,8 @@ export class ClaudeAgentBackend implements AgentBackend {
    * 与 `claude -r` 同源，故能列出本机用 `claude` 手开的会话。绝不抛错（契约）。 */
   async listThreads(cwd: string, limit = 15): Promise<ThreadSummary[]> {
     try {
-      const sessions = await listSessions({ dir: cwd, limit });
+      const sdk = await loadSdk();
+      const sessions = await sdk.listSessions({ dir: cwd, limit });
       return sessions
         .map(mapSessionSummary)
         .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -94,7 +123,8 @@ export class ClaudeAgentBackend implements AgentBackend {
    * 无 token 成本。绝不抛错（返回空）。 */
   async readHistory(cwd: string, sessionId: string, maxTurns = 10): Promise<ThreadHistory> {
     try {
-      const messages = await getSessionMessages(sessionId, { dir: cwd });
+      const sdk = await loadSdk();
+      const messages = await sdk.getSessionMessages(sessionId, { dir: cwd });
       return foldSessionMessages(messages, maxTurns, cwd);
     } catch (err) {
       log.fail('agent', err, { backend: 'claude-agent', phase: 'getSessionMessages', sessionId });
@@ -103,19 +133,21 @@ export class ClaudeAgentBackend implements AgentBackend {
   }
 
   async startThread(opts: StartThreadOptions): Promise<AgentThread> {
-    const sessionId = randomUUID();
+    const sdk = await loadSdk();
     return new ClaudeAgentThread({
-      sessionId,
+      sessionId: randomUUID(),
       resume: false,
       cwd: opts.cwd,
       model: opts.model,
       effort: opts.effort,
       permission: permissionOptions(opts.mode, opts.network, opts.cwd),
       systemPromptAppend: BRIDGE_DEVELOPER_INSTRUCTIONS,
+      query: sdk.query,
     });
   }
 
   async resumeThread(opts: ResumeThreadOptions): Promise<AgentThread> {
+    const sdk = await loadSdk();
     return new ClaudeAgentThread({
       sessionId: opts.sessionId,
       resume: true,
@@ -124,6 +156,7 @@ export class ClaudeAgentBackend implements AgentBackend {
       effort: opts.effort,
       permission: permissionOptions(opts.mode, opts.network, opts.cwd),
       systemPromptAppend: BRIDGE_DEVELOPER_INSTRUCTIONS,
+      query: sdk.query,
     });
   }
 }
