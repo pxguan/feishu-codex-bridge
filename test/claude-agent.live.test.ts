@@ -36,7 +36,23 @@ describe.runIf(LIVE)('claude-agent 后端 LIVE 集成', () => {
     expect(types).toContain('done');
     expect(state.terminal).toBe('done');
     expect(finalMessageText(state).length).toBeGreaterThan(0);
+    // /context 修复：上下文窗口必须是已知值（非 null/未知），由 getContextUsage 提供。
+    expect(types).toContain('context_usage');
+    expect(state.usage?.window).toBeGreaterThan(0);
+    expect(state.usage?.used).toBeGreaterThan(0);
 
+    await thread.close();
+  });
+
+  it('/compact：调用不抛错，返回合法 CompactResult（短会话 compacted=false）', { timeout: 120_000 }, async () => {
+    const be = createBackend('claude-agent');
+    const thread = await be.startThread({ cwd: process.cwd(), mode: 'full' });
+    await drain(thread.runStreamed({ text: '说一句话。' }).events);
+    const res = await thread.compact();
+    expect(typeof res.compacted).toBe('boolean'); // 短会话多半 false（Not enough messages）
+    // usage 可能为 null（getContextUsage 失败）或带窗口；有则窗口为正。
+    if (res.usage) expect(res.usage.contextWindow ?? 1).toBeGreaterThan(0);
+    expect(thread.isAlive()).toBe(true); // 压缩后线程仍可用
     await thread.close();
   });
 

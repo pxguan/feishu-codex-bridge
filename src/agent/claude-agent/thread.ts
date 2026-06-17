@@ -26,6 +26,10 @@ export interface ClaudeThreadConfig {
   systemPromptAppend?: string;
 }
 
+/** Hard ceiling on a manual /compact (a summarization turn) so a wedged process
+ * can't hang the「压缩中」card forever. Mirrors codex's COMPACT_TIMEOUT_MS. */
+const COMPACT_TIMEOUT_MS = 120_000;
+
 type TurnItem =
   | { kind: 'msg'; msg: SDKMessage }
   | { kind: 'end' }
@@ -212,7 +216,19 @@ export class ClaudeAgentThread implements AgentThread {
           self.lastActivityAt = Date.now();
           for (const ev of mapper.map(item.msg)) yield ev;
           if (msg.type === 'result') {
-            if (msg.subtype === 'success' || self.interruptRequested) {
+            const ok = msg.subtype === 'success' || self.interruptRequested;
+            if (ok) {
+              // Authoritative context gauge — matches Claude's native /context
+              // (totalTokens used, maxTokens window). Overrides the event-map's
+              // fallback estimate. Best-effort: a control RTT that may fail.
+              try {
+                const cu = await self.query.getContextUsage();
+                if (cu && typeof cu.totalTokens === 'number' && typeof cu.maxTokens === 'number') {
+                  yield { type: 'context_usage', usedTokens: cu.totalTokens, contextWindow: cu.maxTokens };
+                }
+              } catch (err) {
+                log.fail('agent', err, { backend: 'claude-agent', phase: 'getContextUsage' });
+              }
               yield { type: 'done', turnId };
             } else {
               yield { type: 'error', message: resultErrorText(msg as Record<string, unknown>), willRetry: false };
@@ -243,8 +259,53 @@ export class ClaudeAgentThread implements AgentThread {
     // capabilities.steer=false → orchestrator queues the steer as the next turn.
     throw new Error('claude-agent 后端暂不支持飞行中引导（steer），将自动改为下一轮发送');
   }
+  /**
+   * Manual /compact. Claude Code's `/compact` IS a real slash command (verified:
+   * `supportedCommands()` lists it, and sending "/compact" as input is intercepted
+   * and executed, not echoed). We send it through the persistent query and drain to
+   * the result; a `compact_boundary`(trigger:manual) means it actually compacted —
+   * "Not enough messages to compact." just ends with no boundary (compacted=false).
+   */
   async compact(): Promise<CompactResult> {
-    throw new Error('claude-agent 后端暂不支持手动 /compact（SDK 自带自动压缩）');
+    if (this.dead) throw new Error('Claude 会话已结束，无法压缩');
+    const inbox = new Inbox<TurnItem>();
+    const mySink = (item: TurnItem): void => inbox.push(item);
+    this.sink = mySink;
+    this.interruptRequested = false;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), COMPACT_TIMEOUT_MS);
+    });
+
+    let compacted = false;
+    try {
+      this.input.push(toUserMessage({ text: '/compact' }));
+      while (true) {
+        const step = await Promise.race([inbox.next(), timeout]);
+        if (step === 'timeout') throw new Error(`压缩超时（Claude 未在 ${COMPACT_TIMEOUT_MS / 1000}s 内完成）`);
+        if (step.kind === 'end') throw new Error('Claude 会话进程已退出');
+        if (step.kind === 'error') throw step.err instanceof Error ? step.err : new Error(String(step.err));
+        const msg = step.msg as unknown as { type?: string; subtype?: string };
+        this.lastActivityAt = Date.now();
+        if (msg.type === 'system' && msg.subtype === 'compact_boundary') compacted = true;
+        if (msg.type === 'result') break; // the /compact turn ended
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (this.sink === mySink) this.sink = undefined;
+    }
+
+    let usage: CompactResult['usage'] = null;
+    try {
+      const cu = await this.query.getContextUsage();
+      if (cu && typeof cu.totalTokens === 'number' && typeof cu.maxTokens === 'number') {
+        usage = { usedTokens: cu.totalTokens, contextWindow: cu.maxTokens };
+      }
+    } catch {
+      /* best-effort post-compaction usage */
+    }
+    return { compacted, usage };
   }
 
   async abort(_turnId: string): Promise<void> {

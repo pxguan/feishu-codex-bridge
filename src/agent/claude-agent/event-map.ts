@@ -67,15 +67,23 @@ export function createTurnMapper(ctx: ClaudeMapContext = {}): TurnMapper {
   let blockSeq = 0;
   const open = new Map<number, OpenBlock>();
   let systemEmitted = false;
+  // Captured from system/init — the result message has NO `model`, so the context
+  // window fallback must read it here (else the window shows as 未知/unknown).
+  let initModel: string | undefined;
 
   function map(msg: SDKMessage): AgentEvent[] {
     const m = msg as unknown as Record<string, any>;
     switch (m.type) {
       case 'system':
-        if (m.subtype === 'init' && !systemEmitted) {
-          systemEmitted = true;
-          return [{ type: 'system', threadId: String(m.session_id ?? '') }];
+        if (m.subtype === 'init') {
+          if (typeof m.model === 'string') initModel = m.model;
+          if (!systemEmitted) {
+            systemEmitted = true;
+            return [{ type: 'system', threadId: String(m.session_id ?? '') }];
+          }
         }
+        // Auto-compaction during a turn → surface the「上下文已压缩」notice.
+        if (m.subtype === 'compact_boundary') return [{ type: 'context_compacted' }];
         return [];
 
       case 'stream_event':
@@ -127,12 +135,16 @@ export function createTurnMapper(ctx: ClaudeMapContext = {}): TurnMapper {
             inputTokens: usage.input_tokens,
             outputTokens: usage.output_tokens,
           });
+          // Fallback context gauge (the thread overrides this with the authoritative
+          // getContextUsage() reading). used = input + cache_read + cache_creation
+          // (≈ the request's full input context — verified to equal getContextUsage
+          // totalTokens). Window comes from the init model, NOT result.model (absent).
           const used =
             (usage.input_tokens ?? 0) +
             (usage.cache_read_input_tokens ?? 0) +
             (usage.cache_creation_input_tokens ?? 0);
           if (used > 0) {
-            out.push({ type: 'context_usage', usedTokens: used, contextWindow: contextWindowFor(m.model) });
+            out.push({ type: 'context_usage', usedTokens: used, contextWindow: contextWindowFor(initModel) });
           }
         }
         return out;

@@ -42,7 +42,8 @@ export class ClaudeAgentBackend implements AgentBackend {
   readonly capabilities: AgentCapabilities = {
     goal: false,
     steer: false,
-    compact: false,
+    // /compact：Claude Code 原生斜杠命令（发 "/compact" 即触发，见 thread.compact）。
+    compact: true,
     // resume 历史卡：读 ~/.claude/projects 会话存储（与 `claude -r` 同源，双向可见）。
     resume: true,
     approvals: false,

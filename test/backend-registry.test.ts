@@ -30,11 +30,11 @@ describe('agent backend registry', () => {
     expect(be.id).toBe('claude-agent');
   });
 
-  it('claude-agent declares an explicit capabilities object（goal/steer/compact off，resume on）', () => {
+  it('claude-agent declares an explicit capabilities object（goal/steer off；compact/resume on）', () => {
     const caps = createBackend('claude-agent').capabilities;
     expect(caps).toBeDefined();
-    // resume:true —— /resume 历史卡读 ~/.claude/projects（与 claude -r 同源，双向可见）。
-    expect(caps).toMatchObject({ goal: false, steer: false, compact: false, resume: true });
+    // compact:true（原生 /compact 斜杠命令）；resume:true（读 ~/.claude/projects，与 claude -r 同源）。
+    expect(caps).toMatchObject({ goal: false, steer: false, compact: true, resume: true });
   });
 
   it('backendIds lists every registered backend（codex + claude-agent）', () => {
