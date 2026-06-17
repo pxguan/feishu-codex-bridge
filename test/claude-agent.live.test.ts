@@ -1,4 +1,5 @@
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createBackend } from '../src/agent';
@@ -108,5 +109,53 @@ describe.runIf(LIVE)('claude-agent 后端 LIVE 集成', () => {
     expect(existsSync(probe)).toBe(false);
     rmSync(probe, { force: true });
     await thread.close();
+  });
+
+  it('/goal：自主跑完一个多步目标 → goal_update active→complete + done', { timeout: 180_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cc-goal-'));
+    const probe = join(dir, 'goal_ok.txt');
+    const be = createBackend('claude-agent');
+    const thread = await be.startThread({ cwd: dir, mode: 'full' });
+    const run = thread.runGoal(`创建文件 ${probe} 写入一行 ok，然后用 Bash 确认它存在。`);
+    const statuses: string[] = [];
+    const types: string[] = [];
+    let state = initialState;
+    for await (const ev of run.events) {
+      types.push(ev.type);
+      if (ev.type === 'goal_update') statuses.push(ev.status);
+      else state = reduce(state, ev);
+    }
+    expect(statuses[0]).toBe('active'); // 起步 active
+    expect(statuses).toContain('complete'); // 自然完成 → complete
+    expect(types).toContain('turn_started');
+    expect(types).toContain('done');
+    expect(existsSync(probe)).toBe(true); // 目标被自主完成（真建了文件）
+    await thread.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('/goal 终止：跑到一半 clearGoal 硬停 → 线程死，会话可 resume 续聊', { timeout: 180_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cc-goalstop-'));
+    const be = createBackend('claude-agent');
+    const thread = await be.startThread({ cwd: dir, mode: 'full' });
+    const sid = thread.sessionId;
+    const run = thread.runGoal('逐个用单独 Bash 命令创建 z1.txt 到 z8.txt，一个一个慢慢来，每步之间确认。');
+    let aborted = false;
+    for await (const ev of run.events) {
+      if (!aborted && ev.type === 'tool_use') {
+        aborted = true;
+        await thread.clearGoal(); // ⏹/🎯 → abort 硬停
+      }
+    }
+    expect(aborted).toBe(true);
+    expect(thread.isAlive()).toBe(false); // abort → 线程死（resolveThread 会 evict+resume）
+
+    // 续聊：resume 同 session 跑一轮（abort 后会话仍可恢复）
+    const resumed = await be.resumeThread({ cwd: dir, sessionId: sid, mode: 'full' });
+    const { state } = await drain(resumed.runStreamed({ text: '别建了。只回两个字：在吗' }).events);
+    expect(state.terminal).toBe('done');
+    expect(finalMessageText(state).length).toBeGreaterThan(0);
+    await resumed.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });

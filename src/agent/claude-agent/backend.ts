@@ -59,7 +59,9 @@ export class ClaudeAgentBackend implements AgentBackend {
   readonly displayName = 'Claude';
 
   readonly capabilities: AgentCapabilities = {
-    goal: false,
+    // /goal：goal-like —— 一个自主轮跑完目标 + 合成状态 + abort 硬停可终止续聊
+    // （非 codex 的多轮目标引擎，差异见 thread.runGoal）。
+    goal: true,
     steer: false,
     // /compact：Claude Code 原生斜杠命令（发 "/compact" 即触发，见 thread.compact）。
     compact: true,

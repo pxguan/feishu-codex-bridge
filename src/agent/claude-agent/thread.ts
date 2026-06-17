@@ -102,6 +102,24 @@ function toUserMessage(input: AgentInput): SDKUserMessage {
   } as SDKUserMessage;
 }
 
+/** Frame a /goal objective so Claude runs it autonomously to completion in one
+ * turn (its agent loop already does multi-step; this nudges it not to stop and
+ * ask mid-way, matching the "自主多轮跑到完成" expectation). */
+function goalPrompt(objective: string): string {
+  return [
+    '【自主目标】请连续、自主地完成下面的目标：按需使用工具，一步步做到完成为止，',
+    '中途不要停下来等我确认；完成后用一段话总结做了什么。',
+    '',
+    `目标：${objective}`,
+  ].join('\n');
+}
+
+/** Synthesize a codex-style terminal goal status from a non-success result. */
+function goalStatusFromResult(subtype: string | undefined): string {
+  if (subtype === 'error_max_budget_usd') return 'budgetLimited';
+  return 'blocked'; // error_max_turns / error_during_execution / other → blocked
+}
+
 /**
  * A Claude Agent SDK session as one persistent streaming-input `query()`.
  *
@@ -128,6 +146,8 @@ export class ClaudeAgentThread implements AgentThread {
   private readonly abortController = new AbortController();
   private dead = false;
   private interruptRequested = false;
+  /** true while a runGoal() turn is in flight — clearGoal() only hard-stops then. */
+  private goalRunning = false;
   private turnSeq = 0;
   private currentTurnId: string | undefined;
   private lastActivityAt = Date.now();
@@ -252,12 +272,110 @@ export class ClaudeAgentThread implements AgentThread {
     };
   }
 
-  // ── unsupported codex-only affordances (capabilities flag them false) ────────
-  runGoal(): AgentRun {
-    throw new Error('claude-agent 后端暂不支持 /goal 自治多轮');
+  /**
+   * /goal —— Claude 没有 codex 那种「目标引擎 + 多轮自动续跑」，但 Claude Code 的
+   * agent loop 本身就能在 ONE query turn 内自主多步跑完一个目标。所以这里把目标当作
+   * 「一个自主轮」：发带自主提示的目标 → 流式跑 → 合成 goal_update 状态（active 起、
+   * complete/blocked/budgetLimited 收）。
+   *
+   * ── 与 codex 的差异（如实）──────────────────────────────────────────────
+   *  - codex：N 个自动续跑的 turn（N 张卡片）+ 原生状态机（active/paused/complete/
+   *    budgetLimited/usageLimited/blocked）+ token 预算。
+   *  - claude：1 个自主 turn（1 张卡片，内部多步）+ 合成状态（仅 active→complete/
+   *    blocked/budgetLimited）。无 paused/usageLimited、无预算。
+   *  - ⏹ 终止 / 🎯 结束：经 clearGoal() 用 abortController 硬停（spike 实测 ~2s 停，
+   *    且 abort 后会话可 resume 续聊）——比工具执行中途的 interrupt() 可靠。
+   */
+  runGoal(objective: string): AgentRun {
+    const turnId = `g${++this.turnSeq}`;
+    this.currentTurnId = turnId;
+    this.interruptRequested = false;
+    this.goalRunning = true;
+    const startedAt = Date.now();
+    const mapper = createTurnMapper({ cwd: this.cwd });
+    const inbox = new Inbox<TurnItem>();
+    const mySink = (item: TurnItem): void => inbox.push(item);
+    this.sink = mySink;
+
+    this.input.push(toUserMessage({ text: goalPrompt(objective) }));
+
+    const self = this;
+    async function* gen(): AsyncGenerator<AgentEvent> {
+      yield { type: 'goal_update', status: 'active', objective, tokensUsed: 0, timeUsedSeconds: 0, tokenBudget: null };
+      yield { type: 'turn_started', turnId };
+      let tokensUsed = 0;
+      const finishGoal = (status: string): AgentEvent => ({
+        type: 'goal_update',
+        status,
+        objective,
+        tokensUsed,
+        timeUsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+        tokenBudget: null,
+      });
+      try {
+        while (true) {
+          const item = await inbox.next();
+          if (item.kind === 'end' || item.kind === 'error') {
+            // Deliberate ⏹/🎯 (clearGoal aborted the query) → finish cleanly; a real
+            // crash → surface the error.
+            if (self.interruptRequested) {
+              yield { type: 'done', turnId };
+            } else {
+              const m = item.kind === 'error' && item.err instanceof Error ? item.err.message : 'Claude 会话进程已退出';
+              yield finishGoal('blocked');
+              yield { type: 'error', message: m, willRetry: false };
+            }
+            return;
+          }
+          const msg = item.msg as unknown as { type?: string; subtype?: string; usage?: Record<string, number> };
+          self.lastActivityAt = Date.now();
+          for (const ev of mapper.map(item.msg)) {
+            if (ev.type === 'usage') tokensUsed = (ev.inputTokens ?? 0) + (ev.outputTokens ?? 0);
+            yield ev;
+          }
+          if (msg.type === 'result') {
+            self.goalRunning = false;
+            const status = msg.subtype === 'success' || self.interruptRequested ? 'complete' : goalStatusFromResult(msg.subtype);
+            try {
+              const cu = await self.query.getContextUsage();
+              if (cu && typeof cu.totalTokens === 'number' && typeof cu.maxTokens === 'number') {
+                yield { type: 'context_usage', usedTokens: cu.totalTokens, contextWindow: cu.maxTokens };
+              }
+            } catch {
+              /* best-effort */
+            }
+            yield finishGoal(status);
+            yield { type: 'done', turnId };
+            return;
+          }
+        }
+      } finally {
+        self.goalRunning = false;
+        if (self.sink === mySink) self.sink = undefined;
+      }
+    }
+
+    return { events: gen(), turnId: () => self.currentTurnId, lastActivity: () => self.lastActivityAt };
   }
+
+  /**
+   * Clear/terminate the goal. Claude has no goal engine, so "clear" = hard-stop the
+   * in-flight goal turn via the AbortController (interrupt() can hang mid-tool;
+   * abort reliably stops in ~2s and the session stays resumable, so chat continues
+   * via resolveThread's resume on the next message). No-op when no goal is running
+   * (this is also the orchestrator's idempotent end-of-run cleanup — keep the warm
+   * query alive on natural completion).
+   */
   async clearGoal(): Promise<void> {
-    /* no goal concept; best-effort no-op */
+    if (!this.goalRunning) return;
+    this.goalRunning = false;
+    this.interruptRequested = true;
+    this.dead = true; // aborted → resolveThread evicts + resumes on next message
+    try {
+      this.abortController.abort();
+    } catch {
+      /* ignore */
+    }
   }
   async steer(): Promise<void> {
     // capabilities.steer=false → orchestrator queues the steer as the next turn.
