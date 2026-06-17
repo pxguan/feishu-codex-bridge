@@ -7,7 +7,7 @@ import type {
   ReactionEvent,
 } from '@larksuiteoapi/node-sdk';
 import { DEFAULT_BACKEND_ID, backendIds, createBackend, isBackendEntryInstalled } from '../agent';
-import { catalogById, projectCreatableBackends } from '../agent/catalog';
+import { catalogById, projectCreatableBackends, visibleCatalog } from '../agent/catalog';
 import type { AgentBackend, AgentInput, AgentRun, AgentThread, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
 import type { SelectOption } from '../card/cards';
 import {
@@ -264,13 +264,20 @@ function asTier(v: string | undefined): PermissionMode | undefined {
 }
 
 /**
- * 新建/绑定项目卡的后端下拉选项：只列「已下载 且 该权限档支持」的后端（codex 基线
- * 始终在；未下载的不显示——卡片里下不了，去 Web「后端 Agent」页下）。新建默认档
- * 'full'、绑定外部群默认档 'qa'，过滤面随之不同（claude 系仅 full，qa 下自然只剩 codex）。
+ * 新建/绑定项目卡的后端下拉选项：列出该权限档兼容的**全部**（非隐藏）后端——已下载的
+ * 正常显示；**未下载的（如 Claude）也列出并标注「未下载·去控制台下载」**，让用户知道它
+ * 存在、并去 Web「后端 Agent」页下载（Feishu 下拉无法对单项置灰，故用标注 + 提交时
+ * {@link assertBackendUsable} 友好拦截，等价于「置灰 + 提示」）。新建默认档 'full'、绑定
+ * 外部群默认档 'qa'，按 supportedModes 过滤（claude 仅 full，qa 下自然只剩 codex）。
  */
 function backendOptionsFor(mode: PermissionMode): SelectOption[] {
-  const opts = projectCreatableBackends(mode, isBackendEntryInstalled).map((e) => ({ label: e.displayName, value: e.id }));
-  // 用户不可见闸：只剩默认 codex（无真实选择）时不渲染后端区，卡片回到「无后端概念」形态。
+  const opts: SelectOption[] = visibleCatalog()
+    .filter((e) => !e.supportedModes || e.supportedModes.includes(mode))
+    .map((e) => {
+      const installed = e.id === DEFAULT_BACKEND_ID || isBackendEntryInstalled(e);
+      return { label: installed ? e.displayName : `${e.displayName}（未下载·去控制台下载）`, value: e.id };
+    });
+  // 只剩默认 codex（无真实选择）时不渲染后端区，卡片回到「无后端概念」形态。
   return opts.length > 1 ? opts : [];
 }
 

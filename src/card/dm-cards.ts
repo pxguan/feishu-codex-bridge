@@ -560,7 +560,7 @@ export function buildNewProjectFormCard(
   ];
   if (backends.length > 1) {
     formItems.push(
-      note('🧠 后端 Agent（创建后**固定不可切换**；未下载的不在列表 → 去 Web「后端 Agent」页下载）'),
+      note('🧠 后端 Agent（创建后**固定不可切换**；标注「未下载」的需先去 Web「后端 Agent」页下载，选它会提示）'),
       selectMenu({ name: 'backend', placeholder: '选择后端 Agent', options: backends, initial: backends[0]?.value }),
     );
   } else if (backends.length === 1) {

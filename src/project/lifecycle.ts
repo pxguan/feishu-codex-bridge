@@ -7,7 +7,7 @@ import { log } from '../core/logger';
 import { addProject, getProjectByChatId, getProjectByName, type Project } from './registry';
 import type { PermissionMode } from '../agent/types';
 import { isBackendEntryInstalled } from '../agent';
-import { projectCreatableBackends } from '../agent/catalog';
+import { catalogById, isInstallable, projectCreatableBackends } from '../agent/catalog';
 import { setAnnouncement } from './announcement';
 import { onboardGroup } from './onboarding';
 
@@ -20,7 +20,14 @@ import { onboardGroup } from './onboarding';
 export function assertBackendUsable(backend: string | undefined, mode: PermissionMode): void {
   if (!backend) return;
   const ok = projectCreatableBackends(mode, isBackendEntryInstalled).some((e) => e.id === backend);
-  if (!ok) throw new Error(`所选后端「${backend}」当前不可用（未下载或不支持该权限档），请回卡片重新选择`);
+  if (ok) return;
+  // 选了一个「未下载」的后端（下拉里标注了「未下载」的项）：给可下载的明确指引去 Web 下载，
+  // 等价于「置灰提示」（Feishu 下拉无法对单项真置灰，故选中后在此友好拦截）。
+  const entry = catalogById(backend);
+  if (entry && isInstallable(entry)) {
+    throw new Error(`「${entry.displayName}」尚未下载——请到 Web 控制台「后端 Agent」页点「下载」装好后，再回卡片选用。`);
+  }
+  throw new Error(`所选后端「${backend}」当前不可用（未下载或不支持该权限档），请回卡片重新选择`);
 }
 
 export interface CreateProjectInput {

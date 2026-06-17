@@ -232,7 +232,8 @@ export async function uninstallBackendDep(pkg: string): Promise<boolean> {
   return !isBackendDepInstalled(stripVersion(pkg));
 }
 
-/** rm -rf backendsDir/node_modules/<pkg> + 从 package.json 移除条目（半装回滚 / 卸载）。绝不抛错。 */
+/** rm -rf backendsDir/node_modules/<pkg> + 从 package.json 移除条目 + 删 package-lock.json
+ * （半装回滚 / 卸载）。绝不抛错。 */
 async function rollback(bareName: string): Promise<void> {
   // scoped 包名（@scope/name）是两级目录，rm 整个包目录即可（@scope 空壳无害留着）。
   const target = join(paths.backendsDir, 'node_modules', ...bareName.split('/'));
@@ -240,6 +241,11 @@ async function rollback(bareName: string): Promise<void> {
   // 连带从 package.json 删依赖条目——否则下次装别的后端时 npm 按 package.json reconcile
   // 又把它拉回来（默认 --save 把装过的都记进 package.json，多后端靠它共存；卸载就得反向清）。
   await removeBackendsDep(bareName);
+  // 关键：删掉 package-lock.json。否则 lock 仍记着「<pkg> 已装」，下次 `npm i <pkg>` 会以为
+  // 已满足、只「added 1 package」而**不恢复刚被 rm 的主包目录** → 校验又失败 → 再回滚 →
+  // 永远装不上（实测踩坑）。删 lock 让下次安装全量重解析（其余后端按 package.json 一并恢复，
+  // 缓存热则近乎 no-op）。
+  await rm(join(paths.backendsDir, 'package-lock.json'), { force: true }).catch(() => undefined);
 }
 
 /** 从 backendsDir/package.json 的 dependencies 里删一个包（直接编辑 JSON，不 spawn npm）。绝不抛错。 */
