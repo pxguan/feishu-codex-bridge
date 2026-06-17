@@ -34,6 +34,14 @@ export interface ClaudeThreadConfig {
  * can't hang the「压缩中」card forever. Mirrors codex's COMPACT_TIMEOUT_MS. */
 const COMPACT_TIMEOUT_MS = 120_000;
 
+/** ⏹: how long to wait for interrupt() to end the turn before hard-aborting the
+ * query. interrupt() reliably stops a STREAMING turn but HANGS when a blocking
+ * tool (sleep / long build) is mid-execution (verified) — so we escalate to a
+ * hard AbortController.abort() (thread dies → resolveThread resumes next message).
+ * Generous enough that a normal interrupt (streaming) settles first and keeps the
+ * warm process; short enough that ⏹ on a stuck tool feels responsive. */
+const ABORT_ESCALATE_MS = 4_000;
+
 type TurnItem =
   | { kind: 'msg'; msg: SDKMessage }
   | { kind: 'end' }
@@ -148,6 +156,9 @@ export class ClaudeAgentThread implements AgentThread {
   private interruptRequested = false;
   /** true while a runGoal() turn is in flight — clearGoal() only hard-stops then. */
   private goalRunning = false;
+  /** true while ANY turn (runStreamed/runGoal) is in flight — gates abort escalation. */
+  private turnInFlight = false;
+  private escalateTimer: ReturnType<typeof setTimeout> | undefined;
   private turnSeq = 0;
   private currentTurnId: string | undefined;
   private lastActivityAt = Date.now();
@@ -202,6 +213,7 @@ export class ClaudeAgentThread implements AgentThread {
     const turnId = `t${++this.turnSeq}`;
     this.currentTurnId = turnId;
     this.interruptRequested = false;
+    this.turnInFlight = true;
 
     // Per-turn model override persists (mirrors codex). Effort can only be set at
     // query creation in the SDK, so a mid-session effort change is recorded but
@@ -227,12 +239,15 @@ export class ClaudeAgentThread implements AgentThread {
       try {
         while (true) {
           const item = await inbox.next();
-          if (item.kind === 'end') {
-            yield { type: 'error', message: 'Claude 会话进程已退出', willRetry: false };
-            return;
-          }
-          if (item.kind === 'error') {
-            const msg = item.err instanceof Error ? item.err.message : String(item.err);
+          if (item.kind === 'end' || item.kind === 'error') {
+            // A deliberate ⏹ (interrupt or the hard-abort escalation) ends here too —
+            // treat it as a clean `done` (the orchestrator marks it interrupted), not
+            // a scary error; a genuine crash surfaces the error.
+            if (self.interruptRequested) {
+              yield { type: 'done', turnId };
+              return;
+            }
+            const msg = item.kind === 'error' && item.err instanceof Error ? item.err.message : 'Claude 会话进程已退出';
             yield { type: 'error', message: msg || 'Claude 会话出错', willRetry: false };
             return;
           }
@@ -261,6 +276,7 @@ export class ClaudeAgentThread implements AgentThread {
           }
         }
       } finally {
+        self.endTurn();
         if (self.sink === mySink) self.sink = undefined;
       }
     }
@@ -270,6 +286,15 @@ export class ClaudeAgentThread implements AgentThread {
       turnId: () => self.currentTurnId,
       lastActivity: () => self.lastActivityAt,
     };
+  }
+
+  /** End-of-turn bookkeeping: clear the in-flight flag + any pending ⏹ escalation. */
+  private endTurn(): void {
+    this.turnInFlight = false;
+    if (this.escalateTimer) {
+      clearTimeout(this.escalateTimer);
+      this.escalateTimer = undefined;
+    }
   }
 
   /**
@@ -291,6 +316,7 @@ export class ClaudeAgentThread implements AgentThread {
     this.currentTurnId = turnId;
     this.interruptRequested = false;
     this.goalRunning = true;
+    this.turnInFlight = true;
     const startedAt = Date.now();
     const mapper = createTurnMapper({ cwd: this.cwd });
     const inbox = new Inbox<TurnItem>();
@@ -351,6 +377,7 @@ export class ClaudeAgentThread implements AgentThread {
         }
       } finally {
         self.goalRunning = false;
+        self.endTurn();
         if (self.sink === mySink) self.sink = undefined;
       }
     }
@@ -437,6 +464,21 @@ export class ClaudeAgentThread implements AgentThread {
     } catch (err) {
       log.fail('agent', err, { backend: 'claude-agent', phase: 'interrupt' });
     }
+    // interrupt() ends a streaming turn cleanly (keeps the warm process), but HANGS
+    // when a blocking tool is mid-execution — so escalate to a hard abort if the
+    // turn hasn't ended shortly, guaranteeing ⏹ always stops.
+    if (this.escalateTimer || !this.turnInFlight) return;
+    this.escalateTimer = setTimeout(() => {
+      this.escalateTimer = undefined;
+      if (this.dead || !this.turnInFlight) return; // interrupt already ended it
+      log.info('agent', 'interrupt-escalate', { backend: 'claude-agent' });
+      this.dead = true; // hard abort → resolveThread evicts + resumes next message
+      try {
+        this.abortController.abort();
+      } catch {
+        /* ignore */
+      }
+    }, ABORT_ESCALATE_MS);
   }
 
   isAlive(): boolean {
@@ -445,6 +487,7 @@ export class ClaudeAgentThread implements AgentThread {
 
   async close(): Promise<void> {
     this.dead = true;
+    this.endTurn();
     try {
       this.input.close();
     } catch {

@@ -111,6 +111,37 @@ describe.runIf(LIVE)('claude-agent 后端 LIVE 集成', () => {
     await thread.close();
   });
 
+  it('⏹ 工具执行中途：interrupt 卡住 → 升级硬 abort，有界停止 + 可 resume 续聊', { timeout: 90_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cc-stoptool-'));
+    const be = createBackend('claude-agent');
+    const thread = await be.startThread({ cwd: dir, mode: 'full' });
+    const sid = thread.sessionId;
+    const run = thread.runStreamed({ text: '用 Bash 运行 `sleep 30 && echo done`，完成后告诉我结果。' });
+    let scheduled = false;
+    let abortAt = 0;
+    for await (const ev of run.events) {
+      if (!scheduled && ev.type === 'tool_use') {
+        scheduled = true;
+        // 等 sleep 真正跑起来（不是工具调用边界）再中断 —— 此时 interrupt() 会卡，逼出升级。
+        setTimeout(() => {
+          abortAt = Date.now();
+          void thread.abort(run.turnId() ?? '');
+        }, 3000);
+      }
+    }
+    const afterAbortMs = Date.now() - abortAt;
+    expect(scheduled).toBe(true);
+    expect(abortAt).toBeGreaterThan(0);
+    // interrupt 在活跃工具中卡住 → 约 ABORT_ESCALATE_MS(4s) 后升级硬停，远不是 40s+ 挂死。
+    expect(afterAbortMs).toBeLessThan(12_000);
+    expect(thread.isAlive()).toBe(false); // 升级 → abort → 线程死
+    const resumed = await be.resumeThread({ cwd: dir, sessionId: sid, mode: 'full' });
+    const { state } = await drain(resumed.runStreamed({ text: '只回两个字：在吗' }).events);
+    expect(state.terminal).toBe('done');
+    await resumed.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('/goal：自主跑完一个多步目标 → goal_update active→complete + done', { timeout: 180_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cc-goal-'));
     const probe = join(dir, 'goal_ok.txt');
