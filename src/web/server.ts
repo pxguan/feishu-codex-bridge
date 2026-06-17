@@ -79,6 +79,20 @@ export function createWebServer(opts: WebServerOptions): WebServer {
   const html = opts.html ?? UI_HTML;
   const logDir = opts.logDir ?? join(paths.appDir, 'logs');
   const sseCleanups = new Set<() => void>();
+  /** 一条挂在某安装 job 上的 SSE 连接（发数据 + 收尾本连接）。 */
+  interface InstallConn {
+    send: (data: unknown) => void;
+    done: () => void;
+  }
+  /** 一次后台安装：npm 子进程跑到底，多个 SSE 连接可观察；某连接断开不影响安装。 */
+  interface InstallJob {
+    buffer: unknown[];
+    conns: Set<InstallConn>;
+    abort: AbortController;
+    settled: boolean;
+  }
+  /** 进行中的安装，按 `${id}|${update}` 去重 —— 刷新/重连命中同一 job，绝不并发重复装。 */
+  const installJobs = new Map<string, InstallJob>();
 
   /**
    * 单例扫码会话槽（design §1.4）：同时只允许一个扫码会话——registerApp 每会话都吃
@@ -606,8 +620,13 @@ export function createWebServer(opts: WebServerOptions): WebServer {
 
   /**
    * POST /api/backends/:id/install —— 按需安装 SSE。流式推 {type:'log'} npm 进度块
-   * → {type:'done'}（ok）/{type:'error'}（失败/未装成/external/501）。AbortSignal
-   * 在 SSE 断开时 kill npm 子进程 + 回滚半装（service → installer）。
+   * → {type:'done'}（ok）/{type:'error'}（失败/未装成/external/501）。
+   *
+   * 安装**脱离单个 SSE 连接的生命周期**：一次安装(265MB SDK 要装 1-3 分钟)登记在
+   * {@link installJobs}，npm 子进程在后台跑到底；SSE 断开(用户刷新/切走)**只摘掉这个
+   * 监听、绝不 abort/回滚**——否则刷一下就把半成品删了(实测踩坑)。重连(再点下载)会
+   * 命中同一 job、回放已有日志 + 续看实时进度,绝不重复装。安装完成后清掉 job,
+   * /api/backends 经文件系统探测即显示「已装」。
    */
   function handleBackendInstall(req: IncomingMessage, res: ServerResponse, id: string, update: boolean): void {
     res.writeHead(200, {
@@ -617,40 +636,81 @@ export function createWebServer(opts: WebServerOptions): WebServer {
       'X-Accel-Buffering': 'no',
     });
     res.write(': connected\n\n');
-    const heartbeat = setInterval(() => res.write(': ka\n\n'), 15_000);
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(': ka\n\n');
+      } catch {
+        /* socket gone */
+      }
+    }, 15_000);
 
-    const abort = new AbortController();
     let ended = false;
-    const sendData = (data: unknown): void => {
-      if (ended) return;
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    const conn: InstallConn = {
+      send: (data) => {
+        if (ended) return;
+        try {
+          res.write(`data: ${JSON.stringify(data)}\n\n`);
+        } catch {
+          /* socket gone */
+        }
+      },
+      done: () => {
+        if (ended) return;
+        ended = true;
+        clearInterval(heartbeat);
+        sseCleanups.delete(conn.done);
+        try {
+          res.end();
+        } catch {
+          /* already closed */
+        }
+      },
     };
-    const finish = (): void => {
-      if (ended) return;
-      ended = true;
-      clearInterval(heartbeat);
-      sseCleanups.delete(cleanup);
-      res.end();
+    sseCleanups.add(conn.done);
+
+    const key = `${id}|${update ? 1 : 0}`;
+    const running = installJobs.get(key);
+    if (running && !running.settled) {
+      // 已有安装在后台跑 → 挂上去（回放日志 + 续看实时进度），绝不重复装。
+      running.buffer.forEach(conn.send);
+      running.conns.add(conn);
+      req.on('close', () => {
+        running.conns.delete(conn);
+        conn.done();
+      });
+      return;
+    }
+
+    // 新安装：登记 job，后台跑到底；SSE 断开不 abort（安装继续）。
+    const job: InstallJob = { buffer: [], conns: new Set([conn]), abort: new AbortController(), settled: false };
+    installJobs.set(key, job);
+    req.on('close', () => {
+      job.conns.delete(conn);
+      conn.done(); // 只结束本连接；安装继续后台跑（不 abort、不回滚）
+    });
+    const emit = (data: Record<string, unknown>): void => {
+      if (data.type === 'log') job.buffer.push(data);
+      for (const c of [...job.conns]) c.send(data);
     };
-    const cleanup = (): void => {
-      abort.abort(); // 连接断开 → kill npm 子进程 + 回滚半装
-      finish();
-    };
-    sseCleanups.add(cleanup);
-    req.on('close', cleanup);
 
     void opts.service
-      .installBackend(id, (chunk) => sendData({ type: 'log', chunk }), abort.signal, { update })
+      .installBackend(id, (chunk) => emit({ type: 'log', chunk }), job.abort.signal, { update })
       .then((result) => {
-        if (result.ok) sendData({ type: 'done' });
-        else sendData({ type: 'error', code: result.aborted ? 'aborted' : 'install_failed', message: result.tail });
+        emit(
+          result.ok
+            ? { type: 'done' }
+            : { type: 'error', code: result.aborted ? 'aborted' : 'install_failed', message: result.tail },
+        );
       })
       .catch((err) => {
-        // NotWiredYetError（只读预览无 installer）→ not_wired_yet；其它 → unknown。
         const code = err instanceof NotWiredYetError ? 'not_wired_yet' : 'unknown';
-        sendData({ type: 'error', code, message: err instanceof Error ? err.message : String(err) });
+        emit({ type: 'error', code, message: err instanceof Error ? err.message : String(err) });
       })
-      .finally(finish);
+      .finally(() => {
+        job.settled = true;
+        installJobs.delete(key);
+        for (const c of [...job.conns]) c.done();
+      });
   }
 
   /** GET /api/diagnosis —— 事件订阅三态 + 各后端环境体检（按需，较慢）。 */

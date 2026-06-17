@@ -105,8 +105,9 @@ export const BACKEND_CATALOG: readonly BackendCatalogEntry[] = [
       // node_modules 的 require.resolve 恒命中 → 在 picker 里始终判为「已装」可选。
       kind: 'npm-ondemand',
       pkg: '@anthropic-ai/claude-agent-sdk',
-      approxSizeMB: 40,
-      detectHint: '随桥内置（@anthropic-ai/claude-agent-sdk）；复用本机 Claude 登录态',
+      // 实测 SDK + 依赖装到用户目录约 265MB（含自带 Claude Code 运行时）；首次下载较久。
+      approxSizeMB: 265,
+      detectHint: '按需下载 @anthropic-ai/claude-agent-sdk（约 265MB，复用本机 Claude 登录态）',
       installCmd: '随桥已内置（如缺失：npm i @anthropic-ai/claude-agent-sdk）',
     },
     // 必须与 ClaudeAgentBackend.supportedModes 完全一致（单测强制）。
