@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { LarkChannel } from '@larksuiteoapi/node-sdk';
 import {
+  extractCardText,
   extractMessageText,
   fetchQuotedMessage,
   fetchThreadContext,
@@ -52,11 +53,68 @@ describe('extractMessageText', () => {
     expect(extractMessageText('audio', JSON.stringify({}))).toBe('[语音]');
   });
 
+  it('reads a card body (interactive) from its down-converted message.get shape', () => {
+    // schema-1.0 cards survive in full: title + body + note + button
+    const full = JSON.stringify({
+      title: '部署清单',
+      elements: [
+        [{ tag: 'text', text: '环境' }, { tag: 'text', text: '：生产' }],
+        [{ tag: 'note', elements: [{ tag: 'text', text: '低峰期执行' }] }],
+        [{ tag: 'button', text: '确认', type: 'primary' }],
+      ],
+    });
+    expect(extractMessageText('interactive', full)).toBe('部署清单\n环境：生产\n低峰期执行\n[按钮：确认]');
+  });
+
+  it('keeps only the title for a schema-2.0 card (body is the client-upgrade nag)', () => {
+    // Feishu replaces an un-down-convertible 2.0/CardKit body with a placeholder.
+    const degraded = JSON.stringify({
+      title: '部署清单 v3',
+      elements: [[{ tag: 'img', image_key: 'x' }, { tag: 'text', text: '请升级至最新版本客户端，以查看内容' }, { tag: 'text', text: '' }]],
+    });
+    expect(extractMessageText('interactive', degraded)).toBe('部署清单 v3');
+  });
+
+  it('falls back to [卡片消息] when a card has no readable text at all', () => {
+    const blank = JSON.stringify({ elements: [[{ tag: 'img', image_key: 'x' }]] });
+    expect(extractMessageText('interactive', blank)).toBe('[卡片消息]');
+  });
+
   it('falls back to a placeholder on missing / bad JSON / unknown type', () => {
     expect(extractMessageText('text', undefined)).toBe('[text 消息]');
     expect(extractMessageText('text', 'not json')).toBe('[text 消息]');
     expect(extractMessageText('whatever', JSON.stringify({}))).toBe('[whatever 消息]');
     expect(extractMessageText(undefined, undefined)).toBe('[消息]');
+  });
+});
+
+describe('extractCardText', () => {
+  it('joins title + each readable line, resolving @at and link text', () => {
+    const card = {
+      title: '发布通知',
+      elements: [
+        [{ tag: 'text', text: '请' }, { tag: 'at', user_name: '张三' }, { tag: 'text', text: ' 审批' }],
+        [{ tag: 'a', text: '查看文档', href: 'http://x' }],
+        [{ tag: 'a', href: 'http://only-href' }],
+      ],
+    };
+    expect(extractCardText(card)).toBe('发布通知\n请@张三 审批\n查看文档\nhttp://only-href');
+  });
+
+  it('reads text objects ({tag, content}) as well as bare strings', () => {
+    const card = { title: { tag: 'plain_text', content: '标题' }, elements: [[{ tag: 'text', text: { content: '正文' } }]] };
+    expect(extractCardText(card)).toBe('标题\n正文');
+  });
+
+  it('drops the client-upgrade placeholder line but keeps the title', () => {
+    const card = { title: 'T', elements: [[{ tag: 'text', text: '请升级至最新版本客户端，以查看内容' }]] };
+    expect(extractCardText(card)).toBe('T');
+  });
+
+  it('returns "" for a non-card / empty value (caller falls back)', () => {
+    expect(extractCardText({})).toBe('');
+    expect(extractCardText(null)).toBe('');
+    expect(extractCardText('nope')).toBe('');
   });
 });
 

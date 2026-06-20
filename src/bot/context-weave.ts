@@ -206,7 +206,7 @@ export function extractMessageText(
     case 'sticker':
       return '[表情]';
     case 'interactive':
-      return '[卡片消息]';
+      return extractCardText(parsed) || '[卡片消息]';
     case 'share_chat':
       return '[分享群名片]';
     case 'share_user':
@@ -271,6 +271,82 @@ function nodeToText(node: unknown): string {
       return '[表情]';
     default:
       return typeof n.text === 'string' ? n.text : '';
+  }
+}
+
+/**
+ * The placeholder Feishu injects into a card's down-converted `message.get` body
+ * when the card (schema 2.0 / CardKit) can't be rendered into the legacy post
+ * shape — only the `title` survives, the body collapses to this client-upgrade
+ * nag. Dropped so the woven context isn't polluted by it (it isn't card content).
+ */
+const CARD_UPGRADE_HINT = '请升级至最新版本客户端';
+
+/**
+ * Extract human-readable text from an `interactive` (card) message body.
+ *
+ * Feishu's `im.v1.message.get` NEVER returns a card's source JSON — it returns a
+ * down-converted, post-like shape `{title, elements:[[node,…],…]}` (verified
+ * against the live API). For legacy (schema 1.0) cards the full body text
+ * survives there; for schema 2.0 / CardKit cards (incl. the bridge's own) only
+ * the `title` does, the body replaced by {@link CARD_UPGRADE_HINT} (dropped).
+ * Returns '' when nothing readable remains (caller falls back to [卡片消息]).
+ * Exported for testing — the body shapes are the bug-prone part.
+ */
+export function extractCardText(parsed: unknown): string {
+  if (!parsed || typeof parsed !== 'object') return '';
+  const obj = parsed as Record<string, unknown>;
+  const parts: string[] = [];
+  const title = textValue(obj.title);
+  if (title.trim()) parts.push(title.trim());
+  if (Array.isArray(obj.elements)) {
+    for (const line of obj.elements) {
+      const nodes = Array.isArray(line) ? line : [line];
+      const lineText = nodes.map(cardNodeToText).join('').trim();
+      if (lineText && !lineText.includes(CARD_UPGRADE_HINT)) parts.push(lineText);
+    }
+  }
+  return parts.join('\n').trim();
+}
+
+/** Read a node's text field across the shapes the card down-convert uses: a bare
+ * string (schema-1.0 button), or a `{tag, content}` text object (plain_text /
+ * lark_md). */
+function textValue(t: unknown): string {
+  if (typeof t === 'string') return t;
+  if (t && typeof t === 'object') {
+    const c = (t as { content?: unknown }).content;
+    if (typeof c === 'string') return c;
+  }
+  return '';
+}
+
+/** One node of a down-converted card line → text. Covers the tags the message.get
+ * shape emits (text / a / at / note / button / img); unknown tags fall back to
+ * their `text` field so future shapes degrade gracefully rather than vanish. */
+function cardNodeToText(node: unknown): string {
+  if (typeof node === 'string') return node;
+  if (!node || typeof node !== 'object') return '';
+  const n = node as Record<string, unknown>;
+  switch (n.tag) {
+    case 'text':
+      return textValue(n.text);
+    case 'a':
+      return textValue(n.text) || (typeof n.href === 'string' ? n.href : '');
+    case 'at': {
+      const name = typeof n.user_name === 'string' ? n.user_name : '';
+      return name ? `@${name}` : '@某人';
+    }
+    case 'note':
+      return Array.isArray(n.elements) ? n.elements.map(cardNodeToText).join('') : '';
+    case 'button': {
+      const label = textValue(n.text);
+      return label ? `[按钮：${label}]` : '';
+    }
+    case 'img':
+      return '';
+    default:
+      return textValue(n.text);
   }
 }
 
