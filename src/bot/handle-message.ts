@@ -148,6 +148,7 @@ import { refreshBranch } from '../project/announcement';
 import { leaveChat, transferOwnership } from '../project/group-ops';
 import { getSession, listSessions, patchSession, upsertSession, type SessionRecord } from './session-store';
 import { handleDmConsole } from './dm-console';
+import { fetchInteractiveCardText, isDegradedCardContent } from './card-content';
 import {
   collectInboundFiles,
   collectInboundImages,
@@ -705,6 +706,19 @@ export function createOrchestrator(
           .catch(() => undefined);
       }
       return;
+    }
+
+    // 多维表格「发送消息卡片」等 card 2.0 交互卡片：推送事件 / 旧版 content 只给降级
+    // 占位（SDK 归一化成 "[interactive card]"，或「请升级至最新版本客户端…」），真正的
+    // 卡片正文（含 Base 记录链接）要带 card_msg_content_type=raw_card_content 回查才拿得
+    // 到。命中降级时回查并把正文塞回 msg.content，让 codex 读到「请处理这条记录
+    // [查看…](base链接)」并据此（配合 lark-cli skill）继续处理。
+    if (msg.rawContentType === 'interactive' && isDegradedCardContent(msg.content)) {
+      const full = await fetchInteractiveCardText(channel, msg.messageId);
+      if (full) {
+        log.info('intake', 'card-content-enriched', { msgId: msg.messageId, len: full.length });
+        msg.content = full;
+      }
     }
 
     const text = msg.content.trim();
