@@ -2030,6 +2030,9 @@ export function createOrchestrator(
       codexOk: codexProbe.ok,
       codexVer: codexProbe.version,
       conn: channel.getConnectionStatus?.()?.state ?? 'unknown',
+      // 复用上面 validateAppCredentials 的返回（bot/v3/info），不额外发请求；
+      // scopeCheck 没换成 token → undefined，卡片降级显示「未能获取」。
+      botOpenId: scopeCheck?.botOpenId,
       bridgeVer: bridgeVersion(),
       node: process.version,
       platform: `${process.platform}-${process.arch}`,

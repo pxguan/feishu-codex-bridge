@@ -297,6 +297,12 @@ export interface DoctorInfo {
   codexVer: string | null;
   /** Feishu long-connection state (channel.getConnectionStatus().state) */
   conn: string;
+  /**
+   * 机器人自身的 open_id（`ou_…`，来自 bot/v3/info）。运行时用凭据换 token 现查，
+   * 没换成（凭据失效 / 网络不通）→ undefined，卡片显示「未能获取」而非空字段；
+   * 拿不到不算硬故障，不会把 header 升橙。
+   */
+  botOpenId?: string;
   /** the bridge's own version */
   bridgeVer: string;
   /** process.version */
@@ -519,6 +525,7 @@ export function buildDoctorCard(i: DoctorInfo): CardObject {
         `- Codex：${i.codexOk ? `✅ 可用${i.codexVer ? `（${i.codexVer}）` : ''}` : '❌ 不可用（检查 CODEX_BIN / PATH）'}`,
       ),
       md(`- 飞书长连接：${connLabel(i.conn)}`),
+      md(`- 机器人 open_id：${i.botOpenId ? `\`${i.botOpenId}\`` : '⚠️ 未能获取（凭据失效或网络不通）'}`),
       ...scopeDiagnosis(i),
       ...eventSubscriptionDiagnosis(i),
       note(`bridge v${i.bridgeVer}　·　Node ${i.node}　·　${i.platform}`),

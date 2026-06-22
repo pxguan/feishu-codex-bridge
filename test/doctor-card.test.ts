@@ -55,6 +55,21 @@ describe('buildDoctorCard', () => {
     expect(json).toContain('darwin-arm64');
   });
 
+  it('shows the bot open_id as copy-friendly code when known', () => {
+    const json = JSON.stringify(buildDoctorCard(info({ botOpenId: 'ou_abc123' })));
+    expect(json).toContain('机器人 open_id');
+    expect(json).toContain('`ou_abc123`'); // backticked so 飞书 renders it click-to-copy
+  });
+
+  it('says 未能获取 (stays blue) when the bot open_id could not be resolved', () => {
+    const card = buildDoctorCard(info({ botOpenId: undefined }));
+    const json = JSON.stringify(card);
+    expect(json).toContain('机器人 open_id');
+    expect(json).toContain('未能获取');
+    // open_id 拿不到不是硬故障 → header 保持蓝
+    expect((card as { header: { template: string } }).header.template).toBe('blue');
+  });
+
   it('shows both daemon log paths and the foreground hint', () => {
     const json = JSON.stringify(buildDoctorCard(info()));
     expect(json).toContain('/Users/me/.feishu-codex-bridge/service.log');
