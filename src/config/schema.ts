@@ -261,7 +261,7 @@ export interface CliBridgePreferences {
     enabled?: boolean;
     /** 是否允许在飞书回复完成卡以续聊（Stop 续聊）。默认 true。 */
     replyEnabled?: boolean;
-    /** 等待续聊回复的超时（秒），其间可被本机回归打断。默认 600（10 分钟）。 */
+    /** 等待续聊回复的超时（秒），其间可被本机回归打断。默认 1800（30 分钟）。 */
     replyTimeoutSeconds?: number;
   };
   /** “本会话放行”（Allow this session）缓存配置。 */
@@ -344,7 +344,7 @@ export function getCliBridgePreferences(cfg: AppConfig): ResolvedCliBridgePrefer
     taskCompletion: {
       enabled: boolOr(raw?.taskCompletion?.enabled, true),
       replyEnabled: boolOr(raw?.taskCompletion?.replyEnabled, true),
-      replyTimeoutSeconds: secondsOr(raw?.taskCompletion?.replyTimeoutSeconds, 600, 1, 86400),
+      replyTimeoutSeconds: secondsOr(raw?.taskCompletion?.replyTimeoutSeconds, 1800, 1, 86400),
     },
     allowCache: {
       enabled: boolOr(raw?.allowCache?.enabled, true),

@@ -24,7 +24,7 @@ describe('cli bridge config helpers', () => {
       notifyScope: 'all',
       keepAwake: { enabled: true },
       approval: { enabled: true, timeoutSeconds: 86400 },
-      taskCompletion: { enabled: true, replyEnabled: true, replyTimeoutSeconds: 600 },
+      taskCompletion: { enabled: true, replyEnabled: true, replyTimeoutSeconds: 1800 },
       allowCache: { enabled: true, scope: 'session' },
       presence: { enabled: true, platform: 'auto', idleThresholdSeconds: 120 },
     });
@@ -60,7 +60,7 @@ describe('cli bridge config helpers', () => {
     expect(prefs.delivery).toBe('away_only');
     expect(prefs.agents).toEqual({ claude: false, codex: false });
     expect(prefs.approval.timeoutSeconds).toBe(86400);
-    expect(prefs.taskCompletion.replyTimeoutSeconds).toBe(600);
+    expect(prefs.taskCompletion.replyTimeoutSeconds).toBe(1800);
     expect(prefs.presence.platform).toBe('auto');
     expect(prefs.presence.idleThresholdSeconds).toBe(10);
   });
