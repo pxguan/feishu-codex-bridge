@@ -271,6 +271,15 @@ export interface CliBridgePreferences {
     /** 缓存粒度，目前仅支持 'session'（整个会话）。 */
     scope?: 'session';
   };
+  /** 对话完成同步（Stop hook）配置。
+   *  本机 Claude/Codex 每次对话完成(Stop)时，叠加发一张卡（绕过 away，所有完成都发）：
+   *  cwd 未绑定项目 → owner 私聊发「➕ 新建项目」卡（预填 cwd+basename）；
+   *  cwd 已绑定项目 → 在绑定群里自动开新话题(multi)发完成总结 / single 群发普通完成总结。
+   *  与现有「完成卡+续聊」叠加。每次都发（含续聊每轮），高频任务会刷屏——可关此开关。 */
+  completionSync?: {
+    /** 是否启用对话完成同步。默认 true。 */
+    enabled?: boolean;
+  };
   /** 本机在场检测，用于 away_only 模式判定是否“离开”。 */
   presence?: {
     /** 是否启用在场检测。默认 true；为 false 时 away_only 下不转发。 */
@@ -304,6 +313,9 @@ export interface ResolvedCliBridgePreferences {
   allowCache: {
     enabled: boolean;
     scope: 'session';
+  };
+  completionSync: {
+    enabled: boolean;
   };
   presence: {
     enabled: boolean;
@@ -349,6 +361,9 @@ export function getCliBridgePreferences(cfg: AppConfig): ResolvedCliBridgePrefer
     allowCache: {
       enabled: boolOr(raw?.allowCache?.enabled, true),
       scope: 'session',
+    },
+    completionSync: {
+      enabled: boolOr(raw?.completionSync?.enabled, true),
     },
     presence: {
       enabled: boolOr(raw?.presence?.enabled, true),

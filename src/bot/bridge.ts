@@ -2,10 +2,14 @@ import { createLarkChannel, Domain, type LarkChannel } from '@larksuiteoapi/node
 import type { AdminWriteOp } from '../admin/ops';
 import type { AppConfig } from '../config/schema';
 import { log } from '../core/logger';
-import { sep } from 'node:path';
+import { basename, sep } from 'node:path';
 import { createOrchestrator } from './handle-message';
 import { paths } from '../config/paths';
 import { listProjects } from '../project/registry';
+import { createProject } from '../project/lifecycle';
+import { resolveOwner } from '../config/schema';
+import { catalogByFamily } from '../agent/catalog';
+import { DEFAULT_BACKEND_ID } from '../agent/types';
 import { createCliBridgeService, shouldStartCliBridge } from '../cli-bridge';
 
 /** True when `cwd` is a registered project's working dir (or a subdir of one) —
@@ -13,11 +17,18 @@ import { createCliBridgeService, shouldStartCliBridge } from '../cli-bridge';
  *  `/a/b` and `/a/b/` compare equal; a subdir match requires a path-separator
  *  boundary so `/a/bc` never counts as inside `/a/b`. */
 async function cwdIsBoundProject(cwd: string): Promise<boolean> {
-  if (!cwd) return false;
+  return Boolean(await findProjectByCwd(cwd));
+}
+
+/** The registered project whose cwd root contains `cwd` (or equals it), or undefined.
+ *  Same trailing-slash / path-separator rules as {@link cwdIsBoundProject}; returns
+ *  the project object so completion-sync can branch on chatId/kind. */
+async function findProjectByCwd(cwd: string): Promise<{ chatId?: string; name: string; kind?: 'multi' | 'single'; cwd: string } | undefined> {
+  if (!cwd) return undefined;
   const strip = (p: string): string => p.replace(/[/\\]+$/, '');
   const target = strip(cwd);
   const projects = await listProjects().catch(() => []);
-  return projects.some((project) => {
+  return projects.find((project) => {
     const root = strip(project.cwd);
     return root.length > 0 && (target === root || target.startsWith(root + sep));
   });
@@ -81,6 +92,29 @@ export async function startBridge(opts: BridgeOptions): Promise<BridgeHandle> {
     channel,
     socketPath: paths.cliBridgeSocket,
     isBoundProject: cwdIsBoundProject,
+    findProjectByCwd,
+    // 完成同步·未绑定 cwd：自动建项目+多话题群，返回 chatId 供开话题发结果。
+    // 后端按触发它的本机 CLI 类型选；群名(=项目名)带 _claude/_codex 后缀；重名加序号。
+    createProjectForCwd: async (cwd, source) => {
+      const owner = resolveOwner(opts.cfg);
+      if (!cwd || !owner) return undefined;
+      const backend = catalogByFamily(source)[0]?.id ?? DEFAULT_BACKEND_ID;
+      const base = `${basename(cwd) || 'project'}_${source}`;
+      // 一次读注册表，内存里查重——避免每个候选名各读一次 projects.json。
+      const names = new Set((await listProjects()).map((p) => p.name));
+      let name = base;
+      let n = 2;
+      while (names.has(name)) name = `${base}-${n++}`;
+      try {
+        const project = await createProject(channel, {
+          name, ownerOpenId: owner, existingPath: cwd, kind: 'multi', mode: 'full', backend,
+        });
+        return { chatId: project.chatId, name: project.name };
+      } catch (err) {
+        log.fail('cli-bridge', err, { phase: 'auto-create-project', cwd, source, name });
+        return undefined;
+      }
+    },
   });
   const orchestrator = createOrchestrator(channel, opts.cfg, opts.fallbackCwd, cliBridge);
   channel.on('message', orchestrator.onMessage);

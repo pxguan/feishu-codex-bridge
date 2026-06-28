@@ -26,6 +26,7 @@ describe('cli bridge config helpers', () => {
       approval: { enabled: true, timeoutSeconds: 86400 },
       taskCompletion: { enabled: true, replyEnabled: true, replyTimeoutSeconds: 1800 },
       allowCache: { enabled: true, scope: 'session' },
+      completionSync: { enabled: true },
       presence: { enabled: true, platform: 'auto', idleThresholdSeconds: 120 },
     });
   });

@@ -38,3 +38,6 @@ docs/tests/
 
 # local-only working assets (scratch images, contact sheets — never published)
 docs/assets/_local/
+
+# 本机非代码产物（方案文档、一次性脚本）——见 CLAUDE.md
+.private/

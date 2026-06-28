@@ -55,7 +55,7 @@ function cfg(delivery: 'always' | 'away_only' = 'always'): AppConfig {
     accounts: { app: { id: 'app', secret: 'secret', tenant: 'feishu' } },
     preferences: {
       access: { ownerOpenId: 'ou_owner' },
-      cliBridge: { enabled: true, delivery },
+      cliBridge: { enabled: true, delivery, completionSync: { enabled: false } },
     },
   };
 }
@@ -121,7 +121,7 @@ function shortApprovalCfg(): AppConfig {
     accounts: { app: { id: 'app', secret: 'secret', tenant: 'feishu' } },
     preferences: {
       access: { ownerOpenId: 'ou_owner' },
-      cliBridge: { enabled: true, delivery: 'always', approval: { timeoutSeconds: 1 } },
+      cliBridge: { enabled: true, delivery: 'always', approval: { timeoutSeconds: 1 }, completionSync: { enabled: false } },
     },
   };
 }
@@ -206,7 +206,7 @@ describe('cli bridge service routing', () => {
     const service = createCliBridgeService({
       cfg: {
         accounts: { app: { id: 'app', secret: 'secret', tenant: 'feishu' } },
-        preferences: { access: { ownerOpenId: 'ou_owner' }, cliBridge: { enabled: true, delivery: 'always', taskCompletion: { enabled: false } } },
+        preferences: { access: { ownerOpenId: 'ou_owner' }, cliBridge: { enabled: true, delivery: 'always', taskCompletion: { enabled: false }, completionSync: { enabled: false } } },
       },
       channel: { send: async () => ({ messageId: 'm' }) } as never,
       socketPath: '/tmp/unused',

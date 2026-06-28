@@ -115,7 +115,7 @@ function metaLine(source: CliBridgeAgent, cwd: string, extra?: string): CardElem
 /** Cap free-form agent text (a full final answer or a long command) so it can't
  *  blow past Feishu's card size limit (~30KB) and make sendManagedCard throw —
  *  which would drop the whole notification and fall back local. */
-function clip(text: string, max = 3000): string {
+export function clip(text: string, max = 3000): string {
   return text.length > max ? text.slice(0, max) + '\n…（已截断 / truncated）' : text;
 }
 
@@ -220,6 +220,16 @@ export function buildCliBridgeAwayNoticeCard(input: { source: CliBridgeAgent; cw
       md(`📂 **当前项目**\n${input.cwd || 'unknown'}`),
       note(pickCopy(COPY.footerAway, k)),
     ],
+    { forward: false },
+  );
+}
+
+/** Minimal one-shot notice card (title + body text), no buttons. Used as the
+ *  owner-DM fallback when completion-sync's auto-create-group path fails — so the
+ *  task result is still delivered somewhere, just not in an auto-created group. */
+export function buildCliBridgeNoticeCard(input: { source: CliBridgeAgent; cwd: string; title: string; body: string }): CardObject {
+  return card(
+    [titleEl(input.title), metaLine(input.source, input.cwd), md(clip(input.body))],
     { forward: false },
   );
 }

@@ -4,7 +4,7 @@ import { getCliBridgePreferences, resolveCliBridgeTarget, type AppConfig } from 
 import { log } from '../core/logger';
 import { sendManagedCard, updateManagedCard } from '../card/managed';
 import { startCliBridgeIpcServer, type CliBridgeIpcServer } from './ipc';
-import { buildCliBridgeApprovalCard, buildCliBridgeAwayNoticeCard, buildCliBridgeQuestionCard, buildCliBridgeTaskCompletionCard, CLI, questionChoiceField, questionCustomField } from './cards';
+import { buildCliBridgeApprovalCard, buildCliBridgeAwayNoticeCard, buildCliBridgeNoticeCard, buildCliBridgeQuestionCard, buildCliBridgeTaskCompletionCard, clip, CLI, questionChoiceField, questionCustomField } from './cards';
 import { extractAskUserQuestion } from './parser';
 import {
   createPendingCliInteraction,
@@ -16,7 +16,7 @@ import {
 } from './store';
 import { resolveCliLocalActivity, resolveCliPresenceRoute, type CliPresenceRoute } from './presence';
 import { createKeepAwakeController, type KeepAwakeController } from './keep-awake';
-import type { CliHookMessage, CliHookResponse } from './types';
+import type { CliBridgeAgent, CliHookMessage, CliHookResponse } from './types';
 
 // Marks a task_completion resolved by the user clicking 等待确认: resolveAction
 // already re-rendered that card, so handleMessage's post-wait close skips it to
@@ -60,6 +60,13 @@ export function createCliBridgeService(opts: {
   isBoundProject?: (cwd: string) => boolean | Promise<boolean>;
   /** Keep-awake controller (caffeinate). Defaults to one gated on keepAwake.enabled. */
   keepAwake?: KeepAwakeController;
+  /** Resolve the registered project (if any) whose cwd root contains `cwd`.
+   *  Drives completion-sync: 未绑定 → 发新建项目卡；已绑定 → 群里开话题。
+   *  Omitted ⇒ completion-sync treats every cwd as unbound (only new-project cards). */
+  findProjectByCwd?: (cwd: string) => Promise<{ chatId?: string; name: string; kind?: 'multi' | 'single' } | undefined>;
+  /** 未绑定 cwd 完成时：自动建项目+多话题群，返回 {chatId,name} 供开话题发结果。
+   *  建群失败/后端不可用/未注入 → 返回 undefined（service 回退发 owner 私聊结果卡）。 */
+  createProjectForCwd?: (cwd: string, source: CliBridgeAgent) => Promise<{ chatId: string; name: string } | undefined>;
 }): CliBridgeService {
   let ipc: CliBridgeIpcServer | undefined;
   const allowedSessions = new Set<string>();
@@ -245,6 +252,7 @@ export function createCliBridgeService(opts: {
       return { decision: 'fallback_local', reason: 'bridge_owned_session' };
     }
     if (msg.type === 'post_tool_use') return { decision: 'allow' };
+
     const route = await presence();
     // Diagnostic: every forwarded hook arrival + how presence routed it. Lets us tell,
     // e.g., whether a Codex 续聊 result fired a 2nd Stop at all, and if so whether it was
@@ -263,6 +271,51 @@ export function createCliBridgeService(opts: {
       // This Stop is the continuation's result → drop the 🫳 Typing we put on the
       // owner's reply (no-op if there was no续聊 reply pending).
       clearReplyTypingReaction();
+      // 完成同步（fire-and-forget，绕过 away/notifyScope，所有完成都发）：与下面的
+      // 完成卡+续聊叠加。未绑定 cwd → 自动建项目+多话题群，开话题发结果（建群失败回退
+      // owner 私聊结果卡）；已绑定 → 群里开话题发完成总结。每次都发（含续聊每轮）。
+      // 放在 taskCompletion.enabled / away 门控之前，使其独立于现有完成卡开关与离开判定。
+      if (p.completionSync.enabled) {
+        void (async () => {
+          try {
+            const clipped = clip((msg.summary ?? '').trim(), 2000);
+            // 开话题发结果到指定群（multi 开话题 / single 普通消息）。auto=true 标记自动建群路径。
+            const sendGroupTopic = (chatId: string, name: string, kind: 'multi' | 'single', auto: boolean): Promise<void> => {
+              const body = `✅ **${name}** 任务完成\n\n${clipped || '（无输出摘要）'}`;
+              const openThread = kind === 'multi';
+              return opts.channel.send(chatId, { markdown: body }, { replyInThread: openThread }).then(
+                () => log.info('cli-bridge', 'completion-sync-sent', { kind: auto ? 'group_topic_auto' : 'group_topic', chatId, name, openThread }),
+                (err) => log.fail('cli-bridge', err, { phase: 'completion-sync-group-topic' }),
+              );
+            };
+            const project = await opts.findProjectByCwd?.(msg.cwd);
+            // 未绑定 → 自动建项目+多话题群，开话题发结果。
+            if (!project) {
+              const created = await opts.createProjectForCwd?.(msg.cwd, msg.source);
+              if (created?.chatId) {
+                await sendGroupTopic(created.chatId, created.name, 'multi', true);
+                return;
+              }
+              // 建群失败/未注入 → 回退发 owner 私聊结果卡（确保结果可见）。
+              const target = resolveCliBridgeTarget(opts.cfg);
+              if (!target) return;
+              await sendOwnerCard(target, buildCliBridgeNoticeCard({
+                source: msg.source, cwd: msg.cwd, title: '任务完成（未建群）',
+                body: clipped || '（无输出摘要）',
+              })).then(
+                () => log.info('cli-bridge', 'completion-sync-sent', { kind: 'dm_fallback', cwd: msg.cwd }),
+                (err) => log.fail('cli-bridge', err, { phase: 'completion-sync-dm-fallback' }),
+              );
+              return;
+            }
+            // 已绑定但无群（空白项目）→ 无处开话题，跳过。
+            if (!project.chatId) return;
+            await sendGroupTopic(project.chatId, project.name, project.kind ?? 'multi', false);
+          } catch (err) {
+            log.fail('cli-bridge', err, { phase: 'completion-sync' });
+          }
+        })();
+      }
       // NB: 不因 stop_hook_active 提前 return。stop_hook_active=true 正是“用户从飞书回复→
       // 续聊”之后的那次 Stop——它的结果必须再发回飞书并再开一轮回复窗口，否则多轮对话在
       // 第一次回复后就断了（结果只留在终端）。不会死循环：本桥只在用户显式回复时才回

@@ -28,6 +28,24 @@ describe('cli bridge hook installer', () => {
     expect(settings.hooks.PermissionRequest[0].hooks[0].timeout).toBe(86400);
   });
 
+  it('does NOT install a SessionStart hook (completion-sync uses Stop, not SessionStart)', async () => {
+    const h = await home();
+    await installCliBridgeHooks({ homeDir: h, agents: { claude: true, codex: true }, command: 'feishu-codex-bridge hook' });
+
+    const claude = JSON.parse(await readFile(join(h, '.claude', 'settings.json'), 'utf8'));
+    expect(claude.hooks.SessionStart ?? []).toEqual([]);
+    expect(claude.hooks.PermissionRequest[0].hooks[0].command).toContain('--agent claude');
+    expect(claude.hooks.Stop[0].hooks[0].command).toContain('--agent claude');
+
+    const codex = JSON.parse(await readFile(join(h, '.codex', 'hooks.json'), 'utf8'));
+    expect(codex.hooks.SessionStart ?? []).toEqual([]);
+    expect(codex.hooks.Stop[0].hooks[0].command).toContain('--agent codex');
+
+    const status = await inspectCliBridgeHooks({ homeDir: h });
+    expect(status.claude.status).toBe('installed');
+    expect(status.codex.status).toBe('installed');
+  });
+
   it('detects an installed hook written in the absolute node+script command form', async () => {
     const h = await home();
     const { resolveBridgeHookCommand } = await import('../src/cli-bridge/hooks');
