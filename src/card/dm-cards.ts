@@ -656,15 +656,27 @@ export function buildNewProjectDoneCard(p: Project): CardObject {
  * active project stays well under this with a generous cap + "+N more" tail. */
 const PROJECT_TOPICS_MAX = 50;
 
-/** Project list — a SLIM overview: one summary line per project + a row of
- * actions (the 🧵 button drills into that project's topics). Topics are NOT
+/** Projects per page in the overview. Feishu counts NESTED components against
+ * its ~200-element cap (error 300305 "element exceeds the limit", which the
+ * platform silently DROPS — no error card), and each project's action row of up
+ * to 4 buttons expands to ~13 components (column_set + a column/button/plain_text
+ * per button) — so a project costs ~17 components, NOT the ~4 visible elements.
+ * Measured against the real 39-project store: a page of 12 = 214 components
+ * (still over, still dropped); a page of 8 = ~146, comfortably under (a known-OK
+ * 50-row topics card sits near ~150). Keep this ≤ ~8 unless the row slims down. */
+const PROJECT_LIST_PAGE_SIZE = 8;
+
+/** Project list — a SLIM, PAGED overview: one summary line per project + a row
+ * of actions (the 🧵 button drills into that project's topics). Topics are NOT
  * listed inline: an active group accumulates dozens, and rendering them all
  * pushed the whole card past Feishu's ~200-component cap (→ silent overflow).
- * The overview's size now scales with the project COUNT only, so it fits ~10+
- * projects comfortably; topics live in {@link buildProjectTopicsCard}. */
+ * `page` (0-indexed) is clamped to a valid page, so a stale 下一页 click or a
+ * list that shrank after a delete never lands on an empty page; topics live in
+ * {@link buildProjectTopicsCard}. */
 export function buildProjectListCard(
   projects: Project[],
   sessionsByChat: Map<string, SessionRecord[]> = new Map(),
+  page = 0,
 ): CardObject {
   if (projects.length === 0) {
     return card(
@@ -672,8 +684,11 @@ export function buildProjectListCard(
       { header: { title: '📁 项目列表', template: 'wathet' } },
     );
   }
+  const pageCount = Math.ceil(projects.length / PROJECT_LIST_PAGE_SIZE);
+  const cur = Math.min(Math.max(Math.trunc(page) || 0, 0), pageCount - 1);
+  const start = cur * PROJECT_LIST_PAGE_SIZE;
   const elements: CardObject[] = [];
-  for (const p of projects) {
+  for (const p of projects.slice(start, start + PROJECT_LIST_PAGE_SIZE)) {
     const topicCount = (p.chatId ? sessionsByChat.get(p.chatId) : undefined)?.length ?? 0;
     const dir = `📂 \`${p.cwd}\`${p.branch && p.branch !== '—' ? `   🌿 ${p.branch}` : ''}`;
     const meta = p.chatId
@@ -689,8 +704,14 @@ export function buildProjectListCard(
     elements.push(actions(row));
     elements.push(hr());
   }
-  elements.push(note(`共 ${projects.length} 个项目`));
-  elements.push(actions([button('⬅️ 菜单', { a: DM.menu })]));
+  elements.push(
+    note(pageCount > 1 ? `共 ${projects.length} 个项目 · 第 ${cur + 1}/${pageCount} 页` : `共 ${projects.length} 个项目`),
+  );
+  const nav: CardObject[] = [];
+  if (cur > 0) nav.push(button('⬅️ 上一页', { a: DM.projects, p: cur - 1 }));
+  if (cur < pageCount - 1) nav.push(button('下一页 ➡️', { a: DM.projects, p: cur + 1 }));
+  nav.push(button('⬅️ 菜单', { a: DM.menu }));
+  elements.push(actions(nav));
   return card(elements, { header: { title: '📁 项目列表', template: 'wathet' } });
 }
 

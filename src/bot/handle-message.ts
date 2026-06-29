@@ -2001,7 +2001,7 @@ export function createOrchestrator(
 
   // Build the project list card with each project's topics (sessions) grouped
   // by chatId, most-recent first — shared by the list/cancel/delete handlers.
-  const renderProjectList = async (): Promise<object> => {
+  const renderProjectList = async (page = 0): Promise<object> => {
     const [projects, sessions] = await Promise.all([listProjects(), listSessions()]);
     const byChat = new Map<string, SessionRecord[]>();
     for (const s of sessions) {
@@ -2009,7 +2009,7 @@ export function createOrchestrator(
       if (arr) arr.push(s);
       else byChat.set(s.chatId, [s]);
     }
-    return buildProjectListCard(projects, byChat);
+    return buildProjectListCard(projects, byChat, page);
   };
 
   // 体检数据收集（codex 探测 + 飞书 scope 自检）：DM.doctor 与私聊菜单 dm.doctor
@@ -2123,9 +2123,10 @@ export function createOrchestrator(
         );
       })();
     })
-    .on(DM.projects, ({ evt }) => {
+    .on(DM.projects, ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
-      patch(evt, renderProjectList);
+      const page = typeof value.p === 'number' ? value.p : Number(value.p) || 0;
+      patch(evt, () => renderProjectList(page));
     })
     .on(DM.settings, async ({ evt }) => {
       // Opening 设置 is the moment to re-read hook install status from disk.
