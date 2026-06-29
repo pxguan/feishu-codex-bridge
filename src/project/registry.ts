@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import { paths } from '../config/paths';
-import type { PermissionMode } from '../agent/types';
+import type { PermissionMode, ReasoningEffort } from '../agent/types';
 
 /** A project = a Feishu group bound to a fixed working directory. */
 export interface Project {
@@ -57,6 +57,15 @@ export interface Project {
    * validateBackendSwitch）；只影响新话题——已有话题会话按 SessionRecord.backend
    * 仍走原后端. */
   backend?: string;
+  /** 本项目**新话题**的默认模型 id。优先级在 per-session `/model` 覆盖之下、后端自带
+   * 默认之上。跟项目 backend 走（创建时固定）；读取时经 {@link pickDefault} 对后端的
+   * **实时**模型列表校验——不在列表里（改了后端 / 模型下架）即忽略、回落后端 isDefault，
+   * 所以默认值自愈、永不把坏 id 喂给 CLI。只影响新会话，不动进行中 / 已 resume 的会话。
+   * 在 DM 项目设置卡（或群 /settings 镜像）里设；仅管理员可改。 */
+  defaultModel?: string;
+  /** 本项目新话题的默认推理强度。仅当所选 {@link defaultModel} 支持该 effort 时生效，
+   * 否则回落该模型的 defaultEffort（claude 等不调 effort 的后端忽略）。 */
+  defaultEffort?: ReasoningEffort;
 }
 
 /**
