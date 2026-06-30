@@ -247,9 +247,22 @@ describe('cli bridge cards', () => {
     expect(json).toContain('truncated');
   });
 
-  it('inlines the local agents section into the global settings card (no sub-page)', async () => {
-    const { buildSettingsCard } = await import('../src/card/dm-cards');
+  it('puts the local-agents controls on a ☕ 咖啡一下 sub-card reached via the settings entry', async () => {
+    const { buildSettingsCard, buildCoffeeSettingsCard, DM } = await import('../src/card/dm-cards');
     const { cliBridgeSettingsSection } = await import('../src/cli-bridge/cards');
+    // Global settings card: an ENTRY into the sub-card, not the inlined controls.
+    const main = JSON.stringify(buildSettingsCard({
+      accounts: { app: { id: 'app', secret: 'secret', tenant: 'feishu' } },
+      preferences: { access: { ownerOpenId: 'ou_owner' } },
+    }));
+    expect(main).toContain('全局设置');
+    expect(main).toContain('☕ 咖啡一下'); // the entry section heading
+    expect(main).toContain(DM.coffeeSettings); // entry button action → sub-card
+    expect(main).not.toContain('咖啡一下：开'); // the master toggle is NOT on the main card anymore
+    expect(main).not.toContain('📣 通知范围'); // nor the rest of the controls
+    // Comment entry now spells out supported doc types + what's configurable.
+    expect(main).toContain('多维表格');
+    // Sub-card: the actual controls + a back button to the settings card.
     const section = cliBridgeSettingsSection({
       enabled: true,
       statuses,
@@ -258,13 +271,10 @@ describe('cli bridge cards', () => {
       agents: { claude: true, codex: true },
       keepAwake: true,
     });
-    const json = JSON.stringify(buildSettingsCard({
-      accounts: { app: { id: 'app', secret: 'secret', tenant: 'feishu' } },
-      preferences: { access: { ownerOpenId: 'ou_owner' } },
-    }, section));
-    // One card: the global settings header plus the inlined 咖啡一下 controls.
-    expect(json).toContain('全局设置');
-    expect(json).toContain('☕ 咖啡一下');
-    expect(json).toContain('咖啡一下：开');
+    const sub = JSON.stringify(buildCoffeeSettingsCard(section));
+    expect(sub).toContain('☕ 咖啡一下'); // header
+    expect(sub).toContain('咖啡一下：开'); // master toggle
+    expect(sub).toContain('📣 通知范围'); // moved here
+    expect(sub).toContain(DM.settings); // ⬅️ back to the settings card
   });
 });

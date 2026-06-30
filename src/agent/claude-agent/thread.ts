@@ -1,4 +1,4 @@
-import type { Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { Options, Query, SDKMessage, SDKUserMessage, SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import { log } from '../../core/logger';
 import type {
   AgentEvent,
@@ -24,6 +24,16 @@ export interface ClaudeThreadConfig {
   permission: ClaudePermissionOptions;
   /** appended to Claude Code's default system prompt (bridge developer guidance). */
   systemPromptAppend?: string;
+  /** Which filesystem settings the SDK loads. The SDK default is none — so
+   * project/user CLAUDE.md, skills and `.claude/settings.json` are NOT read
+   * unless set. The backend passes ['user','project'] to make a claude session
+   * behave like Claude Code in its cwd (read CLAUDE.md + user skills). */
+  settingSources?: SettingSource[];
+  /** Env for the SDK's spawned CLI subprocess. NOTE: the SDK does NOT merge this
+   * with process.env — callers must spread it themselves. The backend passes
+   * `{ ...process.env, FEISHU_CODEX_BRIDGE: '1' }` so inherited cli-bridge hooks
+   * recognize a bridge-owned session and don't self-forward (matches codex). */
+  env?: Record<string, string>;
   /** the SDK's `query()` function, injected by the backend (lazy-loaded via
    * loadBackendDep) so thread.ts carries no static runtime dep on the SDK —
    * the on-demand package can be absent until downloaded. */
@@ -180,6 +190,8 @@ export class ClaudeAgentThread implements AgentThread {
       ...(cfg.systemPromptAppend
         ? { systemPrompt: { type: 'preset', preset: 'claude_code', append: cfg.systemPromptAppend } }
         : {}),
+      ...(cfg.settingSources ? { settingSources: cfg.settingSources } : {}),
+      ...(cfg.env ? { env: cfg.env } : {}),
       // permission tier (permissionMode / sandbox / canUseTool / disallowedTools)
       ...cfg.permission,
       stderr: (d: string) => {

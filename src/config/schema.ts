@@ -1,3 +1,5 @@
+import type { ReasoningEffort } from '../agent/types';
+
 export type TenantBrand = 'feishu' | 'lark';
 
 /**
@@ -87,6 +89,25 @@ export interface AppPreferences {
   agentStopGraceMs?: number;
   /** local Claude Code / Codex CLI bridge — see {@link CliBridgePreferences}. */
   cliBridge?: CliBridgePreferences;
+  /** 云文档评论 @bot 流的全局配置（评论链统一用这套，不按项目/文档分）。
+   * 缺省时后端回落默认 codex、模型/推理强度回落后端默认（见 {@link getCommentsConfig}）。
+   * 自定义提示词不在这里——它落在每 bot 的 `comment-instructions.md` 文件里，由桥同步进
+   * 每个文档的评论工作目录（AGENTS.md / CLAUDE.md），见 bot/comments.ts。 */
+  comments?: CommentsConfig;
+}
+
+/**
+ * 云文档评论流的全局可配项。仅三个短标量（后端 / 模型 / 推理强度），都可空——
+ * 空即回落后端默认。提示词刻意不放这里（多行长文本不适合塞 config.json），而是
+ * 用磁盘上的 `comment-instructions.md`，让用户像编辑 AGENTS.md 一样直接改。
+ */
+export interface CommentsConfig {
+  /** 评论流新会话用的后端 id（如 'codex-appserver' / 'claude-agent'）。缺省 → DEFAULT_BACKEND_ID。 */
+  backend?: string;
+  /** 评论流新会话的默认模型 id。缺省 → 后端默认模型。 */
+  model?: string;
+  /** 评论流新会话的默认推理强度。缺省 → 模型默认。 */
+  effort?: ReasoningEffort;
 }
 
 export interface AppConfig {
@@ -369,4 +390,10 @@ export function resolveCliBridgeTarget(
 /** Whether the CLI bridge master switch can be enabled (needs a bot owner). */
 export function canEnableCliBridge(cfg: AppConfig): { ok: true } | { ok: false; reason: 'missing_owner' } {
   return resolveCliBridgeTarget(cfg) ? { ok: true } : { ok: false, reason: 'missing_owner' };
+}
+
+/** 云文档评论流的全局配置（每个字段都可空，消费侧自带回落）。缺字段不崩——
+ * loadConfig 返回 Partial 时这里返回空对象。 */
+export function getCommentsConfig(cfg: AppConfig): CommentsConfig {
+  return cfg.preferences?.comments ?? {};
 }

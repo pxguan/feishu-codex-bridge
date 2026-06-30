@@ -27,6 +27,7 @@ import {
   getModelDisplay,
   getRunIdleTimeoutMs,
   getShowToolCalls,
+  getCommentsConfig,
   isAdmin,
   isChatAllowed,
   isUserAllowedInProject,
@@ -39,6 +40,7 @@ import {
   type AppAccess,
   type AppConfig,
   type AppPreferences,
+  type CommentsConfig,
   type PendingPolicy,
 } from '../config/schema';
 import { saveConfig } from '../config/store';
@@ -85,6 +87,8 @@ import {
   buildAddAdminCard,
   buildAddAllowedCard,
   buildAdminsCard,
+  buildCommentPromptCard,
+  buildCommentSettingsCard,
   buildAllowlistCard,
   buildDmMenuCard,
   buildDoctorCard,
@@ -99,6 +103,7 @@ import {
   buildProjectSettingsCard,
   buildReconnectCard,
   buildRmConfirmCard,
+  buildCoffeeSettingsCard,
   buildSettingsCard,
   buildUpdateCard,
   buildWatchdogCustomCard,
@@ -171,12 +176,20 @@ import {
 import {
   addCommentReaction,
   buildCommentPrompt,
+  commentCwd,
+  commentSessionKey,
+  DEFAULT_COMMENT_INSTRUCTIONS,
+  loadCommentInstructions,
   postCommentReply,
   removeCommentReaction,
+  renderCommentInstructions,
   REPLY_MAX_CHARS,
   resolveComment,
+  saveCommentInstructions,
   stripMarkdown,
   SUPPORTED_FILE_TYPES,
+  syncAllCommentInstructions,
+  syncCommentInstructions,
 } from './comments';
 import { createGracefulInterrupt, Semaphore, withIdleTimeout } from './watchdog';
 
@@ -595,6 +608,11 @@ export function createOrchestrator(
   const active = new Map<string, ActiveState>();
   /** Per-doc serialization for comment runs (see {@link withDocLock}). */
   const docLocks = new Map<string, Promise<void>>();
+  /** Comment session → the instructions content its LIVE thread was created/resumed
+   * with. A live thread reads AGENTS.md/CLAUDE.md only at start/resume, so when the
+   * user edits the master prompt mid-thread we must evict the live thread to make the
+   * edit take effect (see resolveDocThread). Cleared alongside the session. */
+  const commentInstrUsed = new Map<string, string>();
   const sema = new Semaphore(getMaxConcurrentRuns(cfg));
   // Read live per run (not frozen at startup) so the settings card's change to
   // the idle timeout applies immediately to every group/thread — no daemon
@@ -1961,14 +1979,20 @@ export function createOrchestrator(
     if (opts?.render !== false) void patch(evt, renderSettings);
   }
 
-  // 全局设置卡现在把「本地 agent」直接内联进来（不再是子页面）。hook 安装状态要读
-  // ~/.claude、~/.codex 三个文件，按需缓存：只有「打开设置」「修复 hooks」才刷新，
-  // 其余无关设置（并发、假死超时…）的 re-render 复用上次结果，免每次都 3 次 fs 读。
+  // 「☕ 咖啡一下」那组控件现在独立成二级卡（buildCoffeeSettingsCard），主设置卡只放入口。
+  // hook 安装状态要读 ~/.claude、~/.codex，按需缓存：只有进咖啡子卡 / 修复 hooks 才刷新，
+  // 切换通知范围等其它轴的 re-render 复用上次结果，免每次都 fs 读。
   let cliHookStatuses: Awaited<ReturnType<typeof inspectCliBridgeHooks>> | undefined;
-  async function renderSettings(refreshHooks = false): Promise<object> {
+  function renderSettings(): object {
+    return buildSettingsCard(cfg);
+  }
+
+  /** ☕ 咖啡一下 二级卡：本机离开转发那组控件（总开关 / 通知范围 / 转发后端 / 离开保活 /
+   *  hooks）独立渲染。进卡 / 修复 hooks 时刷新一次 hook 安装状态，其它轴的改动复用缓存。 */
+  async function renderCoffeeSettings(refreshHooks = false): Promise<object> {
     if (refreshHooks || !cliHookStatuses) cliHookStatuses = await inspectCliBridgeHooks();
     const cliPrefs = getCliBridgePreferences(cfg);
-    const localAgents = cliBridgeSettingsSection({
+    const section = cliBridgeSettingsSection({
       enabled: cliPrefs.enabled,
       statuses: cliHookStatuses,
       canEnable: canEnableCliBridge(cfg),
@@ -1976,7 +2000,38 @@ export function createOrchestrator(
       agents: cliPrefs.agents,
       keepAwake: cliPrefs.keepAwake.enabled,
     });
-    return buildSettingsCard(cfg, localAgents);
+    return buildCoffeeSettingsCard(section);
+  }
+
+  // ── 📝 云文档评论 @bot 全局设置（DM「⚙️ 设置 → 📝 云文档评论」）───────────
+  /** Installed backends offered for the comment flow (codex always; others when
+   * downloaded) — same gate as the project backend picker. */
+  function commentBackendOptions(): { id: string; label: string }[] {
+    return visibleCatalog()
+      .filter((e) => e.id === DEFAULT_BACKEND_ID || isBackendEntryInstalled(e))
+      .map((e) => ({ id: e.id, label: e.displayName }));
+  }
+
+  /** Render the comment-settings card for the CURRENT comments config: fetch the
+   * configured backend's live model list so the model/effort dropdowns match it. */
+  async function renderCommentSettings(notice?: string): Promise<object> {
+    const comments = getCommentsConfig(cfg);
+    const models = await listModels(backendFor(comments.backend)).catch(() => [] as ModelInfo[]);
+    return buildCommentSettingsCard(cfg, commentBackendOptions(), models, notice);
+  }
+
+  /** Mutate cfg.preferences.comments (admin-gated), persist, and re-render the
+   * comment-settings card in place. Mirrors {@link applyPref} but scoped to the
+   * comments block and refreshing the comment card (not the global one). */
+  function applyCommentsPref(evt: CardActionEvent, mut: (c: CommentsConfig) => void): void {
+    if (!dmAdmin(evt.operator?.openId)) return;
+    const prefs: AppPreferences = { ...(cfg.preferences ?? {}) };
+    const comments: CommentsConfig = { ...(prefs.comments ?? {}) };
+    mut(comments);
+    prefs.comments = comments;
+    cfg.preferences = prefs;
+    void saveConfig(cfg).catch((err) => log.fail('console', err, { phase: 'save-config' }));
+    void patch(evt, () => renderCommentSettings());
   }
 
   // Back-to-menu: the settings card is button-only (never locks) and the
@@ -2163,8 +2218,11 @@ export function createOrchestrator(
       patch(evt, () => renderProjectList(page));
     })
     .on(DM.settings, async ({ evt }) => {
-      // Opening 设置 is the moment to re-read hook install status from disk.
-      if (dmAdmin(evt.operator?.openId)) await patch(evt, () => renderSettings(true));
+      if (dmAdmin(evt.operator?.openId)) await patch(evt, renderSettings);
+    })
+    // ☕ 咖啡一下 二级卡：进卡时读一次 hook 安装状态（~/.claude、~/.codex）再渲染。
+    .on(DM.coffeeSettings, async ({ evt }) => {
+      if (dmAdmin(evt.operator?.openId)) await patch(evt, () => renderCoffeeSettings(true));
     })
     .on(CLI.toggleEnabled, async ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
@@ -2185,7 +2243,7 @@ export function createOrchestrator(
       } catch (err) {
         log.fail('cli-bridge', err, { phase: enabled ? 'enable' : 'disable' });
       }
-      void patch(evt, renderSettings);
+      void patch(evt, renderCoffeeSettings);
     })
     .on(CLI.repairHooks, async ({ evt }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
@@ -2202,14 +2260,17 @@ export function createOrchestrator(
         log.fail('cli-bridge', err, { phase: 'repair-hooks' });
       }
       // Just wrote the hook files — force a fresh inspect so the status reflects it.
-      await patch(evt, () => renderSettings(true));
+      await patch(evt, () => renderCoffeeSettings(true));
     })
+    // 这三个轴属于咖啡子卡：applyPref 落盘但不渲染（{render:false}），改由我们 patch 回
+    // 咖啡子卡（renderSettings 现在只渲主卡入口，会把用户踢出子卡）。
     .on(CLI.setNotifyScope, ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
       const scope = value.v === 'bound_projects' || value.v === 'none' ? value.v : 'all';
       applyPref(evt, (p) => {
         p.cliBridge = { ...(p.cliBridge ?? {}), notifyScope: scope };
-      });
+      }, { render: false });
+      void patch(evt, renderCoffeeSettings);
     })
     .on(CLI.toggleAgent, ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
@@ -2218,7 +2279,8 @@ export function createOrchestrator(
       applyPref(evt, (p) => {
         const cur = p.cliBridge ?? {};
         p.cliBridge = { ...cur, agents: { ...(cur.agents ?? {}), [agent]: on } };
-      });
+      }, { render: false });
+      void patch(evt, renderCoffeeSettings);
     })
     .on(CLI.toggleKeepAwake, ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
@@ -2226,7 +2288,8 @@ export function createOrchestrator(
       applyPref(evt, (p) => {
         const cur = p.cliBridge ?? {};
         p.cliBridge = { ...cur, keepAwake: { ...(cur.keepAwake ?? {}), enabled: on } };
-      });
+      }, { render: false });
+      void patch(evt, renderCoffeeSettings);
     })
     .on(DM.doctor, async ({ evt }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
@@ -2424,6 +2487,92 @@ export function createOrchestrator(
     .on(DM.setConcurrency, ({ evt, value }) => {
       const n = Number(value.v);
       if (Number.isFinite(n)) applyPref(evt, (p) => (p.maxConcurrentRuns = n));
+    })
+    // 📝 云文档评论 @bot 全局设置：纯按钮即点即改即重渲（提示词走 comment-instructions.md 文件，不在卡里）。
+    .on(DM.commentSettings, ({ evt }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      void patch(evt, () => renderCommentSettings());
+    })
+    .on(DM.commentSetBackend, ({ evt, value }) => {
+      const v = typeof value.v === 'string' ? value.v : undefined;
+      // Backend is a button (cascade source): switching invalidates the stored
+      // model/effort (backend-specific) → clear them, then re-render so the form's
+      // dropdowns reflect the new backend's models.
+      applyCommentsPref(evt, (c) => {
+        c.backend = v && backendIds().includes(v) ? v : undefined;
+        c.model = undefined;
+        c.effort = undefined;
+      });
+    })
+    // Model + effort form submit (one save for both). The dropdowns preselect the
+    // current value, so a submit always carries a concrete model/effort to store.
+    .on(DM.commentSubmit, ({ evt, formValue }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const modelId = selectValue(formValue, 'model');
+      const effort = asEffort(selectValue(formValue, 'effort'));
+      applyCommentsPref(evt, (c) => {
+        if (modelId) c.model = modelId; // single-model backend renders no select → leave as-is
+        if (effort) c.effort = effort; // no-effort backend renders no select → leave as-is
+      });
+    })
+    // ✍️ 编辑提示词：打开预填当前 master 模板（含 {变量}）的编辑子卡。
+    .on(DM.commentEditPrompt, ({ evt }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      void patch(evt, async () =>
+        buildCommentPromptCard(
+          await loadCommentInstructions(paths.commentInstructionsFile),
+          undefined,
+          paths.commentInstructionsFile,
+        ),
+      );
+    })
+    // 保存提示词：写 master + 同步进所有评论工作目录（含历史）。停在编辑卡（不返回上一级），
+    // 顶部出 ✅ 提示让用户看到保存成功，输入框预填刚保存的内容。
+    .on(DM.commentPromptSubmit, ({ evt, formValue }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const content = typeof formValue?.prompt === 'string' ? formValue.prompt : '';
+      void (async () => {
+        if (!content.trim()) {
+          const cur = await loadCommentInstructions(paths.commentInstructionsFile);
+          await patch(evt, buildCommentPromptCard(cur, '⚠️ 提示词不能为空，未保存。', paths.commentInstructionsFile));
+          return;
+        }
+        await saveCommentInstructions(paths.commentInstructionsFile, content).catch((err) =>
+          log.fail('console', err, { phase: 'save-comment-prompt' }),
+        );
+        const n = await syncAllCommentInstructions(paths.commentsRootDir, content, cfg.accounts.app.tenant).catch(
+          () => 0,
+        );
+        await patch(evt, () =>
+          buildCommentPromptCard(
+            content,
+            `✅ 提示词已保存，已同步到 ${n} 个文档（含历史），下一条评论生效。`,
+            paths.commentInstructionsFile,
+          ),
+        );
+      })();
+    })
+    // 重置为默认：忽略输入框内容，把内置默认模板写回 master + 同步进所有评论工作目录（含历史），
+    // 重渲编辑卡并预填默认（与「保存」一样即时生效、即时同步）。
+    .on(DM.commentResetPrompt, ({ evt }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      void (async () => {
+        await saveCommentInstructions(paths.commentInstructionsFile, DEFAULT_COMMENT_INSTRUCTIONS).catch((err) =>
+          log.fail('console', err, { phase: 'reset-comment-prompt' }),
+        );
+        const n = await syncAllCommentInstructions(
+          paths.commentsRootDir,
+          DEFAULT_COMMENT_INSTRUCTIONS,
+          cfg.accounts.app.tenant,
+        ).catch(() => 0);
+        await patch(evt, () =>
+          buildCommentPromptCard(
+            DEFAULT_COMMENT_INSTRUCTIONS,
+            `↩️ 已重置为默认提示词，已同步到 ${n} 个文档（含历史），下一条评论生效。`,
+            paths.commentInstructionsFile,
+          ),
+        );
+      })();
     })
     // In-group settings: toggle 免@ for the project bound to evt.chatId. Admin-gated.
     // 写路径走管理面共享层（admin/ops.ts）——与 DM 卡片 / Web 控制台同一套落盘逻辑。
@@ -3589,15 +3738,43 @@ export function createOrchestrator(
       if (!evt.mentionedBot) return log.info('comment', 'skip', { reason: 'not-mentioned' });
       if (!SUPPORTED_FILE_TYPES.has(evt.fileType))
         return log.info('comment', 'skip', { reason: 'unsupported-fileType', fileType: evt.fileType });
-      // 响应白名单已下沉到项目级；云文档评论无项目维度，保持现状（所有人可 @bot 评论）。
+      // 评论 @bot 仅响应管理员（owner / admins）——评论流可改文档，破坏性，不放给任何人。
+      // operator.openId 可能缺失（事件归一化边角）：?? '' 让 isAdmin 安全返回 false，
+      // 且 slice 不会在 undefined 上抛 TypeError。
+      const operatorId = evt.operator?.openId ?? '';
+      if (!isAdmin(cfg, operatorId))
+        return log.info('comment', 'skip', { reason: 'not-admin', sender: operatorId.slice(-6) || '(unknown)' });
 
       const resolved = await resolveComment(channel, evt);
       if (!resolved) return log.info('comment', 'skip', { reason: 'no-target-or-empty' });
       const { target, ctx } = resolved;
       log.info('comment', 'parsed', { isWhole: ctx.isWhole, hasQuote: Boolean(ctx.quote) });
 
-      const prompt = buildCommentPrompt(target, ctx, cfg.accounts.app.tenant);
-      const sessionKey = `doc:${evt.fileToken}`;
+      // One session per comment THREAD (not per doc): distinct threads on the same
+      // doc are independent and run in parallel; replies in a thread continue it.
+      const sessionKey = commentSessionKey(target.fileToken, evt.commentId);
+      // Per-doc working dir, seeded with the user-editable instructions (synced to
+      // AGENTS.md + CLAUDE.md so codex/claude read them natively, no per-turn inject).
+      const cwd = commentCwd(paths.commentsRootDir, target.fileType, target.fileToken);
+      const rawInstructions = await loadCommentInstructions(paths.commentInstructionsFile);
+      // Substitute this doc's variables ({fileType}/{fileToken}/{docUrl}) before syncing.
+      const instructions = renderCommentInstructions(
+        rawInstructions,
+        cfg.accounts.app.tenant,
+        target.fileType,
+        target.fileToken,
+      );
+      let synced = true;
+      await syncCommentInstructions(cwd, instructions).catch((err) => {
+        synced = false;
+        log.warn('comment', 'sync-instructions-failed', { err: err instanceof Error ? err.message : String(err) });
+      });
+      // Normally the instructions reach the agent via the synced AGENTS.md/CLAUDE.md.
+      // If the sync FAILED (disk/permission), the cwd may lack those files — fall back
+      // to prepending the instructions to this turn's prompt so the machine contract
+      // (don't self-post / plain-text only) never silently vanishes.
+      const facts = buildCommentPrompt(target, ctx, cfg.accounts.app.tenant);
+      const prompt = synced ? facts : `${instructions}\n\n---\n\n${facts}`;
 
       // Best-effort "received" feedback up-front (comments have no streaming
       // UI). Added before the per-doc lock so a queued mention still acks
@@ -3607,15 +3784,16 @@ export function createOrchestrator(
         : false;
 
       try {
-        // Serialize per document: one codex thread can't run two turns at once
-        // (they'd both consume the thread's single app-server notification
-        // stream and steal each other's events), so concurrent @-mentions in
-        // the SAME doc must queue. Different docs run in parallel (distinct
-        // threads); the global cap is still `sema`, acquired inside the lock.
+        // Serialize per comment THREAD (sessionKey = doc:<token>:<commentId>): one
+        // codex thread can't run two turns at once (they'd both consume its single
+        // app-server notification stream and steal each other's events), so repeated
+        // @-mentions in the SAME comment thread must queue. Different threads — even
+        // on the same doc — have distinct codex threads and run in parallel; the
+        // global cap is still `sema`, acquired inside the lock.
         await withDocLock(sessionKey, async () => {
           const release = await sema.acquire();
           try {
-            const thread = await resolveDocThread(sessionKey, ctx.question);
+            const thread = await resolveDocThread(sessionKey, cwd, instructions, ctx.question);
             const rec = await getSession(sessionKey);
             const run = thread.runStreamed({ text: prompt }, { model: rec?.model, effort: rec?.effort });
 
@@ -3639,6 +3817,7 @@ export function createOrchestrator(
               if (tid) void thread.abort(tid).catch(() => undefined);
               void thread.close().catch(() => undefined);
               sessions.delete(sessionKey);
+              commentInstrUsed.delete(sessionKey);
             } else {
               touchSession(sessionKey); // 轮次收尾打点（M-3 reaper 的空闲时钟）
               await patchSession(sessionKey, { updatedAt: Date.now() });
@@ -3685,18 +3864,32 @@ export function createOrchestrator(
     return run;
   }
 
-  /** Reuse the in-memory codex thread for a doc, else resume the persisted one,
-   * else start a fresh thread bound to `doc:<fileToken>` (cwd = fallbackCwd —
-   * doc replies rarely touch the filesystem, but we keep a sane default). */
-  async function resolveDocThread(sessionKey: string, question: string): Promise<AgentThread> {
+  /** Reuse the in-memory thread for a comment session, else resume the persisted
+   * one, else start a fresh thread in `cwd` (the per-doc comment dir, holding the
+   * synced AGENTS.md / CLAUDE.md). Fresh threads pick their backend + model/effort
+   * from the global comments config; resumed ones keep what they were created with.
+   * `instructions` is the prompt content just synced to the cwd: a live thread read
+   * those files only at start/resume, so if they changed since (user edited the
+   * master prompt) we recycle the live thread to force a re-read. */
+  async function resolveDocThread(
+    sessionKey: string,
+    cwd: string,
+    instructions: string,
+    question: string,
+  ): Promise<AgentThread> {
     const live = sessions.get(sessionKey);
     if (live) {
-      if (live.isAlive()) return live;
-      // 与 resolveThread 同款守卫：app-server 死后死线程留在缓存，每次 @ 评论
-      // 都立即失败（且失败轮还 touchSession 给 reaper 续命）——驱逐让它落进
-      // 下面既有的 resume-or-fresh 兜底，话题自愈而不是僵死到重启。
+      const alive = live.isAlive();
+      // Instructions unchanged + alive → reuse the warm thread (the common case).
+      if (alive && commentInstrUsed.get(sessionKey) === instructions) return live;
+      // Edited prompt (alive but stale) → close the in-memory thread we're discarding
+      // so the resume below re-reads the freshly-synced AGENTS.md/CLAUDE.md. Dead
+      // thread → just evict (与 resolveThread 同款守卫；app-server 死后死线程留在缓存，
+      // 每次 @ 评论都立即失败)，落进下面的 resume-or-fresh 兜底自愈。
+      if (alive && commentInstrUsed.get(sessionKey) !== instructions) void live.close().catch(() => undefined);
       sessions.delete(sessionKey);
-      log.info('agent', 'dead-thread-evict', { sessionKey });
+      commentInstrUsed.delete(sessionKey);
+      log.info('agent', alive ? 'comment-instr-changed-evict' : 'dead-thread-evict', { sessionKey });
     }
     const rec = await getSession(sessionKey);
     if (rec) {
@@ -3709,20 +3902,30 @@ export function createOrchestrator(
           effort: rec.effort,
         });
         trackSession(sessionKey, resumed);
+        commentInstrUsed.set(sessionKey, instructions);
         return resumed;
       } catch (err) {
         log.fail('agent', err, { phase: 'comment-resume', sessionKey });
       }
     }
-    const { model, effort } = pickDefault(await listModels());
-    const fresh = await backend.startThread({ cwd: fallbackCwd, model, effort });
+    // Fresh thread: backend + model/effort from the global comments config.
+    // backendFor falls back to the default backend for an unset/unknown id;
+    // pickDefault carries the configured model/effort when the live list supports them.
+    const comments = getCommentsConfig(cfg);
+    const be = backendFor(comments.backend);
+    const { model, effort } = pickDefault(await listModels(be), {
+      model: comments.model,
+      effort: comments.effort,
+    });
+    const fresh = await be.startThread({ cwd, model, effort });
     trackSession(sessionKey, fresh);
+    commentInstrUsed.set(sessionKey, instructions);
     await upsertSession({
       threadId: sessionKey,
       chatId: sessionKey,
-      cwd: fallbackCwd,
+      cwd,
       sessionId: fresh.sessionId,
-      backend: backend.id,
+      backend: be.id,
       model,
       effort,
       summary: question.slice(0, 80),

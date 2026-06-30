@@ -1,3 +1,5 @@
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import type { CommentEvent, LarkChannel } from '@larksuiteoapi/node-sdk';
 import type { TenantBrand } from '../config/schema';
 import { log } from '../core/logger';
@@ -11,16 +13,23 @@ import { log } from '../core/logger';
  * orchestrator (handle-message.ts) so it can share the codex backend, session
  * store, and concurrency semaphore.
  *
- * File types supported by drive.v1.fileComment.* — other types (slides,
- * bitable, mindnote) use different APIs and are out of scope for now.
+ * File types supported by drive.v1.fileComment.*: doc / docx / sheet / bitable
+ * (多维表格). Bitable comments are NOT a separate API — they ride the same
+ * fileComment family: the comment_add event carries file_type="bitable", and the
+ * SDK's get/list/reply params accept it. (The human-readable docs only list
+ * doc/docx/sheet/file/slides for get/reply while the api-explorer metadata also
+ * lists bitable — a known doc/metadata mismatch; the metadata side is the one the
+ * SDK and event payload follow.) Deliberately OUT: `file` (云盘文件 — 评论场景用不到),
+ * plus slides/mindnote, and whole-doc replies on bitable — fileComment.create
+ * (the no-thread fallback) is doc/docx only.
  */
-export const SUPPORTED_FILE_TYPES = new Set(['doc', 'docx', 'sheet', 'file']);
+export const SUPPORTED_FILE_TYPES = new Set(['doc', 'docx', 'sheet', 'bitable']);
 
 /** Hard cap on the reply length we post into a comment (Feishu rejects very
  * long comment bodies); answers longer than this are truncated with an ellipsis. */
 export const REPLY_MAX_CHARS = 2000;
 
-export type CommentFileType = 'doc' | 'docx' | 'sheet' | 'file';
+export type CommentFileType = 'doc' | 'docx' | 'sheet' | 'bitable';
 
 export interface ResolvedTarget {
   fileToken: string;
@@ -71,7 +80,7 @@ export interface ResolvedComment {
 
 /**
  * Resolve a comment event to its (target, context), trying the event's OWN
- * token first — the common case (a normal doc/docx/sheet/file), which needs no
+ * token first — the common case (a normal doc/docx/sheet/bitable), which needs no
  * wiki scope and makes no extra API call. Only if that yields no question do we
  * treat the token as a knowledge-base (wiki) node, resolve it to the underlying
  * doc, and retry. So `wiki:*` scope is needed solely for wiki-hosted docs, and
@@ -217,15 +226,163 @@ const DOC_HOSTS: Record<TenantBrand, string> = {
   lark: 'larksuite.com',
 };
 
-/** Build the codex prompt for a doc-comment mention. */
+/**
+ * file_type (the API value) → the path segment in the public web URL. These are
+ * NOT all identical to the type string: a 旧版文档 lives at /docs/, a 电子表格 at
+ * /sheets/, and a 多维表格 (bitable) at /base/ — only docx and file match verbatim.
+ * Building links as /<fileType>/<token> would 404 for doc/sheet/bitable. Unknown
+ * types fall back to the verbatim segment.
+ */
+const DOC_URL_PATH: Record<CommentFileType, string> = {
+  doc: 'docs',
+  docx: 'docx',
+  sheet: 'sheets',
+  bitable: 'base',
+};
+
+/** Public web URL for a cloud doc, honoring the per-type path segment above. */
+function buildDocUrl(tenant: TenantBrand, fileType: string, fileToken: string): string {
+  const seg = DOC_URL_PATH[fileType as CommentFileType] ?? fileType;
+  return `https://${DOC_HOSTS[tenant]}/${seg}/${fileToken}`;
+}
+
+/**
+ * 出厂默认的「评论助手」指令——会被同步成每个文档评论工作目录里的 AGENTS.md
+ * （codex 原生读）与 CLAUDE.md（claude 开 settingSources 后读），从而不必每轮注入。
+ * 用户可直接编辑 master 文件（paths.commentInstructionsFile）整段覆盖；其中「必须遵守」一节是
+ * 「机器契约」（系统靠它自动回贴、靠纯文本渲染），删掉会导致回复发不出去或显示乱码。
+ */
+export const DEFAULT_COMMENT_INSTRUCTIONS = `# 飞书云文档评论助手
+
+你被 @ 在一篇飞书云文档（{docUrl}，类型 {fileType}，file_token：{fileToken}）的评论里。系统会把你这一轮的最终回复自动贴回这条评论。每轮还会给你评论范围和（行内评论时）选中的原文。
+
+## 怎么做
+- 需要看正文，或用户要求"帮我改 / 优化 / 重写 / 细化这段"时，用 lark-cli 读 / 改这篇文档（{fileToken}）。
+- 改文档时绝不要删除或整段替换"被评论的原文"（本轮给你的选中原文）——飞书评论锚定在这段文字上，删了它评论会变成"原文已被删除"、移进历史评论，正文就看不到了。要保留这段原文，在它之后或周围增改，只动这一处。
+- 改完只回一句简短说明；用户只是提问就直接答，不改任何东西。
+
+## 必须遵守
+1. 不要自己发表 / 回复 / 解决 / 删除任何飞书评论——系统会自动把你的最终回复贴上去。
+2. 只输出最终答案本身，不要复述分析过程或"我现在去…"。
+3. 全程纯文本：不要任何 markdown 标记（** __ # - * > 反引号 之类）、不要代码块、不要表格——评论框不渲染，会原样显示这些符号。语气简洁直接。
+`;
+
+/** A doc-comment session key — one per comment THREAD (not per doc), so distinct
+ * comment threads on the same document are independent conversations that run in
+ * parallel, while replies within a thread continue the same session. */
+export function commentSessionKey(fileToken: string, commentId: string): string {
+  return `doc:${fileToken}:${commentId}`;
+}
+
+/** The per-document working directory for comment runs: one folder per document
+ * (shared by all of its comment threads), named so it's recognizable on disk and
+ * in codex/claude session lists. Holds the synced AGENTS.md / CLAUDE.md. */
+export function commentCwd(projectsRoot: string, fileType: string, fileToken: string): string {
+  return join(projectsRoot, `comment-${fileType}-${fileToken}`);
+}
+
+/**
+ * Read the user-editable instructions master file. Seeds it with the built-in
+ * default ONLY when it's missing/unreadable (so there's always a file to edit),
+ * then uses the default. An existing file is used as-is and never overwritten —
+ * a blank/whitespace-only file falls back to the default for this run but is left
+ * untouched on disk (never silently clobber a file the user may have emptied).
+ * A comment run never blocks on this.
+ */
+export async function loadCommentInstructions(masterFile: string): Promise<string> {
+  try {
+    const existing = await readFile(masterFile, 'utf8');
+    return existing.trim() ? existing : DEFAULT_COMMENT_INSTRUCTIONS; // exists → use as-is (blank → default, no clobber)
+  } catch {
+    // missing / unreadable only — seed a copy below so the user has a file to edit
+  }
+  await mkdir(dirname(masterFile), { recursive: true }).catch(() => undefined);
+  await writeFile(masterFile, DEFAULT_COMMENT_INSTRUCTIONS, 'utf8').catch(() => undefined);
+  return DEFAULT_COMMENT_INSTRUCTIONS;
+}
+
+/**
+ * Sync the instructions into a document's comment working directory as BOTH
+ * AGENTS.md (codex reads it natively) and CLAUDE.md (claude reads it once the
+ * backend opts into settingSources). Called before each run so edits to the
+ * master file propagate to the next comment in any document.
+ */
+export async function syncCommentInstructions(cwd: string, instructions: string): Promise<void> {
+  await mkdir(cwd, { recursive: true });
+  await Promise.all([
+    writeFile(join(cwd, 'AGENTS.md'), instructions, 'utf8'),
+    writeFile(join(cwd, 'CLAUDE.md'), instructions, 'utf8'),
+  ]);
+}
+
+/** Write the user-edited instructions to the master file (in-card prompt editor).
+ * Creates the parent dir if needed. The caller then re-syncs all comment dirs. */
+export async function saveCommentInstructions(masterFile: string, content: string): Promise<void> {
+  await mkdir(dirname(masterFile), { recursive: true });
+  await writeFile(masterFile, content, 'utf8');
+}
+
+/** Substitute the doc-level variables ({fileType}/{fileToken}/{docUrl}) in the
+ * instructions for one document. Unknown `{...}` are left untouched. The set of
+ * variables (and how each is described to the user) is spelled out in the prompt
+ * editor card (buildCommentPromptCard); keep the two in sync. The comment's
+ * selected text and the user's question are delivered to the agent automatically
+ * every turn, so they aren't variables. */
+export function renderCommentInstructions(
+  template: string,
+  tenant: TenantBrand,
+  fileType: string,
+  fileToken: string,
+): string {
+  const docUrl = buildDocUrl(tenant, fileType, fileToken);
+  return template
+    .replace(/\{fileType\}/g, fileType)
+    .replace(/\{fileToken\}/g, fileToken)
+    .replace(/\{docUrl\}/g, docUrl);
+}
+
+/**
+ * Re-sync the instructions into EVERY existing comment working dir under
+ * `projectsRoot` (`comment-<type>-<token>`), substituting each doc's own
+ * variables. Called when the user edits the master prompt so the change reaches
+ * ALL documents — including ones commented in the past — not just the next one
+ * touched. Returns how many dirs were synced. Best-effort per dir.
+ */
+export async function syncAllCommentInstructions(
+  projectsRoot: string,
+  rawTemplate: string,
+  tenant: TenantBrand,
+): Promise<number> {
+  const entries = await readdir(projectsRoot, { withFileTypes: true }).catch(() => []);
+  let synced = 0;
+  for (const e of entries) {
+    if (!e.isDirectory() || !e.name.startsWith('comment-')) continue;
+    const m = /^comment-([a-z]+)-(.+)$/.exec(e.name);
+    const fileType = m?.[1];
+    const fileToken = m?.[2];
+    if (!fileType || !fileToken) continue;
+    const rendered = renderCommentInstructions(rawTemplate, tenant, fileType, fileToken);
+    await syncCommentInstructions(join(projectsRoot, e.name), rendered).catch(() => undefined);
+    synced++;
+  }
+  return synced;
+}
+
+/**
+ * Build the per-turn user message for a doc-comment mention — runtime FACTS only
+ * (doc link/token/type, comment scope, the selected quote, the question). The
+ * behavioral instructions (read/edit via lark-cli, don't self-post, plain-text
+ * output) live in the synced AGENTS.md / CLAUDE.md instead of being repeated
+ * every turn (see {@link DEFAULT_COMMENT_INSTRUCTIONS}).
+ */
 export function buildCommentPrompt(
   target: ResolvedTarget,
   ctx: CommentContext,
   tenant: TenantBrand,
 ): string {
-  const docUrl = `https://${DOC_HOSTS[tenant]}/${target.fileType}/${target.fileToken}`;
+  const docUrl = buildDocUrl(tenant, target.fileType, target.fileToken);
   const parts: string[] = [];
-  parts.push('我在飞书云文档的评论里被 @了，需要你回答评论中的问题。文档信息：');
+  parts.push('我在飞书云文档的评论里 @了你。文档信息：');
   parts.push(`- 链接：${docUrl}`);
   parts.push(`- file_token：${target.fileToken}`);
   parts.push(`- 类型：${target.fileType}`);
@@ -236,22 +393,6 @@ export function buildCommentPrompt(
   }
   parts.push('');
   parts.push(`用户的问题：${ctx.question}`);
-  parts.push('');
-  parts.push(
-    '如果回答需要文档正文内容，可用 lark-cli 只读地获取（仅用于读取，不要用它写任何东西）：\n' +
-      `  lark-cli docs +fetch --doc ${target.fileToken} --api-version v2`,
-  );
-  parts.push('');
-  parts.push('【非常重要，务必遵守】');
-  parts.push(
-    '1. 不要自己去发表 / 回复 / 修改任何飞书评论或文档（也不要用 lark-cli 或任何工具去发评论）——' +
-      '系统会自动把你下面给出的最终回复发到这条评论里，你只管把答案写出来。',
-  );
-  parts.push('2. 只输出要发给用户的「最终答案」本身，不要复述分析过程、步骤、或「我现在去…」这类说明。');
-  parts.push(
-    '3. 用纯文本，不要用 markdown 标记（不要 ** __ # - * > \` 之类），不要代码块；' +
-      '评论框不渲染 markdown，会原样显示这些符号。回答简洁直接。',
-  );
   return parts.join('\n');
 }
 
