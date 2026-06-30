@@ -9,13 +9,13 @@ import {
   type AppConfig,
 } from '../config/schema';
 import { defaultNoMention, effectiveGuestMode, effectiveMode, type Project } from '../project/registry';
-import { DEFAULT_BACKEND_ID, type BackendProbe, type PermissionMode } from '../agent/types';
+import { DEFAULT_BACKEND_ID, type BackendProbe, type ModelInfo, type PermissionMode, type ReasoningEffort } from '../agent/types';
 import { catalogById } from '../agent/catalog';
 import type { SessionRecord } from '../bot/session-store';
 import { labelScope } from '../config/scopes';
 import { summarizeEventDiagnosis, type EventDiagnosis } from '../utils/event-diagnosis';
 import { actions, actionsFixed, button, card, form, hr, input, linkButton, md, note, selectMenu, splitRow, submitButton, type CardElement, type CardObject, type SelectOption } from './cards';
-import { relativeTime } from './command-cards';
+import { EFFORT_LABEL, relativeTime } from './command-cards';
 
 /** applink to open a Feishu group chat by chat_id (oc_xxx). Feishu has no
  * deep link to a specific thread/topic, so this lands in the group and the
@@ -79,6 +79,9 @@ export const DM = {
   setNoMentionDm: 'dm.proj.noMention',
   // 🗜️ 自动压缩：项目级开关（同群设置里的那个，DM 里也能改），按钮携带项目名 n
   setAutoCompactDm: 'dm.proj.autoCompact',
+  // 🤖 默认模型/强度：新话题的起始模型 + 推理强度（选完提交的下拉表单子卡，仿权限卡）
+  modelDefault: 'dm.proj.modelDefault',
+  modelDefaultSubmit: 'dm.proj.modelDefault.submit',
   // 🔐 权限：codex 沙箱档位（管理员档 + 普通用户档）+ 联网，做成下拉表单（选+提交）
   permission: 'dm.proj.perm',
   permissionSubmit: 'dm.proj.perm.submit',
@@ -90,6 +93,10 @@ export const DM = {
 export const GS = {
   setNoMention: 'gs.noMention',
   setAutoCompact: 'gs.autoCompact',
+  // 🤖 默认模型/强度：群内 /settings 的镜像入口（open=进子卡，submit=保存，settings=返回群设置）
+  settings: 'gs.settings',
+  modelDefault: 'gs.modelDefault',
+  modelDefaultSubmit: 'gs.modelDefault.submit',
 } as const;
 
 /** Human label for a project's session-model kind. */
@@ -656,15 +663,27 @@ export function buildNewProjectDoneCard(p: Project): CardObject {
  * active project stays well under this with a generous cap + "+N more" tail. */
 const PROJECT_TOPICS_MAX = 50;
 
-/** Project list — a SLIM overview: one summary line per project + a row of
- * actions (the 🧵 button drills into that project's topics). Topics are NOT
+/** Projects per page in the overview. Feishu counts NESTED components against
+ * its ~200-element cap (error 300305 "element exceeds the limit", which the
+ * platform silently DROPS — no error card), and each project's action row of up
+ * to 4 buttons expands to ~13 components (column_set + a column/button/plain_text
+ * per button) — so a project costs ~17 components, NOT the ~4 visible elements.
+ * Measured against the real 39-project store: a page of 12 = 214 components
+ * (still over, still dropped); a page of 8 = ~146, comfortably under (a known-OK
+ * 50-row topics card sits near ~150). Keep this ≤ ~8 unless the row slims down. */
+const PROJECT_LIST_PAGE_SIZE = 8;
+
+/** Project list — a SLIM, PAGED overview: one summary line per project + a row
+ * of actions (the 🧵 button drills into that project's topics). Topics are NOT
  * listed inline: an active group accumulates dozens, and rendering them all
  * pushed the whole card past Feishu's ~200-component cap (→ silent overflow).
- * The overview's size now scales with the project COUNT only, so it fits ~10+
- * projects comfortably; topics live in {@link buildProjectTopicsCard}. */
+ * `page` (0-indexed) is clamped to a valid page, so a stale 下一页 click or a
+ * list that shrank after a delete never lands on an empty page; topics live in
+ * {@link buildProjectTopicsCard}. */
 export function buildProjectListCard(
   projects: Project[],
   sessionsByChat: Map<string, SessionRecord[]> = new Map(),
+  page = 0,
 ): CardObject {
   if (projects.length === 0) {
     return card(
@@ -672,8 +691,11 @@ export function buildProjectListCard(
       { header: { title: '📁 项目列表', template: 'wathet' } },
     );
   }
+  const pageCount = Math.ceil(projects.length / PROJECT_LIST_PAGE_SIZE);
+  const cur = Math.min(Math.max(Math.trunc(page) || 0, 0), pageCount - 1);
+  const start = cur * PROJECT_LIST_PAGE_SIZE;
   const elements: CardObject[] = [];
-  for (const p of projects) {
+  for (const p of projects.slice(start, start + PROJECT_LIST_PAGE_SIZE)) {
     const topicCount = (p.chatId ? sessionsByChat.get(p.chatId) : undefined)?.length ?? 0;
     const dir = `📂 \`${p.cwd}\`${p.branch && p.branch !== '—' ? `   🌿 ${p.branch}` : ''}`;
     const meta = p.chatId
@@ -689,8 +711,14 @@ export function buildProjectListCard(
     elements.push(actions(row));
     elements.push(hr());
   }
-  elements.push(note(`共 ${projects.length} 个项目`));
-  elements.push(actions([button('⬅️ 菜单', { a: DM.menu })]));
+  elements.push(
+    note(pageCount > 1 ? `共 ${projects.length} 个项目 · 第 ${cur + 1}/${pageCount} 页` : `共 ${projects.length} 个项目`),
+  );
+  const nav: CardObject[] = [];
+  if (cur > 0) nav.push(button('⬅️ 上一页', { a: DM.projects, p: cur - 1 }));
+  if (cur < pageCount - 1) nav.push(button('下一页 ➡️', { a: DM.projects, p: cur + 1 }));
+  nav.push(button('⬅️ 菜单', { a: DM.menu }));
+  elements.push(actions(nav));
   return card(elements, { header: { title: '📁 项目列表', template: 'wathet' } });
 }
 
@@ -882,7 +910,7 @@ export function buildWatchdogCustomCard(cfg: AppConfig): CardObject {
  * {@link buildSettingsCard}. Admin-gated by the handler.
  */
 export function buildGroupSettingsCard(
-  project: Pick<Project, 'name' | 'kind' | 'noMention' | 'origin' | 'autoCompact'>,
+  project: Pick<Project, 'name' | 'kind' | 'noMention' | 'origin' | 'autoCompact' | 'defaultModel' | 'defaultEffort'>,
 ): CardObject {
   const kind = project.kind ?? 'multi';
   const noMention = project.noMention ?? defaultNoMention(project);
@@ -906,6 +934,10 @@ export function buildGroupSettingsCard(
         { label: '关', value: 'off' },
       ]),
       note('开启后：上下文接近上限时 Codex 自动总结早前对话、释放空间（默认开）。改动下一轮会话生效。'),
+      hr(),
+      md('🤖 默认模型 / 推理强度'),
+      actions([button('设置默认模型', { a: GS.modelDefault }, 'primary')]),
+      note(`当前 ${modelDefaultSummary(project)}　·　新话题的起始模型 / 推理强度（话题内 \`/model\` 可临时改）。`),
     ],
     { header: { title: '⚙️ 群设置', template: 'blue' } },
   );
@@ -1058,6 +1090,113 @@ export function buildPermissionCard(p: Pick<Project, 'name' | 'mode' | 'guestMod
   );
 }
 
+/** Canonical reasoning-effort ladder (low→high), to order the effort dropdown. */
+const EFFORT_ORDER: ReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+
+/** One-line summary of a project's default model/effort, for the settings cards.
+ * Sync (no model list) — shows the raw stored id (e.g. `gpt-5.5`) or「后端默认」. */
+export function modelDefaultSummary(p: Pick<Project, 'defaultModel' | 'defaultEffort'>): string {
+  if (!p.defaultModel) return '后端默认（未设）';
+  const eff = p.defaultEffort ? ` · 强度 ${EFFORT_LABEL[p.defaultEffort]}` : '';
+  return `${p.defaultModel}${eff}`;
+}
+
+/**
+ * 🤖 默认模型 / 推理强度 子表单卡（项目级，仅管理员）。设的是本项目**新话题**的起始
+ * 模型 + 推理强度——per-session `/model` 临时覆盖之上、后端默认之下的那层。和权限卡一样
+ * 用 selectMenu 表单（选完提交、不用即时按钮，规避 select 锁卡）。两个入口共用本卡，用
+ * `ctx` 决定提交 / 返回的 action（dm = DM 项目设置卡；group = 群 /settings 卡）。
+ *
+ * 自适应（对齐 /model 卡的诚实体验）：只在有多个可见模型时给模型下拉；effort 下拉只在
+ * 该后端**至少一个模型**支持 effort 时出现（claude 这类不调强度的后端不显示假档）。effort
+ * 选项取所有可见模型 supportedEfforts 的并集——提交时再按所选模型校验收窄。`models` 由
+ * 调用方按项目 backend 实时拉取后传入。
+ */
+export function buildModelDefaultCard(
+  p: Pick<Project, 'name' | 'defaultModel' | 'defaultEffort'>,
+  models: ModelInfo[],
+  ctx: 'dm' | 'group',
+  notice?: string,
+): CardObject {
+  const visible = models.filter((m) => !m.hidden);
+  // current effective default: explicit project default (if still valid) else backend isDefault
+  const explicit = p.defaultModel ? visible.find((m) => m.id === p.defaultModel) : undefined;
+  const curModel = explicit ?? visible.find((m) => m.isDefault) ?? visible[0];
+  const curEfforts = curModel?.supportedEfforts ?? [];
+  const curEffort =
+    explicit && p.defaultEffort && curEfforts.includes(p.defaultEffort) ? p.defaultEffort : curModel?.defaultEffort;
+  const unionEfforts = EFFORT_ORDER.filter((e) => visible.some((m) => (m.supportedEfforts ?? []).includes(e)));
+  const canPickModel = visible.length > 1;
+  const canPickEffort = unionEfforts.length > 0;
+
+  const submit = ctx === 'dm' ? { a: DM.modelDefaultSubmit, n: p.name } : { a: GS.modelDefaultSubmit };
+  const back = ctx === 'dm' ? { a: DM.projectSettings, n: p.name } : { a: GS.settings };
+
+  const head: CardElement[] = [
+    ...(notice ? [md(notice)] : []),
+    md(`**🤖 默认模型 / 推理强度** · ${p.name}`),
+    note(
+      '本项目**新话题**的起始模型与推理强度。进行中 / 已恢复的会话不受影响；话题内随时可用 ' +
+        '`/model` 临时改。未设时用后端自带默认。',
+    ),
+  ];
+
+  if (!canPickModel && !canPickEffort) {
+    return card(
+      [
+        ...head,
+        hr(),
+        md(`当前模型：**${curModel?.displayName ?? p.defaultModel ?? '后端默认'}**`),
+        note('该后端只有一个模型且不支持调节推理强度，无需设置默认。'),
+        actions([button('⬅️ 返回', back)]),
+      ],
+      { header: { title: '🤖 默认模型', template: 'blue' } },
+    );
+  }
+
+  const formEls: CardElement[] = [];
+  if (canPickModel) {
+    formEls.push(
+      md('🤖 **默认模型**'),
+      selectMenu({
+        name: 'model',
+        placeholder: '选择默认模型',
+        options: visible.map((m) => ({ label: m.displayName, value: m.id })),
+        initial: curModel?.id,
+      }),
+    );
+  }
+  if (canPickEffort) {
+    formEls.push(
+      md('🧠 **默认推理强度**'),
+      selectMenu({
+        name: 'effort',
+        placeholder: '选择默认推理强度',
+        options: unionEfforts.map((e) => ({ label: `强度：${EFFORT_LABEL[e]}`, value: e })),
+        initial: curEffort,
+      }),
+    );
+  }
+  formEls.push(actions([submitButton('✅ 保存默认', submit, 'primary', 'submit_model_default')]));
+
+  return card(
+    [
+      ...head,
+      hr(),
+      // single-model backend (effort-only form): name the locked model so the lone
+      // effort dropdown isn't confusing.
+      ...(canPickModel ? [] : [md(`默认模型：**${curModel?.displayName ?? '后端默认'}**（该后端仅一个模型）`)]),
+      form('model_default', formEls),
+      ...(canPickModel && !canPickEffort
+        ? [note('该后端不调节推理强度（思考由模型自动调度，无 effort 档）。')]
+        : []),
+      note('保存只影响之后新建的话题，不会打断正在进行的会话。'),
+      actions([button('⬅️ 返回', back)]),
+    ],
+    { header: { title: '🤖 默认模型', template: 'blue' } },
+  );
+}
+
 /** 单个后端的检测结果（🧠 后端检测结果卡的一行）。`probe` undefined = 探测没
  * 跑成/超时，按不可用渲染——绝不放行。`supportedModes` 同
  * {@link AgentBackend.supportedModes}（undefined ⇒ 全档支持）。 */
@@ -1083,7 +1222,18 @@ export interface BackendProbeRow {
 export function buildProjectSettingsCard(
   project: Pick<
     Project,
-    'name' | 'kind' | 'noMention' | 'origin' | 'cwd' | 'mode' | 'guestMode' | 'network' | 'autoCompact' | 'backend'
+    | 'name'
+    | 'kind'
+    | 'noMention'
+    | 'origin'
+    | 'cwd'
+    | 'mode'
+    | 'guestMode'
+    | 'network'
+    | 'autoCompact'
+    | 'backend'
+    | 'defaultModel'
+    | 'defaultEffort'
   >,
   backendName?: string,
   notice?: string,
@@ -1122,6 +1272,10 @@ export function buildProjectSettingsCard(
         button('关', { a: DM.setAutoCompactDm, v: 'off', n: project.name }, autoCompact ? 'default' : 'primary'),
       ]),
       note('开启后：上下文接近上限时 Codex 自动总结早前对话、释放空间（默认开）。改动下一轮会话生效。'),
+      hr(),
+      md('🤖 默认模型 / 推理强度'),
+      actions([button('设置默认模型', { a: DM.modelDefault, n: project.name }, 'primary')]),
+      note(`当前 ${modelDefaultSummary(project)}　·　新话题的起始模型 / 推理强度（话题内 \`/model\` 可临时改）。`),
       hr(),
       actions([button('🛡 响应白名单', { a: DM.allowlist, n: project.name }, 'primary')]),
       note('设置谁能让我在本群响应 / 跑 codex（空 = 所有人）。'),

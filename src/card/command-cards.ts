@@ -12,7 +12,7 @@ export const RES = {
   pick: 'resume.pick',
 } as const;
 
-const EFFORT_LABEL: Record<ReasoningEffort, string> = {
+export const EFFORT_LABEL: Record<ReasoningEffort, string> = {
   none: '无',
   minimal: '极简',
   low: '低',

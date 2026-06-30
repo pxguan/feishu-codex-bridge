@@ -14,6 +14,7 @@ import {
   createAdminWriteExecutor,
   performBackendSwitch,
   performSetAutoCompact,
+  performSetModelDefault,
   performSetNoMention,
   performSetPermissionMode,
   probeBackends,
@@ -89,6 +90,7 @@ import {
   buildDoctorCard,
   buildGroupSettingsCard,
   buildJoinGroupFormCard,
+  buildModelDefaultCard,
   buildNewProjectDoneCard,
   buildNewProjectFormCard,
   buildPermissionCard,
@@ -268,6 +270,37 @@ function selectValue(formValue: Record<string, unknown> | undefined, name: strin
 /** Narrow an arbitrary string to a PermissionMode, else undefined. */
 function asTier(v: string | undefined): PermissionMode | undefined {
   return v === 'qa' || v === 'write' || v === 'full' ? v : undefined;
+}
+
+/** Narrow an arbitrary string to a ReasoningEffort, else undefined. */
+const REASONING_EFFORTS: readonly ReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+function asEffort(v: string | undefined): ReasoningEffort | undefined {
+  return v !== undefined && (REASONING_EFFORTS as readonly string[]).includes(v) ? (v as ReasoningEffort) : undefined;
+}
+
+/**
+ * Pick a NEW session's starting model + effort from a backend's LIVE model list.
+ * A project default (`prefer`) wins ONLY when still valid against that live list —
+ * its model must be present and non-hidden, and (to carry its effort) that model
+ * must support the preferred effort. A stale / wrong-backend pref (a codex id on a
+ * claude project, a delisted model, an effort the model dropped) is silently
+ * ignored and we fall back to the backend's own default model + effort, so defaults
+ * stay self-healing and the CLI is never handed a bad id. Module-level + exported
+ * so the resolution stays unit-testable independent of the orchestrator.
+ */
+export function pickDefault(
+  models: ModelInfo[],
+  prefer?: { model?: string; effort?: ReasoningEffort },
+): { model: string; effort: ReasoningEffort } {
+  const preferred = prefer?.model ? models.find((m) => m.id === prefer.model && !m.hidden) : undefined;
+  const def = preferred ?? models.find((m) => m.isDefault && !m.hidden) ?? models.find((m) => !m.hidden) ?? models[0];
+  // Carry the preferred effort onto the chosen model only if that model actually
+  // supports it — and only when WE kept the preferred model (a fallback model gets
+  // its own default, never an effort that was meant for a different model).
+  const supported = def?.supportedEfforts ?? [];
+  const effort =
+    preferred && prefer?.effort && supported.includes(prefer.effort) ? prefer.effort : (def?.defaultEffort ?? 'medium');
+  return { model: def?.id ?? 'gpt-5.5', effort };
 }
 
 /**
@@ -592,11 +625,6 @@ export function createOrchestrator(
    * 兜底一旦缓存在这层，会被钉死整个 daemon 生命周期（backend 故意不缓存失败
    * 结果，让下次调用重试；见 codex-appserver/backend.listModels）。 */
   const listModels = (be: AgentBackend = backend): Promise<ModelInfo[]> => be.listModels();
-
-  function pickDefault(models: ModelInfo[]): { model: string; effort: ReasoningEffort } {
-    const def = models.find((m) => m.isDefault && !m.hidden) ?? models.find((m) => !m.hidden) ?? models[0];
-    return { model: def?.id ?? 'gpt-5.5', effort: def?.defaultEffort ?? 'medium' };
-  }
 
   // Feishu gives bots no way to mark a message "已读" (read receipts are a
   // human-client signal), so a reaction stands in for one. Best-effort — a
@@ -1350,7 +1378,10 @@ export function createOrchestrator(
       const tIntake = Date.now();
       let tResolveDone = tIntake;
       const threadP = (async () => {
-        const { model, effort } = pickDefault(await listModels(be));
+        const { model, effort } = pickDefault(await listModels(be), {
+          model: project?.defaultModel,
+          effort: project?.defaultEffort,
+        });
         const thread = await be.startThread({ cwd, model, effort, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
         tResolveDone = Date.now();
         return { thread, model, effort };
@@ -1461,7 +1492,10 @@ export function createOrchestrator(
         const [rec, project] = await Promise.all([getSession(sessionKey), getProjectByChatId(msg.chatId)]);
         const be = backendFor(rec?.backend ?? project?.backend);
         const models = await listModels(be);
-        const def = pickDefault(models);
+        // Seed the /model card's "current" from the project default (when this
+        // topic has no session record yet) so a fresh topic shows what it WILL
+        // start on; pickDefault validates it against the live list.
+        const def = pickDefault(models, { model: project?.defaultModel, effort: project?.defaultEffort });
         // 记录里跨后端污染的 model id（旧版未路由的 /model 卡写入）不在本后端
         // 列表里——回落默认，别把坏值当 select 初值渲染。
         const recModel = rec?.model && models.some((m) => m.id === rec.model) ? rec.model : undefined;
@@ -2001,7 +2035,7 @@ export function createOrchestrator(
 
   // Build the project list card with each project's topics (sessions) grouped
   // by chatId, most-recent first — shared by the list/cancel/delete handlers.
-  const renderProjectList = async (): Promise<object> => {
+  const renderProjectList = async (page = 0): Promise<object> => {
     const [projects, sessions] = await Promise.all([listProjects(), listSessions()]);
     const byChat = new Map<string, SessionRecord[]>();
     for (const s of sessions) {
@@ -2009,7 +2043,7 @@ export function createOrchestrator(
       if (arr) arr.push(s);
       else byChat.set(s.chatId, [s]);
     }
-    return buildProjectListCard(projects, byChat);
+    return buildProjectListCard(projects, byChat, page);
   };
 
   // 体检数据收集（codex 探测 + 飞书 scope 自检）：DM.doctor 与私聊菜单 dm.doctor
@@ -2123,9 +2157,10 @@ export function createOrchestrator(
         );
       })();
     })
-    .on(DM.projects, ({ evt }) => {
+    .on(DM.projects, ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
-      patch(evt, renderProjectList);
+      const page = typeof value.p === 'number' ? value.p : Number(value.p) || 0;
+      patch(evt, () => renderProjectList(page));
     })
     .on(DM.settings, async ({ evt }) => {
       // Opening 设置 is the moment to re-read hook install status from disk.
@@ -2420,6 +2455,46 @@ export function createOrchestrator(
         return buildGroupSettingsCard({ name: '本群', kind: 'multi', autoCompact: on });
       });
     })
+    // 🤖 默认模型/强度：群内 /settings 的镜像入口。GS.settings 返回群设置卡；GS.modelDefault
+    // 进子卡（按项目后端实时列模型）；GS.modelDefaultSubmit 校验+落盘后回群设置卡。均 isAdmin
+    // 门控（与 ✋免@ / 🗜️自动压缩 同级），项目按 evt.chatId 解析；不驱逐活跃会话（默认只管新话题）。
+    .on(GS.settings, ({ evt }) => {
+      if (!isAdmin(cfg, evt.operator?.openId ?? '')) return;
+      patch(evt, async () => {
+        const project = await getProjectByChatId(evt.chatId);
+        return buildGroupSettingsCard(project ?? { name: '本群', kind: 'multi' });
+      });
+    })
+    .on(GS.modelDefault, ({ evt }) => {
+      if (!isAdmin(cfg, evt.operator?.openId ?? '')) return;
+      patch(evt, async () => {
+        const project = await getProjectByChatId(evt.chatId);
+        if (!project) return buildGroupSettingsCard({ name: '本群', kind: 'multi' });
+        const models = await listModels(backendFor(project.backend));
+        return buildModelDefaultCard(project, models, 'group');
+      });
+    })
+    .on(GS.modelDefaultSubmit, ({ evt, formValue }) => {
+      if (!isAdmin(cfg, evt.operator?.openId ?? '')) return;
+      const modelId = selectValue(formValue, 'model');
+      const effortRaw = asEffort(selectValue(formValue, 'effort'));
+      void (async () => {
+        const project = await getProjectByChatId(evt.chatId);
+        if (!project) return;
+        const models = await listModels(backendFor(project.backend));
+        const m = modelId ? models.find((x) => x.id === modelId && !x.hidden) : undefined;
+        if (m) {
+          const supported = m.supportedEfforts ?? [];
+          const effort = effortRaw && supported.includes(effortRaw) ? effortRaw : supported.length ? m.defaultEffort : undefined;
+          const r = await performSetModelDefault({ projectName: project.name, model: m.id, effort });
+          if (r.ok) log.info('console', 'group-model-default', { project: project.name, model: m.id, effort });
+        }
+        const fresh = (await getProjectByChatId(evt.chatId)) ?? project;
+        await sendManagedCard(channel, evt.chatId, buildGroupSettingsCard(fresh)).catch((e) =>
+          log.fail('console', e, { phase: 'group-model-default-result' }),
+        );
+      })();
+    })
     // ── 权限管理回调（admins 全局 / 项目响应白名单）。均 dmAdmin 门控（私聊管理台）。
     // 列表卡用 patch 原地重渲染（纯按钮不锁）；加人是 form 提交，结果发**新卡**（旧表单
     // 留痕），规避 select 锁卡。owner 恒在 admins 名单顶、不可删。
@@ -2585,6 +2660,50 @@ export function createOrchestrator(
         await sendManagedCard(channel, evt.chatId, buildProjectSettingsCard(r.project, backendDisplayName(r.project.backend))).catch((e) =>
           log.fail('console', e, { phase: 'permission-result' }),
         );
+      })();
+    })
+    // 🤖 默认模型/强度：打开下拉表单子卡（按项目后端实时列模型；选完提交）。
+    .on(DM.modelDefault, ({ evt, value }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const name = typeof value.n === 'string' ? value.n : '';
+      patch(evt, async () => {
+        const p = await getProjectByName(name);
+        if (!p) return buildDmMenuCard({ webConsoleUrl: webConsoleUrl(), version: bridgeVersion() });
+        const models = await listModels(backendFor(p.backend));
+        return buildModelDefaultCard(p, models, 'dm');
+      });
+    })
+    // 提交默认模型表单：对该后端**实时**模型列表校验所选 model（不在列表 / 已下架即拒、
+    // 不落盘），effort 按所选模型 supportedEfforts 收窄；落盘但**不驱逐**活跃会话（默认只
+    // 管新话题）。表单卡提交后 card_id 锁，故发一张全新项目设置卡（带结果提示），不 patch。
+    .on(DM.modelDefaultSubmit, ({ evt, value, formValue }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const name = typeof value.n === 'string' ? value.n : '';
+      const modelId = selectValue(formValue, 'model');
+      const effortRaw = asEffort(selectValue(formValue, 'effort'));
+      void (async () => {
+        const p = await getProjectByName(name);
+        if (!p) return;
+        const models = await listModels(backendFor(p.backend));
+        const m = modelId ? models.find((x) => x.id === modelId && !x.hidden) : undefined;
+        let notice: string;
+        if (!m) {
+          notice = '⚠️ 所选模型无效或已下架，未保存。';
+        } else {
+          const supported = m.supportedEfforts ?? [];
+          const effort = effortRaw && supported.includes(effortRaw) ? effortRaw : supported.length ? m.defaultEffort : undefined;
+          const r = await performSetModelDefault({ projectName: name, model: m.id, effort });
+          notice = r.ok
+            ? `✅ 默认已设为「${m.displayName}」${effort ? ` · 强度 ${effort}` : ''}，新话题生效。`
+            : `⚠️ ${r.reason}`;
+          if (r.ok) log.info('console', 'project-model-default', { project: name, model: m.id, effort });
+        }
+        const fresh = (await getProjectByName(name)) ?? p;
+        await sendManagedCard(
+          channel,
+          evt.chatId,
+          buildProjectSettingsCard(fresh, backendDisplayName(fresh.backend), notice),
+        ).catch((e) => log.fail('console', e, { phase: 'model-default-result' }));
       })();
     });
   // 〔已移除〕DM.backend / DM.backendSubmit 处理器（项目后端「运行时切换」检测卡 +
