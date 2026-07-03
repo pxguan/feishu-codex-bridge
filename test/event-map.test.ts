@@ -103,7 +103,7 @@ describe('mapNotification', () => {
   it('maps command execution start and completion', () => {
     expect(
       mapNotification(itemStarted({ type: 'commandExecution', id: 'cmd-1', command: 'npm test', cwd: '/repo' } as ThreadItem)),
-    ).toEqual({ type: 'tool_use', itemId: 'cmd-1', title: 'npm test', detail: '/repo' });
+    ).toEqual({ type: 'tool_use', itemId: 'cmd-1', title: 'npm test', detail: '/repo', kind: 'command' });
 
     expect(
       mapNotification(
@@ -129,6 +129,7 @@ describe('mapNotification', () => {
       type: 'tool_use',
       itemId: 'file-1',
       title: '编辑 src/foo.ts (+2 −1)',
+      kind: 'file',
     });
     expect(mapNotification(itemCompleted({ type: 'fileChange', id: 'file-1', changes } as unknown as ThreadItem))).toEqual({
       type: 'tool_result',
@@ -145,6 +146,7 @@ describe('mapNotification', () => {
       type: 'tool_use',
       itemId: 'f-add',
       title: '新建 /proj/e2e-scratch.md (+1)',
+      kind: 'file',
     });
     expect(mapNotification(itemCompleted({ type: 'fileChange', id: 'f-add', changes } as unknown as ThreadItem))).toEqual({
       type: 'tool_result',
@@ -159,6 +161,7 @@ describe('mapNotification', () => {
       type: 'tool_use',
       itemId: 'f-del',
       title: '删除 old.md',
+      kind: 'file',
     });
     expect(mapNotification(itemCompleted({ type: 'fileChange', id: 'f-del', changes } as unknown as ThreadItem))).toEqual({
       type: 'tool_result',
@@ -173,6 +176,7 @@ describe('mapNotification', () => {
       type: 'tool_use',
       itemId: 'f-empty',
       title: '新建 empty.md (+0)',
+      kind: 'file',
     });
     expect(mapNotification(itemCompleted({ type: 'fileChange', id: 'f-empty', changes } as unknown as ThreadItem))).toEqual({
       type: 'tool_result',
@@ -187,7 +191,7 @@ describe('mapNotification', () => {
       { path: 'mod.ts', kind: { type: 'update', move_path: null }, diff: '@@\n+x\n-y\n-z' },
     ];
     const evt = mapNotification(itemStarted({ type: 'fileChange', id: 'f-mix', changes } as unknown as ThreadItem));
-    expect(evt).toEqual({ type: 'tool_use', itemId: 'f-mix', title: '编辑 new.md、mod.ts (+3 −2)' });
+    expect(evt).toEqual({ type: 'tool_use', itemId: 'f-mix', title: '编辑 new.md、mod.ts (+3 −2)', kind: 'file' });
   });
 
   it('带 cwd 上下文：项目内路径相对化，项目外保持绝对（看得出越界）', () => {
@@ -196,14 +200,14 @@ describe('mapNotification', () => {
       mapNotification(itemStarted({ type: 'fileChange', id: 'f-in', changes: inside } as unknown as ThreadItem), {
         cwd: '/proj',
       }),
-    ).toEqual({ type: 'tool_use', itemId: 'f-in', title: '新建 src/a.ts (+1)' });
+    ).toEqual({ type: 'tool_use', itemId: 'f-in', title: '新建 src/a.ts (+1)', kind: 'file' });
 
     const outside = [{ path: '/etc/hosts', kind: { type: 'update', move_path: null }, diff: '+x' }];
     expect(
       mapNotification(itemStarted({ type: 'fileChange', id: 'f-out', changes: outside } as unknown as ThreadItem), {
         cwd: '/proj',
       }),
-    ).toEqual({ type: 'tool_use', itemId: 'f-out', title: '编辑 /etc/hosts (+1 −0)' });
+    ).toEqual({ type: 'tool_use', itemId: 'f-out', title: '编辑 /etc/hosts (+1 −0)', kind: 'file' });
   });
 
   it('无 cwd 时超长绝对路径只保留末段（…/ 前缀），控制标题单行长度', () => {
@@ -211,7 +215,7 @@ describe('mapNotification', () => {
       { path: '/Users/clay/devlop/src/ClayCheung/feishu-codex-bridge/e2e-scratch.md', kind: { type: 'add' }, diff: 'x\n' },
     ];
     const evt = mapNotification(itemStarted({ type: 'fileChange', id: 'f-long', changes } as unknown as ThreadItem));
-    expect(evt).toEqual({ type: 'tool_use', itemId: 'f-long', title: '新建 …/feishu-codex-bridge/e2e-scratch.md (+1)' });
+    expect(evt).toEqual({ type: 'tool_use', itemId: 'f-long', title: '新建 …/feishu-codex-bridge/e2e-scratch.md (+1)', kind: 'file' });
   });
 
   it('lists the first files + a count for a multi-file fileChange, ignoring ---/+++ headers', () => {
@@ -221,7 +225,7 @@ describe('mapNotification', () => {
       { path: 'c.ts', kind: 'update', diff: '+w' },
     ];
     const evt = mapNotification(itemStarted({ type: 'fileChange', id: 'file-2', changes } as unknown as ThreadItem));
-    expect(evt).toEqual({ type: 'tool_use', itemId: 'file-2', title: '编辑 a.ts、b.ts 等 3 个文件 (+3 −1)' });
+    expect(evt).toEqual({ type: 'tool_use', itemId: 'file-2', title: '编辑 a.ts、b.ts 等 3 个文件 (+3 −1)', kind: 'file' });
 
     const done = mapNotification(itemCompleted({ type: 'fileChange', id: 'file-2', changes } as unknown as ThreadItem));
     const output = (done as { output: string }).output;
@@ -249,6 +253,7 @@ describe('mapNotification', () => {
       type: 'tool_use',
       itemId: 'file-1',
       title: '编辑文件',
+      kind: 'file',
     });
     expect(mapNotification(itemCompleted({ type: 'fileChange', id: 'file-1' } as ThreadItem))).toEqual({
       type: 'tool_result',
@@ -259,11 +264,20 @@ describe('mapNotification', () => {
       type: 'tool_use',
       itemId: 'search-1',
       title: '联网搜索',
+      kind: 'search',
+    });
+    // with a query, surface it in the title so the search isn't a blank「联网搜索」
+    expect(mapNotification(itemStarted({ type: 'webSearch', id: 'search-2', query: '飞书 2026 更新' } as ThreadItem))).toEqual({
+      type: 'tool_use',
+      itemId: 'search-2',
+      title: '联网搜索：飞书 2026 更新',
+      kind: 'search',
     });
     expect(mapNotification(itemStarted({ type: 'mcpToolCall', id: 'mcp-1' } as ThreadItem))).toEqual({
       type: 'tool_use',
       itemId: 'mcp-1',
       title: '工具调用',
+      kind: 'tool',
     });
     expect(mapNotification(itemCompleted({ type: 'dynamicToolCall', id: 'dyn-1' } as ThreadItem))).toEqual({
       type: 'tool_result',

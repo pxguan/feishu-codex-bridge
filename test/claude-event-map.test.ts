@@ -64,10 +64,10 @@ describe('createTurnMapper —— SDKMessage → AgentEvent', () => {
     ]);
   });
 
-  it('工具：assistant tool_use → tool_use（itemId=工具id，Bash 标题=命令）', () => {
+  it('工具：assistant tool_use → tool_use（itemId=工具id，Bash 标题=命令，kind=command）', () => {
     const mp = createTurnMapper();
     const evs = mp.map(assistantTool('tu_1', 'Bash', { command: 'ls -la', description: '列目录' }));
-    expect(evs).toEqual([{ type: 'tool_use', itemId: 'tu_1', title: 'ls -la', detail: '列目录' }]);
+    expect(evs).toEqual([{ type: 'tool_use', itemId: 'tu_1', title: 'ls -la', detail: '列目录', kind: 'command' }]);
   });
 
   it('工具结果：user tool_result → tool_result（成功 exitCode=0，失败=1）', () => {

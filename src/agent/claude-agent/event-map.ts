@@ -1,5 +1,5 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { AgentEvent } from '../types';
+import type { AgentEvent, ToolKind } from '../types';
 
 /**
  * Map the Claude Agent SDK message stream to normalized {@link AgentEvent}s.
@@ -99,6 +99,7 @@ export function createTurnMapper(ctx: ClaudeMapContext = {}): TurnMapper {
               itemId: String(b.id ?? `tool${++blockSeq}`),
               title: toolTitle(b.name ?? '工具', b.input ?? {}, ctx.cwd),
               detail: toolDetail(b.name ?? '', b.input ?? {}),
+              kind: toolKind(b.name ?? ''),
             });
           }
         }
@@ -245,6 +246,33 @@ export function toolTitle(name: string, input: Record<string, unknown>, cwd?: st
       return '提交方案';
     default:
       return name || '工具调用';
+  }
+}
+
+/**
+ * Coarse category for a Claude tool, so the card renders it right (command →
+ * full ```bash body, file/search/tool → label header). Mirrors {@link toolTitle}'s
+ * switch: Bash IS a shell command (title carries the command line); file edits
+ * and searches carry a short label title.
+ */
+function toolKind(name: string): ToolKind {
+  switch (name) {
+    case 'Bash':
+    case 'BashOutput':
+      return 'command';
+    case 'Read':
+    case 'Write':
+    case 'Edit':
+    case 'MultiEdit':
+    case 'NotebookEdit':
+      return 'file';
+    case 'Glob':
+    case 'Grep':
+    case 'WebFetch':
+    case 'WebSearch':
+      return 'search';
+    default:
+      return 'tool';
   }
 }
 

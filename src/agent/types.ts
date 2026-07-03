@@ -97,6 +97,17 @@ export interface ThreadHistory {
   updatedAt?: number;
 }
 
+/**
+ * Coarse tool category, set by each backend's event-map so the card can render
+ * a tool correctly without re-parsing its title. `command` — a shell command
+ * whose `title` IS the full command line (rendered as a ```bash block in the
+ * panel body so a long/multi-line command stays fully readable, not clipped to
+ * the one-line header). `file` — a file read/edit (title is a path label).
+ * `search` — grep/glob/web. `tool` — everything else (mcp / generic). Absent ⇒
+ * treated as `tool`.
+ */
+export type ToolKind = 'command' | 'file' | 'search' | 'tool';
+
 /** Normalized stream events, mapped from app-server notifications. */
 export type AgentEvent =
   | { type: 'system'; threadId: string }
@@ -105,7 +116,7 @@ export type AgentEvent =
   | { type: 'text'; itemId: string; text: string }
   | { type: 'thinking_delta'; itemId: string; delta: string }
   | { type: 'thinking'; itemId: string; text: string }
-  | { type: 'tool_use'; itemId: string; title: string; detail?: string }
+  | { type: 'tool_use'; itemId: string; title: string; detail?: string; kind?: ToolKind }
   | { type: 'tool_result'; itemId: string; output?: string; exitCode?: number | null }
   | { type: 'usage'; inputTokens?: number; outputTokens?: number }
   // Context-window usage for this thread (from thread/tokenUsage/updated). Drives

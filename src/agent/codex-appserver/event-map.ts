@@ -84,14 +84,19 @@ export function mapNotification(n: ServerNotification, ctx?: MapContext): AgentE
 function mapItemStart(item: ThreadItem, ctx?: MapContext): AgentEvent | null {
   switch (item.type) {
     case 'commandExecution':
-      return { type: 'tool_use', itemId: item.id, title: item.command, detail: String(item.cwd) };
+      return { type: 'tool_use', itemId: item.id, title: item.command, detail: String(item.cwd), kind: 'command' };
     case 'fileChange':
-      return { type: 'tool_use', itemId: item.id, title: fileChangeTitle(item.changes, ctx?.cwd) };
+      return { type: 'tool_use', itemId: item.id, title: fileChangeTitle(item.changes, ctx?.cwd), kind: 'file' };
     case 'webSearch':
-      return { type: 'tool_use', itemId: item.id, title: '联网搜索' };
+      return {
+        type: 'tool_use',
+        itemId: item.id,
+        title: item.query ? `联网搜索：${item.query}` : '联网搜索',
+        kind: 'search',
+      };
     case 'mcpToolCall':
     case 'dynamicToolCall':
-      return { type: 'tool_use', itemId: item.id, title: '工具调用' };
+      return { type: 'tool_use', itemId: item.id, title: '工具调用', kind: 'tool' };
     default:
       return null;
   }

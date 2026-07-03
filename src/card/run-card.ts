@@ -17,10 +17,11 @@ import {
   type Block,
   type FooterStatus,
   type RunState,
+  type Terminal,
   type ToolEntry,
 } from './run-state';
 import { renderRichText } from './markdown-render';
-import { toolBodyMd, toolHeaderText } from './tool-render';
+import { toolBodyMd, toolHeaderText, toolSummaryLine } from './tool-render';
 import { runCardGauge } from './context-gauge';
 
 /** The context-usage gauge line, only at/above the warn tier (else null). */
@@ -54,16 +55,32 @@ export const ANSWER_EID = 'answer';
 export const CONTROLS_EID = 'controls';
 
 const REASONING_MAX = 1500;
-/** Collapse N tool calls into one summary panel at/above this count. */
+/**
+ * While RUNNING, once a tool group reaches this many calls, fold the prior ones
+ * into a single summary panel and keep only the latest live (so the streaming
+ * card stays cheap). Terminal cards render every tool as its own panel and lean
+ * on {@link PROCESS_BODY_BUDGET}/{@link PROCESS_COMPONENT_BUDGET} instead.
+ */
 const COLLAPSE_TOOL_THRESHOLD = 3;
 /**
  * Serialized-size budget for the terminal "过程" panel's body. Nesting every
  * reasoning/tool panel under one collapsible_panel can push that single element
  * past Feishu's ~30KB per-element limit and 400 the card; over budget we degrade
- * tool blocks to header-only summaries (no output bodies). Mirrors the
+ * tool groups to a single full-command summary (no output bodies). Mirrors the
  * history-card budget guard. Kept under 30KB for wrapper/answer headroom.
  */
 const PROCESS_BODY_BUDGET = 22_000;
+/**
+ * Component-count budget for the terminal "过程" body. Feishu silently DROPS a
+ * whole card past ~200 nested components (error 300305) — a tool-heavy run
+ * rendered as one panel per tool can blow that. Over budget we degrade tool
+ * groups to summaries (1 component each) so the card always renders. Headroom
+ * left under ~200 for the answer, footer, gauge and card wrapper.
+ */
+const PROCESS_COMPONENT_BUDGET = 120;
+/** Byte cap on the batched summary's markdown body (one element, well under the
+ * ~30KB per-element limit); over it the tail is dropped with a visible count. */
+const SUMMARY_BODY_MAX = 6000;
 
 /** Routing + render inputs for one run card. */
 export interface RunCardState {
@@ -227,7 +244,7 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
     const toolCount = blocks.reduce((n, b) => (b.kind === 'tool' ? n + 1 : n), 0);
     elements.push(
       collapsiblePanelEl({
-        title: processTitle(Boolean(reasoning), toolCount),
+        title: processTitle(Boolean(reasoning), toolCount, state.terminal),
         expanded: false,
         border: 'grey',
         elements: processEls,
@@ -300,7 +317,9 @@ function lastTextIndex(blocks: Block[]): number {
  */
 function buildProcessBody(reasoning: string, blocks: Block[]): CardElement[] {
   const rich = processElements(reasoning, blocks, false);
-  if (estimateSize(rich) <= PROCESS_BODY_BUDGET) return rich;
+  if (estimateSize(rich) <= PROCESS_BODY_BUDGET && estimateComponents(rich) <= PROCESS_COMPONENT_BUDGET) {
+    return rich;
+  }
   return processElements(reasoning, blocks, true);
 }
 
@@ -317,18 +336,43 @@ function processElements(reasoning: string, blocks: Block[], compactTools: boole
   return out;
 }
 
-function processTitle(hasReasoning: boolean, toolCount: number): string {
+function processTitle(hasReasoning: boolean, toolCount: number, terminal: Terminal): string {
+  // Status-led header (like a COT task tracker): a status glyph + what the fold
+  // holds. On a non-normal ending the noun names it ("中断前的过程") — after an
+  // interrupt the user opens it precisely to see what was mid-flight.
+  const icon =
+    terminal === 'interrupted' ? '⏹' : terminal === 'idle_timeout' ? '⏱' : terminal === 'error' ? '⚠️' : '✅';
+  const noun =
+    terminal === 'interrupted'
+      ? '中断前的过程'
+      : terminal === 'idle_timeout'
+        ? '超时前的过程'
+        : terminal === 'error'
+          ? '出错前的过程'
+          : '本轮过程';
   const parts: string[] = [];
   if (hasReasoning) parts.push('🧠 思考');
-  if (toolCount > 0) parts.push(`🧰 ${toolCount} 个工具调用`);
-  const detail = parts.length > 0 ? `：${parts.join(' · ')}` : '';
-  return `🗂 **过程${detail}**（点击展开）`;
+  if (toolCount > 0) parts.push(`🧰 ${toolCount} 个工具`);
+  const detail = parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
+  return `${icon} **${noun}**${detail}（点击展开）`;
 }
 
 /** Rough serialized size of an element list, for the process-panel budget. */
 function estimateSize(els: CardElement[]): number {
   let n = 0;
   for (const el of els) n += JSON.stringify(el).length;
+  return n;
+}
+
+/**
+ * Rough nested-component count, for the ~200-per-card cap. A collapsible_panel
+ * wraps a header + a body element, so count it as ~3; a plain markdown line is 1.
+ * Deliberately conservative — a small overcount just degrades to summaries a bit
+ * sooner, which is the safe direction (a dropped card is the failure to avoid).
+ */
+function estimateComponents(els: CardElement[]): number {
+  let n = 0;
+  for (const el of els) n += (el as { tag?: string }).tag === 'collapsible_panel' ? 3 : 1;
   return n;
 }
 
@@ -405,13 +449,18 @@ function* groupBlocks(blocks: Block[]): Generator<Group> {
 
 function renderToolGroup(tools: ToolEntry[], finalized: boolean, compact = false): CardElement[] {
   if (tools.length === 0) return [];
-  // compact (process-panel over budget): header-only summary, drop output bodies.
-  if (compact) return [collapsedToolSummary(tools, true)];
+  // compact (process-panel over size/component budget): one summary panel that
+  // still lists each tool's FULL command, just without output bodies.
+  if (compact) return [collapsedToolSummary(tools, finalized)];
+  // terminal: every tool gets its own collapsible panel, so each is independently
+  // expandable to its full command + output. buildProcessBody falls back to
+  // `compact` if this stack would blow the size/component budget.
+  if (finalized) return tools.map((t) => toolPanel(t, false));
   if (tools.length < COLLAPSE_TOOL_THRESHOLD) {
     return tools.map((t) => toolPanel(t, false));
   }
-  if (finalized) return [collapsedToolSummary(tools, true)];
-  // running: collapse prior tools into a summary, keep the latest one visible
+  // running: collapse prior tools into a summary (full commands), keep the latest
+  // one live and expanded so progress is watchable without exploding the card.
   const prior = tools.slice(0, -1);
   const latest = tools[tools.length - 1];
   const out: CardElement[] = [];
@@ -422,7 +471,7 @@ function renderToolGroup(tools: ToolEntry[], finalized: boolean, compact = false
 
 function reasoningPanel(content: string, active: boolean): CardElement {
   return collapsiblePanel({
-    title: active ? '🧠 **思考中**' : '🧠 **思考完成，点击查看**',
+    title: active ? '🧠 **正在思考…**' : '🧠 **思考过程**（点击展开）',
     expanded: active,
     border: 'grey',
     body: truncate(content, REASONING_MAX),
@@ -439,17 +488,33 @@ function toolPanel(tool: ToolEntry, expanded: boolean): CardElement {
 }
 
 /**
- * N tool calls as one collapsed panel — only the per-tool header line is kept
- * (no bodies). Nesting full output panels can blow past Feishu's ~30KB
- * per-element limit and 400 the whole card stream.
+ * N tool calls as one collapsed panel. Each line keeps the tool's FULL command
+ * ({@link toolSummaryLine}) — NOT clipped to the one-line header — so a batched
+ * shell command is actually readable (the「看不全脚本」fix). Output bodies are
+ * dropped: this is the cheap/degraded form (1 component, no nested output
+ * panels) used when a group is huge or over the per-card budget. If the joined
+ * body would still approach the ~30KB per-element limit, the tail is dropped
+ * with a visible count (never silently).
  */
 function collapsedToolSummary(tools: ToolEntry[], finalized: boolean): CardElement {
   const suffix = finalized ? '（已结束）' : '';
+  const lines = tools.map(toolSummaryLine);
+  let body = lines.join('\n');
+  if (body.length > SUMMARY_BODY_MAX) {
+    let kept = 0;
+    let acc = 0;
+    for (const line of lines) {
+      if (acc + line.length + 1 > SUMMARY_BODY_MAX) break;
+      acc += line.length + 1;
+      kept++;
+    }
+    body = `${lines.slice(0, kept).join('\n')}\n- _…还有 ${tools.length - kept} 个命令未显示_`;
+  }
   return collapsiblePanel({
-    title: `☕ **${tools.length} 个工具调用${suffix}**`,
+    title: `🧰 **${tools.length} 个工具调用${suffix}**`,
     expanded: false,
     border: 'blue',
-    body: tools.map((t) => `- ${toolHeaderText(t)}`).join('\n'),
+    body,
   });
 }
 

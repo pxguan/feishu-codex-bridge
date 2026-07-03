@@ -292,6 +292,59 @@ describe('buildRunCard — terminal collapse', () => {
   });
 });
 
+describe('buildRunCard — full command visibility', () => {
+  const panelCount = (card: unknown): number =>
+    (JSON.stringify(card).match(/"tag":"collapsible_panel"/g) ?? []).length;
+
+  it('surfaces the FULL shell command in the terminal process panel (not header-clipped)', () => {
+    const cmd = `echo start && ${'x'.repeat(130)} && echo DISTINCTIVE_TAIL`;
+    const rs = run([
+      { type: 'tool_use', itemId: 't1', title: cmd, detail: '/repo', kind: 'command' },
+      { type: 'tool_result', itemId: 't1', exitCode: 0, output: 'ran' },
+      { type: 'text', itemId: 'a', text: 'FINAL' },
+      { type: 'done', turnId: 'x' },
+    ]);
+    const json = JSON.stringify(buildRunCard({ rs }));
+    // the tail lives past the 120-char header cap → its presence proves the body carries the whole command
+    expect(json).toContain('DISTINCTIVE_TAIL');
+    expect(json).toContain('```bash');
+  });
+
+  it('renders a moderate run as one panel PER tool, each with its full command', () => {
+    const events: AgentEvent[] = [];
+    for (let i = 0; i < 5; i++) {
+      events.push({ type: 'tool_use', itemId: `t${i}`, title: `git show HEAD~${i} --stat FULLCMD_TAIL_${i}`, kind: 'command' });
+      events.push({ type: 'tool_result', itemId: `t${i}`, exitCode: 0, output: `out${i}` });
+    }
+    events.push({ type: 'text', itemId: 'a', text: 'FINAL' });
+    events.push({ type: 'done', turnId: 'x' });
+    const card = buildRunCard({ rs: run(events) });
+    const json = JSON.stringify(card);
+    // not degraded to a batched summary (the summary title says「N 个工具调用」;
+    // the process-fold header only says「N 个工具」) — and 1 fold + 5 tool panels.
+    expect(json).not.toContain('个工具调用');
+    expect(panelCount(card)).toBe(6);
+    for (let i = 0; i < 5; i++) expect(json).toContain(`FULLCMD_TAIL_${i}`);
+  });
+
+  it('degrades a huge run to a batched summary that STILL lists full commands (and never explodes the card)', () => {
+    const events: AgentEvent[] = [];
+    const cmd0 = `run ${'a'.repeat(90)} BATCHED_TAIL`;
+    for (let i = 0; i < 130; i++) {
+      events.push({ type: 'tool_use', itemId: `t${i}`, title: i === 0 ? cmd0 : `cmd ${i}`, kind: 'command' });
+      events.push({ type: 'tool_result', itemId: `t${i}`, exitCode: 0, output: 'ok' });
+    }
+    events.push({ type: 'text', itemId: 'a', text: 'FINAL' });
+    events.push({ type: 'done', turnId: 'x' });
+    const card = buildRunCard({ rs: run(events) });
+    const json = JSON.stringify(card);
+    expect(json).toContain('130 个工具调用'); // degraded to the summary (component budget)
+    expect(json).toContain('BATCHED_TAIL'); // ...but a batched command is still shown in full
+    // component-budget guard held: the card is a handful of panels, not 130
+    expect(panelCount(card)).toBeLessThan(10);
+  });
+});
+
 describe('context usage gauge', () => {
   it('stores the latest usage from context_usage events', () => {
     const rs = run([

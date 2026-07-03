@@ -1,4 +1,4 @@
-import type { AgentEvent } from '../agent/types';
+import type { AgentEvent, ToolKind } from '../agent/types';
 
 /**
  * Structured run state for the in-topic run card. AgentEvents are folded into
@@ -18,6 +18,8 @@ export interface ToolEntry {
   title: string;
   /** secondary detail, e.g. cwd for a shell command */
   detail?: string;
+  /** coarse category — drives rendering (command → full ```bash body). Absent ⇒ 'tool'. */
+  kind?: ToolKind;
   status: ToolStatus;
   output?: string;
   exitCode?: number | null;
@@ -149,6 +151,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         id: evt.itemId,
         title: evt.title,
         detail: evt.detail,
+        kind: evt.kind,
         status: 'running',
       };
       return {
