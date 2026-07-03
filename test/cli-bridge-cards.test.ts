@@ -158,7 +158,7 @@ describe('cli bridge cards', () => {
     });
     const completionJson = JSON.stringify(completion);
     expect(completionJson).toContain('Vonvon Bridge');
-    expect(completionJson).toContain('等待确认');
+    expect(completionJson).toContain('✅ 收工');
     expect(completionJson).toContain('📝 **Agent 输出**');
     expect(completionJson).toContain('有效期至');
     expect(values(completion)).toContain(CLI.taskCompletionDone);
@@ -198,7 +198,7 @@ describe('cli bridge cards', () => {
       replyEnabled: false,
       replyDoneAt: new Date('2026-06-12T10:55:00+08:00').getTime(),
     });
-    expect(JSON.stringify(done)).toContain('✅ 已确认完成');
+    expect(JSON.stringify(done)).toContain('✅ 已收工');
     expect(JSON.stringify(done)).toContain('✅ 已完成');
     expect(values(done)).toEqual([]);
   });

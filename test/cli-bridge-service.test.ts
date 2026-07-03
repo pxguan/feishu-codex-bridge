@@ -340,7 +340,7 @@ describe('cli bridge service routing', () => {
     })).resolves.toEqual({ decision: 'allow' });
     expect(createdCards).toHaveLength(1);
     expect(createdCards[0]).toContain('Vonvon Bridge');
-    expect(createdCards[0]).not.toContain('等待确认'); // no reply window when you're active
+    expect(actionValue(JSON.parse(createdCards[0] ?? '{}'), CLI.taskCompletionDone)).toBeUndefined(); // no reply window when you're active
   });
 
   it('does not send task-completion notifications when away_only sees local activity', async () => {
@@ -395,7 +395,7 @@ describe('cli bridge service routing', () => {
     // the card (resolveAction already did); it's internal-only and ignored downstream.
     await expect(pending).resolves.toEqual({ decision: 'allow', reason: 'task_done_clicked' });
     await vi.waitFor(() => expect(updatedCards).toHaveLength(1));
-    expect(updatedCards[0]).toContain('✅ 已确认完成');
+    expect(updatedCards[0]).toContain('✅ 已收工');
     expect(updatedCards[0]).toContain('✅ 已完成');
   });
 
@@ -424,10 +424,10 @@ describe('cli bridge service routing', () => {
     })).resolves.toEqual({ decision: 'allow' });
     // [0] is the away heads-up; [1] is the completion card offering the reply continuation …
     expect(createdCards).toHaveLength(2);
-    expect(createdCards[1]).toContain('等待确认');
+    expect(createdCards[1]).toContain('✅ 收工');
     // … and it gets refreshed to a no-button closed state once the window ends.
     await vi.waitFor(() => expect(updatedCards).toHaveLength(1));
-    expect(updatedCards[0]).not.toContain('等待确认'); // closed: no reply affordance left
+    expect(actionValue(JSON.parse(updatedCards[0] ?? '{}'), CLI.taskCompletionDone)).toBeUndefined(); // closed: no reply affordance left
   });
 
   it('hands a forwarded permission back to the terminal when the user returns', async () => {
@@ -486,7 +486,7 @@ describe('cli bridge service routing', () => {
     expect(createdCards).toHaveLength(2);
     // Codex's Stop hook honors {decision:'block', reason} just like Claude, so the
     // completion card offers the reply-continuation affordance.
-    expect(createdCards[1]).toContain('等待确认');
+    expect(createdCards[1]).toContain('✅ 收工');
   });
 
   it('re-forwards a Stop that is continuing from a Feishu reply, so multi-turn results come back', async () => {
@@ -519,7 +519,7 @@ describe('cli bridge service routing', () => {
     // [0] away heads-up, [1] the continuation's completion card
     expect(createdCards).toHaveLength(2);
     expect(createdCards[1]).toContain('continuation result');
-    expect(createdCards[1]).toContain('等待确认');
+    expect(createdCards[1]).toContain('✅ 收工');
   });
 
   it('allows later permission requests from an approved session without another card', async () => {

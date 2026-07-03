@@ -80,8 +80,8 @@ export const COPY = {
     '人在桌前我就闭嘴,一切回归终端。',
   ],
   footerReply: [
-    '💬 直接回复这条消息,就能接着支使它干活;或点「等待确认」让它收工。',
-    '💬 回我一句话,它立刻接着跑;不想继续就点「等待确认」。',
+    '💬 直接回复这条消息,就能接着支使它干活;或点「收工」让它退出。',
+    '💬 回我一句话,它立刻接着跑;不想继续就点「收工」。',
   ],
 } as const;
 
@@ -348,7 +348,7 @@ export function buildCliBridgeTaskCompletionCard(input: {
   replyExpiresAt?: number;
   replyDoneAt?: number;
 }): CardObject {
-  const verb = input.replyDoneAt ? '✅ 已确认完成'
+  const verb = input.replyDoneAt ? '✅ 已收工'
     : input.status === 'failed' ? '❌ 任务失败'
       : pickCopy(COPY.completion, input.id || input.cwd);
   const elements: CardElement[] = [
@@ -366,7 +366,7 @@ export function buildCliBridgeTaskCompletionCard(input: {
   }
   if (input.replyEnabled) {
     const expiresAt = input.replyExpiresAt ? `（有效期至 ${new Date(input.replyExpiresAt).toLocaleString('zh-CN')}）` : '';
-    elements.push(actions([button('⏳ 等待确认', { a: CLI.taskCompletionDone, id: input.id }, 'primary')]));
+    elements.push(actions([button('✅ 收工', { a: CLI.taskCompletionDone, id: input.id }, 'primary')]));
     elements.push(note(pickCopy(COPY.footerReply, input.id || input.cwd) + expiresAt));
   } else if (input.replyDoneAt) {
     elements.push(actions([disabledButton('✅ 已完成', 'primary')]));
