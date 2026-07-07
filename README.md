@@ -4,6 +4,9 @@
 [![total downloads](https://badgen.net/npm/dt/@modelzen/feishu-codex-bridge)](https://www.npmjs.com/package/@modelzen/feishu-codex-bridge)
 [![downloads/month](https://badgen.net/npm/dm/@modelzen/feishu-codex-bridge)](https://www.npmjs.com/package/@modelzen/feishu-codex-bridge)
 [![license](https://badgen.net/npm/license/@modelzen/feishu-codex-bridge)](https://github.com/modelzen/feishu-codex-bridge/blob/main/LICENSE)
+[![官网](https://badgen.net/badge/%E5%AE%98%E7%BD%91/bridge.vonvon.cc/blue)](https://bridge.vonvon.cc)
+
+🌐 **官网：<https://bridge.vonvon.cc>**
 
 > 把飞书 / Lark 桥接到你本机的 [Codex](https://github.com/openai/codex) 或 [Claude Code](https://www.anthropic.com/claude-code)，在群里 @ 机器人就能让它在指定项目目录里干活，结果以流式 Markdown 卡片实时回到群里。
 >
@@ -140,6 +143,7 @@ npm test            # vitest
 
 ## 💬 文档 & 交流
 
+- 🌐 **官网**：<https://bridge.vonvon.cc>
 - 🎀 **图文介绍**：<https://my.feishu.cn/docx/AFKNdf4QaooL5OxSR8bc5H7vn7b> —— 配大量截图，讲清它在飞书里长什么样、怎么用。
 - 📖 **命令手册**：<https://my.feishu.cn/wiki/PZ23wGr7JiKK5RkIG4rcZXzGn5g> —— 各场景可用命令速查。
 - 🐛 **反馈 / 贡献**：<https://github.com/modelzen/feishu-codex-bridge/issues>
