@@ -26,22 +26,27 @@
 
 ## ⚡ 安装
 
-两条命令装好、打开网页控制台，**剩下全在网页里点**（扫码加机器人 / 开权限 / 启停）：
-
-```bash
-npm i -g @modelzen/feishu-codex-bridge   # 1. 装命令
-feishu-codex-bridge web                  # 2. 打开本机网页控制台
-```
-
-让 **Codex / Claude** 替你装？把下面这段发给它：
+让 **Codex / Claude** 替你装？把下面这段发给它，剩下全在网页里点（扫码加机器人 / 开权限 / 启停）：
 
 ```text
-如果本地没有 feishu-codex-bridge 命令，就先用 npm i -g @modelzen/feishu-codex-bridge 安装。
-然后运行 feishu-codex-bridge web 打开网页控制台，把输出的网址给我打开。
-装好、开完网页就停，别的不用做。
+帮我在这台电脑上安装并跑起来 feishu-codex-bridge：
+
+1) 先 node -v 确认有 Node.js(≥18)，没有就先装好；
+2) 再 codex --version 确认已经安装了 codex CLI，没有就先装好；
+3) 全局安装：
+   npm i -g @modelzen/feishu-codex-bridge
+4) 前台运行，打开本机 Web 控制台：
+   feishu-codex-bridge web
+   它一启动会打印一个 http://127.0.0.1:xxxx/?token=... 的链接。
+5) 把那个链接发给我；
+6) 然后用文字告诉我接下来怎么做：
+   - 我在浏览器打开这个链接；
+   - 点页面上的「启动」按钮，把后台服务跑起来；
+   - 启动后页面会自动进入可写控制台，在里面扫码添加我的第一个飞书机器人；
+   - 成功创建机器人后，前台那条 feishu-codex-bridge web 就可以 Ctrl+C 关掉，不影响后台服务。
 ```
 
-> 前置：**Node ≥ 20**，外加一个登录好的后端 —— **Codex**（`npm i -g @openai/codex && codex login`）或 **Claude Code**（SDK 随桥内置、复用本机 `claude` 登录态，首次按需下载约 265MB）。打开网页后扫码加机器人、按 checklist 开权限 / 订阅事件，全程点点点，不用碰命令行。
+📺 **安装演示视频**：<https://www.bilibili.com/video/BV1xP7V6fESb>
 
 ---
 
