@@ -26,7 +26,18 @@
 
 ## ⚡ 安装
 
-让 **Codex / Claude** 替你装？把下面这段发给它，剩下全在网页里点（扫码加机器人 / 开权限 / 启停）：
+两步打开本机网页控制台。装好 Bridge、打开控制台，再在页面里启动后台服务、添加第一个 Bridge 机器人。
+
+```bash
+# 1. 全局安装 Bridge
+npm i -g @modelzen/feishu-codex-bridge
+
+# 2. 打开本机网页控制台
+# 启动服务、添加好机器人后，这条前台命令即可 Ctrl+C 关闭
+feishu-codex-bridge web
+```
+
+不想自己敲？把下面这段发给 **Codex / Claude** 等 AI agent，让它替你装好并跑起来：
 
 ```text
 帮我在这台电脑上安装并跑起来 feishu-codex-bridge：
@@ -46,7 +57,11 @@
    - 成功创建机器人后，前台那条 feishu-codex-bridge web 就可以 Ctrl+C 关掉，不影响后台服务。
 ```
 
-📺 **安装演示视频**：<https://www.bilibili.com/video/BV1xP7V6fESb>
+### 三分钟，看它入职你的飞书
+
+从全局装包、打开本机网页控制台，到扫码建机器人、私聊报到，一整段带解说录屏。点击下面封面去 B 站观看高清版。
+
+[![3 分钟跑通：飞书里直接发任务，Codex 在你本机真干活](docs/assets/install-demo-cover.jpg)](https://www.bilibili.com/video/BV1xP7V6fESb)
 
 ---
 
