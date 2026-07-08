@@ -49,6 +49,7 @@ import { sendManagedCard, updateManagedCard } from '../card/managed';
 import { RunRender } from '../card/run-render';
 import { finalMessageText, initialState, reduce, type RunState } from '../card/run-state';
 import {
+  buildClearedCard,
   buildHelpCard,
   buildModelCard,
   buildResumeCard,
@@ -787,6 +788,16 @@ export function createOrchestrator(
         return;
       }
       const ts = turnSession(msg.chatId, project, msg.senderId);
+      if (cmd === 'resume') {
+        // 单会话群：就地切回历史会话（重绑本群 session key，不另起话题）。admin 门控在 postResumeCard 内。
+        postResumeCard(msg, ts.sessionKey);
+        return;
+      }
+      if (cmd === 'clear') {
+        // 单会话群：停泊当前会话 + 重绑到全新 thread（旧 thread 留档可 /resume）。admin 门控在 runClear 内。
+        runClear(msg, ts.sessionKey, ts);
+        return;
+      }
       if (cmd === 'model') {
         postModelCard(msg, ts.sessionKey, false); // 单会话群：扁平引用回复，卡片直接出现在会话里，不另起话题
         return;
@@ -823,6 +834,16 @@ export function createOrchestrator(
       if (cmd === 'resume' || cmd === 'settings') {
         await channel
           .send(msg.chatId, { markdown: `\`/${cmd}\` 请到主群区使用（话题外发）。` }, { replyTo: msg.messageId, replyInThread: true })
+          .catch(() => undefined);
+        return;
+      }
+      if (cmd === 'clear') {
+        await channel
+          .send(
+            msg.chatId,
+            { markdown: '`/clear` 仅单会话群可用。多话题群里，回主群区 @我 + 内容 即开新话题；`/resume` 可恢复历史会话。' },
+            { replyTo: msg.messageId, replyInThread: true },
+          )
           .catch(() => undefined);
         return;
       }
@@ -866,6 +887,16 @@ export function createOrchestrator(
       await postGroupSettings(msg, project);
       return;
     }
+    if (cmd === 'clear') {
+      await channel
+        .send(
+          msg.chatId,
+          { markdown: '`/clear` 仅单会话群可用。多话题群里，@我 + 内容 即开新话题；`/resume` 可恢复历史会话。' },
+          { replyTo: msg.messageId },
+        )
+        .catch(() => undefined);
+      return;
+    }
     if (cmd === 'model' || cmd === 'compact' || cmd === 'context') {
       await channel
         .send(msg.chatId, { markdown: `\`/${cmd}\` 需要在话题里使用（先 @我 开个话题）。` }, { replyTo: msg.messageId })
@@ -901,7 +932,7 @@ export function createOrchestrator(
   };
 
   /** Parse a leading slash command; null otherwise. */
-  function parseCommand(text: string): 'resume' | 'model' | 'settings' | 'help' | 'compact' | 'context' | null {
+  function parseCommand(text: string): 'resume' | 'model' | 'settings' | 'help' | 'compact' | 'context' | 'clear' | null {
     const m = /^\/(\w+)/.exec(text);
     const name = m?.[1]?.toLowerCase();
     return name === 'resume' ||
@@ -909,7 +940,8 @@ export function createOrchestrator(
       name === 'settings' ||
       name === 'help' ||
       name === 'compact' ||
-      name === 'context'
+      name === 'context' ||
+      name === 'clear'
       ? name
       : null;
   }
@@ -931,7 +963,7 @@ export function createOrchestrator(
 
   /** 非管理员触发 owner-only 命令(/resume、/settings)时的统一无权限提示。
    * design §5: 管理类命令仅 bot owner(=admins[]) 可用；对话类(/model、/help)对所有人开放。 */
-  async function denyAdminCommand(msg: NormalizedMessage, cmd: 'resume' | 'settings'): Promise<void> {
+  async function denyAdminCommand(msg: NormalizedMessage, cmd: 'resume' | 'settings' | 'clear'): Promise<void> {
     await channel
       .send(msg.chatId, { markdown: `⚠️ \`/${cmd}\` 仅 bot 管理员可用。` }, { replyTo: msg.messageId })
       .catch(() => undefined);
@@ -1459,7 +1491,7 @@ export function createOrchestrator(
    * (admins[]) — 恢复会话会改变上下文，属管理类命令；非管理员收到无权限提示。
    * Detached — listThreads spawns an app-server (slow); holding onMessage on it
    * would pin the SDK's per-chat queue (sibling topics + ⏹ card-actions stall). */
-  function postResumeCard(msg: NormalizedMessage): void {
+  function postResumeCard(msg: NormalizedMessage, singleSessionKey?: string): void {
     void withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
       if (!isAdmin(cfg, msg.senderId)) {
         await denyAdminCommand(msg, 'resume');
@@ -1483,6 +1515,8 @@ export function createOrchestrator(
           backend: be.id,
           threads,
           createdAt: Date.now(),
+          // Single-session group: pick rebinds this key flat (no new topic).
+          ...(singleSessionKey ? { flat: true, sessionKey: singleSessionKey } : {}),
         };
         const res = await sendManagedCard(channel, msg.chatId, buildResumeCard(state), msg.messageId);
         pruneResumePending();
@@ -1668,6 +1702,89 @@ export function createOrchestrator(
         // say so instead of dropping them silently (same contract as a killed run).
         if (reserved.queue.length > 0) {
           await reply(`⚠️ 压缩期间收到的 ${reserved.queue.length} 条消息未进入会话，请重发。`);
+        }
+      }
+    });
+  }
+
+  /**
+   * `/clear` (single-session groups only, admin-gated): park the current session
+   * and rebind the group to a BRAND-NEW backend thread, preserving the session's
+   * model / effort / backend. The parked thread stays on disk (resumable via
+   * `/resume`) — non-destructive; Feishu chat history is untouched, and the card
+   * says so. Reserves the session SYNCHRONOUSLY (like {@link runCompact}) so a
+   * message racing in through the SDK's per-chat queue queues instead of
+   * launching a turn on the about-to-be-replaced thread; the slow work
+   * (startThread) runs detached so onMessage returns fast.
+   */
+  function runClear(msg: NormalizedMessage, sessionKey: string, perm: TurnPerm): void {
+    const reply = (markdown: string): Promise<void> =>
+      channel.send(msg.chatId, { markdown }, { replyTo: msg.messageId }).then(
+        () => undefined,
+        () => undefined,
+      );
+    if (!isAdmin(cfg, msg.senderId)) {
+      void denyAdminCommand(msg, 'clear');
+      return;
+    }
+    if (active.get(sessionKey)) {
+      void reply('⏳ 这一轮还在跑，结束后再 `/clear`。');
+      return;
+    }
+    const reserved: ActiveState = { queue: [], requesterOpenId: msg.senderId };
+    active.set(sessionKey, reserved);
+    void withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
+      try {
+        const [rec, project] = await Promise.all([getSession(sessionKey), getProjectByChatId(msg.chatId)]);
+        // Route by the session's backend (fall back to the project's) — a fresh
+        // codex thread for a codex session, claude for a claude one.
+        const be = backendFor(rec?.backend ?? project?.backend);
+        const cwd = rec?.cwd ?? project?.cwd ?? fallbackCwd;
+        // Carry the session's chosen model/effort into the new thread so /clear
+        // resets the CONVERSATION, not the user's model pick. Tier (mode/network/
+        // autoCompact) comes from the caller's live perm.
+        const fresh = await be.startThread({
+          cwd,
+          model: rec?.model,
+          effort: rec?.effort,
+          mode: perm.mode,
+          network: perm.network,
+          autoCompact: perm.autoCompact,
+        });
+        // Close + evict the parked live thread (a separate app-server proc); its
+        // on-disk session survives for /resume. Then track the fresh one.
+        const old = sessions.get(sessionKey);
+        if (old && old !== fresh) {
+          sessions.delete(sessionKey);
+          void old.close().catch(() => undefined);
+        }
+        trackSession(sessionKey, fresh);
+        lastUsage.delete(sessionKey); // context gauge → 0 until the next turn
+        await upsertSession({
+          threadId: sessionKey,
+          chatId: msg.chatId,
+          cwd,
+          sessionId: fresh.sessionId,
+          backend: be.id,
+          model: rec?.model,
+          effort: rec?.effort,
+          summary: '(新会话)',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+        await sendManagedCard(channel, msg.chatId, buildClearedCard(), msg.messageId, false).catch((err) =>
+          log.fail('card', err, { phase: 'clear' }),
+        );
+        log.info('intake', 'clear', { sessionKey, sessionId: fresh.sessionId, backend: be.id });
+      } catch (err) {
+        log.fail('intake', err, { phase: 'clear' });
+        await reply(`❌ ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        if (active.get(sessionKey) === reserved) active.delete(sessionKey);
+        // Messages that queued onto the reservation during the swap never ran —
+        // say so instead of dropping them silently (same contract as runCompact).
+        if (reserved.queue.length > 0) {
+          await reply(`⚠️ 清空期间收到的 ${reserved.queue.length} 条消息未进入会话，请重发。`);
         }
       }
     });
@@ -2878,6 +2995,71 @@ export function createOrchestrator(
     // unset on legacy cards → default (codex), the historical behavior.
     const be = backendFor(backendId);
     try {
+      // Single-session group (flat): rebind the group's session key IN PLACE —
+      // post the same history card flat (no reply_in_thread, so no topic) and
+      // repoint the record. Binding is deterministic (the key IS the chatId
+      // session key), so none of the multi path's topic-thread-id resolution /
+      // "bound?" uncertainty applies.
+      if (state.flat && state.sessionKey) {
+        const sessionKey = state.sessionKey;
+        // Rebinding under a live turn would swap the thread out from under it —
+        // refuse and tell the admin to wait (the picked session is untouched).
+        if (active.get(sessionKey)) {
+          resumePending.delete(evt.messageId);
+          settleUpdate(evt.messageId, buildResumeErrorCard(state, '当前有任务在跑，结束后再 /resume'));
+          return;
+        }
+        // Reserve SYNCHRONOUSLY (mirrors runCompact/runClear): readHistory is a
+        // long await, and a message racing in during it must NOT start a turn we
+        // then evict out from under. Held until the rebind settles; released in
+        // finally, with a notice for anything that queued and never ran.
+        const reserved: ActiveState = { queue: [], requesterOpenId: state.requesterOpenId };
+        active.set(sessionKey, reserved);
+        try {
+          const history = await be.readHistory(state.cwd, sessionId);
+          resumePending.delete(evt.messageId);
+          await withTrace({ chatId: state.chatId, msgId: state.originalMsgId }, async () => {
+            const cardState: HistoryCardState = { cwd: state.cwd, projectName: state.projectName, history };
+            await sendManagedCard(channel, state.chatId, buildHistoryCard(cardState), state.originalMsgId, false).catch((err) =>
+              log.fail('card', err, { phase: 'resume-history-single' }),
+            );
+            // Evict + close the current live thread at this key so the NEXT message
+            // resumes the PICKED session via resolveThread (a live thread would win
+            // the fast path and keep the old session running).
+            const old = sessions.get(sessionKey);
+            if (old) {
+              sessions.delete(sessionKey);
+              void old.close().catch(() => undefined);
+            }
+            lastUsage.delete(sessionKey); // context gauge reflects the resumed thread on its next turn
+            const now = Date.now();
+            await upsertSession({
+              threadId: sessionKey,
+              chatId: state.chatId,
+              cwd: state.cwd,
+              sessionId,
+              backend: be.id,
+              summary: history.name || history.preview || '(恢复会话)',
+              createdAt: now,
+              updatedAt: now,
+            });
+            log.info('card', 'resume-done-single', { sessionKey, sessionId, turns: history.totalTurns });
+          });
+          settleUpdate(evt.messageId, buildResumeDoneCard(state));
+        } finally {
+          if (active.get(sessionKey) === reserved) active.delete(sessionKey);
+          if (reserved.queue.length > 0) {
+            await channel
+              .send(
+                state.chatId,
+                { markdown: `⚠️ 切回期间收到的 ${reserved.queue.length} 条消息未进入会话，请重发。` },
+                { replyTo: state.originalMsgId },
+              )
+              .catch(() => undefined);
+          }
+        }
+        return;
+      }
       // thread/read: fetch the transcript without starting a turn or holding the
       // session live (model/effort left to the thread's own remembered config).
       // Never throws — empty history just yields a minimal card.
