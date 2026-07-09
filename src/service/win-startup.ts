@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { paths } from '../config/paths';
 import { mergeProcessEnv } from '../platform/spawn';
 import {
@@ -85,23 +85,33 @@ export function buildLauncherVbs(): string {
 }
 
 /**
- * Launch a detached, window-hidden bridge now; record its PID. `envPath` (when
- * given) overrides PATH in the child env — the tree-free relauncher runs under
- * WmiPrvSE/taskeng where the interactive user PATH may be absent, so it carries
- * the daemon's PATH forward to keep the new bridge's codex/npm spawns working.
+ * Launch a detached, window-hidden bridge now; record its PID.
+ *
+ * `opts` matters when called from the tree-free relauncher, which the OS parents
+ * under WmiPrvSE/taskeng and may hand a *different* environment than the daemon
+ * had (a foreign USERPROFILE would make the new bridge resolve `~/.feishu-codex-
+ * bridge` — and thus bots.json/sessions — to the WRONG place):
+ *  - `appDir` pins where service.log/err/pid are written (default: this process's
+ *    appDir), so the relauncher writes them to the *daemon's* dir regardless of
+ *    its own env;
+ *  - `envPath` / `userProfile` are carried from the daemon and injected into the
+ *    new bridge's env so it resolves paths and spawns codex/npm correctly even if
+ *    the relauncher itself ran with a stripped-down environment.
  */
-function startNow(envPath?: string): void {
-  const out = openSync(serviceStdoutPath(), 'a');
-  const err = openSync(serviceStderrPath(), 'a');
+function startNow(opts: { appDir?: string; envPath?: string; userProfile?: string } = {}): void {
+  const dir = opts.appDir ?? paths.appDir;
+  const out = openSync(join(dir, 'service.log'), 'a');
+  const err = openSync(join(dir, 'service.err.log'), 'a');
   const overrides: NodeJS.ProcessEnv = { [SERVICE_ENV_FLAG]: '1' };
-  if (envPath) overrides.PATH = envPath;
+  if (opts.envPath) overrides.PATH = opts.envPath;
+  if (opts.userProfile) overrides.USERPROFILE = opts.userProfile;
   const child = spawn(process.execPath, [resolveCliBinPath(), 'run'], {
     detached: true,
     windowsHide: true,
     stdio: ['ignore', out, err],
     env: mergeProcessEnv(process.env, overrides),
   });
-  if (child.pid) writeFileSync(servicePidFile(), String(child.pid), 'utf8');
+  if (child.pid) writeFileSync(join(dir, 'service.pid'), String(child.pid), 'utf8');
   child.unref();
 }
 
@@ -168,8 +178,14 @@ export async function restartWinStartup(): Promise<ServiceStatus> {
     startNow();
     return statusWinStartup();
   }
-  writeRelaunchRequest({ oldPid, envPath: process.env.PATH ?? '', nonce: `${process.pid}-${Date.now()}` });
-  if (!spawnTreeFreeRelauncher()) {
+  const reqPath = relaunchRequestFile();
+  writeRelaunchRequest({
+    oldPid,
+    envPath: process.env.PATH ?? '',
+    userProfile: process.env.USERPROFILE ?? '',
+    nonce: `${process.pid}-${Date.now()}`,
+  });
+  if (!spawnTreeFreeRelauncher(reqPath)) {
     clearRelaunchRequest();
     appendServiceErr('relaunch', `no tree-free backend (powershell/schtasks); kept old pid=${oldPid} running, did NOT restart`);
     throw new Error('无法拉起「树外」重启进程（powershell 与 schtasks 均不可用）；已保留旧服务继续运行，未重启。');
@@ -191,6 +207,10 @@ interface RelaunchRequest {
   /** Daemon-side PATH, carried forward because the WmiPrvSE/taskeng-parented
    *  child's env may lack the interactive user PATH (node/npm/codex resolution). */
   envPath: string;
+  /** Daemon-side USERPROFILE, carried forward so the NEW bridge resolves
+   *  `~/.feishu-codex-bridge` to the user's dir even if the relauncher ran under a
+   *  foreign profile (WMI/taskeng may not preserve the user's env). */
+  userProfile: string;
   /** Dedup marker; the relauncher reads it only for the diagnostic trail. */
   nonce: string;
 }
@@ -208,22 +228,20 @@ function clearRelaunchRequest(): void {
   rmSync(relaunchRequestFile(), { force: true });
 }
 
-function relaunchClaimFile(): string {
-  return `${relaunchRequestFile()}.claim.${process.pid}`;
-}
-
 /**
- * Atomically claim the pending relaunch request. renameSync is atomic on one
+ * Atomically claim the request at `reqPath`. renameSync is atomic on one
  * filesystem, so when two relaunchers race (double-clicked update, or the DM and
  * Web paths firing together) exactly ONE wins the rename and proceeds; the loser
  * gets ENOENT → null → no-op. Without this both would startNow() → two daemons;
  * the single-instance lock kills one, and its eager-written service.pid can stick
- * as a dead pid — resurrecting the very "updated but not relaunched" bug.
+ * as a dead pid — resurrecting the very "updated but not relaunched" bug. Takes an
+ * explicit path (passed as the __win-relaunch arg) so the claim never depends on
+ * the relauncher re-deriving appDir from a possibly-foreign env.
  */
-function claimRelaunchRequest(): RelaunchRequest | null {
-  const claim = relaunchClaimFile();
+function claimRelaunchRequest(reqPath: string): RelaunchRequest | null {
+  const claim = `${reqPath}.claim.${process.pid}`;
   try {
-    renameSync(relaunchRequestFile(), claim);
+    renameSync(reqPath, claim);
   } catch {
     return null; // lost the race, or nothing pending
   }
@@ -233,6 +251,7 @@ function claimRelaunchRequest(): RelaunchRequest | null {
       return {
         oldPid: r.oldPid,
         envPath: typeof r.envPath === 'string' ? r.envPath : '',
+        userProfile: typeof r.userProfile === 'string' ? r.userProfile : '',
         nonce: String(r.nonce ?? ''),
       };
     }
@@ -242,8 +261,8 @@ function claimRelaunchRequest(): RelaunchRequest | null {
   return null;
 }
 
-function clearRelaunchClaim(): void {
-  rmSync(relaunchClaimFile(), { force: true });
+function clearRelaunchClaim(reqPath: string): void {
+  rmSync(`${reqPath}.claim.${process.pid}`, { force: true });
 }
 
 /**
@@ -254,10 +273,11 @@ function clearRelaunchClaim(): void {
  * doubled to escape), so paths with spaces/quotes can't break out — no injection.
  */
 export function buildRelauncherPowershell(
+  reqPath: string,
   binPath: string = resolveCliBinPath(),
   nodePath: string = process.execPath,
 ): string {
-  const inner = `"${nodePath}" "${binPath}" __win-relaunch`;
+  const inner = `"${nodePath}" "${binPath}" __win-relaunch "${reqPath}"`;
   const lit = `'${inner.replace(/'/g, "''")}'`;
   // Primary: WMI create (parented by WmiPrvSE → escapes taskkill /T). `-ErrorAction
   // Stop` turns a runtime WMI failure (PowerShell 2.0 / WMI disabled) into a throw
@@ -297,7 +317,7 @@ function powershellPath(): string | null {
  * and exits; the relauncher it spawns is reparented away and does the killing.
  * Returns whether a backend was launched.
  */
-function spawnTreeFreeRelauncher(): boolean {
+function spawnTreeFreeRelauncher(reqPath: string): boolean {
   const ps = powershellPath();
   if (ps) {
     const errFd = openSync(serviceStderrPath(), 'a');
@@ -306,7 +326,7 @@ function spawnTreeFreeRelauncher(): boolean {
     // never launched the relauncher. The encoded blob is pure ASCII, unmangleable.
     const child = spawn(
       ps,
-      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encodePowershellCommand(buildRelauncherPowershell())],
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encodePowershellCommand(buildRelauncherPowershell(reqPath))],
       { detached: true, windowsHide: true, stdio: ['ignore', errFd, errFd] },
     );
     child.on('error', (e) => appendServiceErr('relaunch', `powershell spawn error: ${e.message}`));
@@ -314,7 +334,7 @@ function spawnTreeFreeRelauncher(): boolean {
     return true;
   }
   appendServiceErr('relaunch', 'powershell.exe not found; trying schtasks fallback');
-  return spawnSchtasksRelauncher();
+  return spawnSchtasksRelauncher(reqPath);
 }
 
 /**
@@ -324,8 +344,8 @@ function spawnTreeFreeRelauncher(): boolean {
  * `/run` fires now regardless of it. Best-effort; the relauncher deletes the
  * task on the way out.
  */
-function spawnSchtasksRelauncher(): boolean {
-  const tr = `"${process.execPath}" "${resolveCliBinPath()}" __win-relaunch`;
+function spawnSchtasksRelauncher(reqPath: string): boolean {
+  const tr = `"${process.execPath}" "${resolveCliBinPath()}" __win-relaunch "${reqPath}"`;
   const create = spawnSync(
     'schtasks',
     ['/create', '/tn', RELAUNCH_TASK_NAME, '/tr', tr, '/sc', 'ONCE', '/st', '00:00', '/f'],
@@ -345,13 +365,16 @@ function spawnSchtasksRelauncher(): boolean {
 
 /** Injectable deps for {@link runWinRelaunch} so its ordering is testable off-Windows. */
 export interface WinRelaunchDeps {
-  /** Atomically claim the request (single-winner); null = lost the race / nothing pending. */
-  claimRequest?: () => RelaunchRequest | null;
-  clearRequest?: () => void;
+  /** Absolute path of the relaunch request (the __win-relaunch arg). Default =
+   *  relaunchRequestFile() so a manual `feishu-codex-bridge __win-relaunch` still works. */
+  requestPath?: string;
+  /** Atomically claim the request at `reqPath` (single-winner); null = lost / none. */
+  claimRequest?: (reqPath: string) => RelaunchRequest | null;
+  clearRequest?: (reqPath: string) => void;
   pidAlive?: (pid: number) => boolean;
   /** Tree-kill the old daemon (default `taskkill /T /F`); returns exit + stderr for the trail. */
   taskkill?: (pid: number) => { status: number | null; stderr: string };
-  start?: (envPath: string) => void;
+  start?: (opts: { appDir: string; envPath: string; userProfile: string }) => void;
   sleep?: (ms: number) => Promise<void>;
   /** Max wait for the old daemon to actually die before giving up (avoid double-instance). */
   graceMs?: number;
@@ -359,7 +382,7 @@ export interface WinRelaunchDeps {
   now?: () => number;
   /** Guarantee the log dir/files exist before appending (default ensureLogFiles). */
   ensureLogs?: () => Promise<void>;
-  /** Diagnostic sink (default → service.err.log); injected so tests stay off the real FS. */
+  /** Diagnostic sink (default → the request dir's service.err.log); injected so tests stay off the real FS. */
   logLine?: (line: string) => void;
 }
 
@@ -382,6 +405,10 @@ function defaultTaskkill(pid: number): { status: number | null; stderr: string }
  *      double-instance mess. Every step leaves a line in service.err.log.
  */
 export async function runWinRelaunch(deps: WinRelaunchDeps = {}): Promise<void> {
+  const reqPath = deps.requestPath ?? relaunchRequestFile();
+  // Derive appDir from the request path (env-independent) so logs + service.pid
+  // land in the DAEMON's dir even if this relauncher ran under a foreign profile.
+  const appDir = dirname(reqPath);
   const claim = deps.claimRequest ?? claimRelaunchRequest;
   const clearClaim = deps.clearRequest ?? clearRelaunchClaim;
   const alive = deps.pidAlive ?? pidAlive;
@@ -392,13 +419,19 @@ export async function runWinRelaunch(deps: WinRelaunchDeps = {}): Promise<void> 
   const pollMs = deps.pollMs ?? 200;
   const now = deps.now ?? ((): number => Date.now());
   const ensureLogs = deps.ensureLogs ?? ensureLogFiles;
-  const logLine = deps.logLine ?? ((line: string): void => appendServiceErr('relaunch', line));
+  const logLine =
+    deps.logLine ?? ((line: string): void => appendServiceErr('relaunch', line, join(appDir, 'service.err.log')));
 
-  await ensureLogs();
+  // Non-fatal: a busy/locked log dir must not abort the actual restart (appendServiceErr is best-effort too).
+  try {
+    await ensureLogs();
+  } catch {
+    /* keep going — the kill/start below don't need the log files */
+  }
   // Atomic single-claim: if another relauncher already grabbed this request
   // (double-click / DM+Web race), we get null and no-op — exactly one relauncher
   // ever runs kill→startNow, so we never spawn a second daemon.
-  const req = claim();
+  const req = claim(reqPath);
   if (!req) {
     logLine('no relaunch request to claim (already handled by another relauncher, or none)');
     return;
@@ -424,10 +457,10 @@ export async function runWinRelaunch(deps: WinRelaunchDeps = {}): Promise<void> 
     }
 
     await sleep(300); // let the OS reclaim the old daemon's listen socket before the new one binds
-    start(req.envPath);
-    logLine(`relaunched; new service.pid=${readServicePid() ?? '?'}`);
+    start({ appDir, envPath: req.envPath, userProfile: req.userProfile });
+    logLine(`relaunched; new daemon started (appDir=${appDir})`);
   } finally {
-    clearClaim();
+    clearClaim(reqPath);
     // Best-effort: drop the one-shot task if the schtasks fallback created one —
     // on every exit path (success / abort), so Task Scheduler stays tidy.
     if (process.platform === 'win32') {

@@ -51,9 +51,9 @@ export async function ensureLogFiles(): Promise<void> {
  * in the daily JSON log, which users don't think to check. Sync because callers
  * include a short-lived relauncher that may exit before an async write flushes.
  */
-export function appendServiceErr(tag: string, line: string): void {
+export function appendServiceErr(tag: string, line: string, filePath: string = serviceStderrPath()): void {
   try {
-    appendFileSync(serviceStderrPath(), `[${new Date().toISOString()}] [${tag}] ${line}\n`);
+    appendFileSync(filePath, `[${new Date().toISOString()}] [${tag}] ${line}\n`);
   } catch {
     /* best-effort — diagnostics must never crash the caller */
   }

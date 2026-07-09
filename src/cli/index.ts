@@ -90,9 +90,9 @@ program
 // 拉起的 relauncher 入口。它 taskkill 旧 daemon → 等其真死 → startNow 起新，绝不会
 // 像旧的进程内重启那样把自己一起杀掉。不对外暴露。
 program
-  .command('__win-relaunch', { hidden: true })
-  .action(async () => {
-    await runWinRelaunch();
+  .command('__win-relaunch [requestPath]', { hidden: true })
+  .action(async (requestPath?: string) => {
+    await runWinRelaunch({ requestPath });
   });
 
 // ── 飞书机器人管理 ───────────────────────────────────────────

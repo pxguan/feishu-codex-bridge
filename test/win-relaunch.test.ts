@@ -9,36 +9,36 @@ import {
 // Windows update→restart fix. restartWinStartup can't kill from its own process
 // (it's inside the target's taskkill /T tree — DM path IS the daemon, Web path is
 // its child), so it hands "kill old → wait for it to die → startNow" to a
-// tree-free relauncher (WMI/Task Scheduler parented outside the tree). These
-// lock the two load-bearing pieces that can't run on the mac dev box: the WMI
-// command string and runWinRelaunch's ordering. Fully dependency-injected — no
-// real process is ever killed and nothing touches the real ~/.feishu-codex-bridge.
+// tree-free relauncher (WMI/Task Scheduler parented outside the tree). These lock
+// the load-bearing pieces that can't run on the mac dev box: the WMI command
+// string, the -EncodedCommand delivery, env-independence, and the ordering. Fully
+// dependency-injected — no real process is killed, nothing touches the real appDir.
+
+const REQ = 'C:\\Users\\me\\.feishu-codex-bridge\\relaunch.json';
 
 describe('buildRelauncherPowershell (WMI tree-free spawn)', () => {
   it('creates the process via WMI Win32_Process.Create (parented by WmiPrvSE, escapes taskkill /T)', () => {
-    const ps = buildRelauncherPowershell('C:\\bin\\feishu.mjs', 'C:\\node.exe');
+    const ps = buildRelauncherPowershell(REQ, 'C:\\bin\\feishu.mjs', 'C:\\node.exe');
     expect(ps).toContain('Invoke-CimMethod');
     expect(ps).toContain('Win32_Process');
     expect(ps).toContain('Create');
   });
 
-  it('re-enters the CLI as the hidden __win-relaunch subcommand with node+bin quoted', () => {
-    const ps = buildRelauncherPowershell('C:\\Program Files\\feishu\\bin.mjs', 'C:\\node.exe');
-    expect(ps).toContain('__win-relaunch');
-    // node + bin each wrapped in double quotes so a space in the path can't split args
-    expect(ps).toContain('"C:\\node.exe" "C:\\Program Files\\feishu\\bin.mjs" __win-relaunch');
+  it('re-enters the CLI as __win-relaunch with node+bin+request-path all quoted', () => {
+    const ps = buildRelauncherPowershell(REQ, 'C:\\Program Files\\feishu\\bin.mjs', 'C:\\node.exe');
+    // node + bin + the request path each double-quoted so a space can't split args;
+    // passing the request path explicitly is what makes the relauncher env-independent.
+    expect(ps).toContain('"C:\\node.exe" "C:\\Program Files\\feishu\\bin.mjs" __win-relaunch "' + REQ + '"');
   });
 
   it('escapes single quotes in paths (PowerShell literal → doubled) so paths cannot break out', () => {
-    const ps = buildRelauncherPowershell("C:\\it's\\bin.mjs", 'C:\\node.exe');
-    // The CommandLine is a single-quoted PS literal; an embedded ' must be doubled.
-    expect(ps).toContain("it''s");
-    // and never left as a lone quote that would terminate the literal early
-    expect(ps).not.toContain("it's\\bin");
+    const ps = buildRelauncherPowershell(REQ, "C:\\it's\\bin.mjs", 'C:\\node.exe');
+    expect(ps).toContain("it''s"); // the CommandLine is a single-quoted PS literal
+    expect(ps).not.toContain("it's\\bin"); // never a lone quote that would end the literal early
   });
 
   it('falls back to a one-shot Scheduled Task if WMI fails at runtime (PS2.0 / WMI off)', () => {
-    const ps = buildRelauncherPowershell('C:\\bin.mjs', 'C:\\node.exe');
+    const ps = buildRelauncherPowershell(REQ, 'C:\\bin.mjs', 'C:\\node.exe');
     expect(ps).toContain('-ErrorAction Stop'); // make a WMI failure throw, not silently no-op
     expect(ps).toContain('catch');
     expect(ps).toContain('schtasks /create');
@@ -48,13 +48,19 @@ describe('buildRelauncherPowershell (WMI tree-free spawn)', () => {
   it('encodes as base64 UTF-16LE for -EncodedCommand so quoting survives the spawn boundary', () => {
     // The real bug: node path with a space (e.g. C:\Program Files\nodejs) had its
     // quotes mangled by -Command through Node spawn, so WMI never launched.
-    const script = buildRelauncherPowershell('C:\\Program Files\\app\\bin.mjs', 'C:\\Program Files\\nodejs\\node.exe');
+    const script = buildRelauncherPowershell(REQ, 'C:\\Program Files\\app\\bin.mjs', 'C:\\Program Files\\nodejs\\node.exe');
     const enc = encodePowershellCommand(script);
     expect(enc).toMatch(/^[A-Za-z0-9+/=]+$/); // pure base64 — nothing for spawn to mangle
     // PowerShell -EncodedCommand decodes base64 as UTF-16LE → must round-trip exactly
     expect(Buffer.from(enc, 'base64').toString('utf16le')).toBe(script);
   });
 });
+
+interface StartOpts {
+  appDir: string;
+  envPath: string;
+  userProfile: string;
+}
 
 /**
  * A fake old-daemon lifecycle for pidAlive: starts alive, dies after N poll
@@ -65,11 +71,11 @@ function makeWorld(opts: { aliveInitially?: boolean; diesAfterProbes?: number })
   const diesAfter = opts.diesAfterProbes ?? 0;
   let probes = 0;
   const events: string[] = [];
-  let started: string | null | undefined = undefined; // undefined = never called
+  let started: StartOpts | undefined; // undefined = never called
   let cleared = false;
 
   const deps: WinRelaunchDeps = {
-    claimRequest: () => ({ oldPid: 4242, envPath: 'C:\\node;C:\\npm', nonce: 'n1' }),
+    claimRequest: () => ({ oldPid: 4242, envPath: 'C:\\node;C:\\npm', userProfile: 'C:\\Users\\me', nonce: 'n1' }),
     clearRequest: () => {
       cleared = true;
       events.push('clear');
@@ -82,8 +88,8 @@ function makeWorld(opts: { aliveInitially?: boolean; diesAfterProbes?: number })
       events.push('taskkill');
       return { status: 0, stderr: '' };
     },
-    start: (envPath: string) => {
-      started = envPath;
+    start: (o: StartOpts) => {
+      started = o;
       events.push('start');
     },
     // deterministic + instant: no real timers, no real clock
@@ -104,7 +110,7 @@ function makeWorld(opts: { aliveInitially?: boolean; diesAfterProbes?: number })
 }
 
 describe('runWinRelaunch (ordering: kill → wait for death → startNow)', () => {
-  it('kills the old daemon, waits until it is dead, then starts new with the carried PATH, then clears', async () => {
+  it('kills the old daemon, waits until it is dead, then starts new with the carried env, then clears', async () => {
     const w = makeWorld({ aliveInitially: true, diesAfterProbes: 3 });
     await runWinRelaunch(w.deps);
 
@@ -115,8 +121,29 @@ describe('runWinRelaunch (ordering: kill → wait for death → startNow)', () =
     expect(kIdx).toBeGreaterThanOrEqual(0);
     expect(sIdx).toBeGreaterThan(kIdx);
     expect(cIdx).toBeGreaterThan(sIdx);
-    // new daemon inherits the daemon-side PATH (WmiPrvSE env may lack the user PATH).
-    expect(w.getStarted()).toBe('C:\\node;C:\\npm');
+    // new daemon inherits the daemon-side PATH + USERPROFILE (relauncher's own env
+    // may be foreign — this is what keeps appDir resolution correct on other machines).
+    expect(w.getStarted()?.envPath).toBe('C:\\node;C:\\npm');
+    expect(w.getStarted()?.userProfile).toBe('C:\\Users\\me');
+  });
+
+  it('derives appDir from the request path so it is independent of the relauncher env', async () => {
+    let startOpts: StartOpts | undefined;
+    await runWinRelaunch({
+      // POSIX-style path so node:path.dirname works the same on the mac test box
+      requestPath: '/home/me/.feishu-codex-bridge/relaunch.json',
+      claimRequest: () => ({ oldPid: 42, envPath: 'P', userProfile: '/home/me', nonce: 'n' }),
+      clearRequest: () => undefined,
+      pidAlive: () => false, // old already gone → straight to start
+      start: (o: StartOpts) => {
+        startOpts = o;
+      },
+      sleep: async () => undefined,
+      ensureLogs: async () => undefined,
+      logLine: () => undefined,
+    });
+    expect(startOpts?.appDir).toBe('/home/me/.feishu-codex-bridge'); // dirname(requestPath)
+    expect(startOpts?.userProfile).toBe('/home/me');
   });
 
   it('skips taskkill when the old daemon is already dead, but still starts the replacement', async () => {
@@ -164,7 +191,7 @@ describe('runWinRelaunch (ordering: kill → wait for death → startNow)', () =
     const claimRequest = () => {
       if (claimed) return null;
       claimed = true;
-      return { oldPid: 4242, envPath: 'C:\\node', nonce: 'n1' };
+      return { oldPid: 4242, envPath: 'C:\\node', userProfile: 'C:\\Users\\me', nonce: 'n1' };
     };
     const mkEvents = () => {
       const events: string[] = [];
