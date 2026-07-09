@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import { spawnProcess } from '../platform/spawn';
-import { SERVICE_ENV_FLAG } from '../service/win-startup';
+import { recordServicePid, SERVICE_ENV_FLAG } from '../service/win-startup';
 import { log } from '../core/logger';
 import type { BotEntry } from '../config/bots';
 import { createAdminIpcCaller, type AdminIpcCaller } from '../admin/ipc';
@@ -56,8 +56,20 @@ export async function runSupervisor(bots: BotEntry[]): Promise<void> {
   const cliEntry = process.argv[1];
   if (!cliEntry) throw new Error('supervisor: 无法解析 CLI 入口（process.argv[1] 为空）');
 
-  // Children must NOT record service.pid (that's the supervisor's job on
-  // Windows) — strip the service flag from their env so recordServicePid no-ops.
+  // The supervisor IS the Windows background service process — publish OUR pid to
+  // service.pid so `status`/`stop` and the update flow's isServiceRunning() find
+  // us. Historically this was never called on the supervisor path (only runSingle
+  // / onboarding did), so multi-bot + logon-autostart left service.pid stale →
+  // isServiceRunning()=false → the update button silently skipped the restart
+  // (restart-skipped-no-service, "updated but not relaunched"). No-op off Windows
+  // / when not launched as the service. (recordServicePid reads process.env, which
+  // the strip below never touches — see there — so the ordering isn't load-bearing.)
+  recordServicePid();
+
+  // Children must NOT record service.pid (that's the supervisor's job on Windows).
+  // Strip the flag from a COPY of the env (not process.env — mutating that would
+  // also disable the supervisor's own exit-time clearServicePid) so the flag is
+  // absent only for children and recordServicePid no-ops in them.
   const childEnv = { ...process.env };
   delete childEnv[SERVICE_ENV_FLAG];
 

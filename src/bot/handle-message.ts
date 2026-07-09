@@ -2445,8 +2445,10 @@ export function createOrchestrator(
       })();
     })
     // 版本更新（执行）：npm i -g 最新版（async spawn），成功后**先发完成卡再**重启
-    // daemon —— restart 会 kill 掉当前这个 daemon 进程（卡片回调就跑在它里面），所以
-    // 必须等完成卡渲染落地后再触发 restart，否则用户看不到结果。
+    // daemon。重启最终会替换掉当前这个 daemon（卡片回调就跑在它里面）：macOS 走
+    // launchctl kickstart -k（本进程被 kill、launchd 复活），Windows 走「树外
+    // relauncher」（本进程不自杀，稍后由树外进程 kill+拉新）。两种都得先让完成卡
+    // 渲染落地再触发，否则用户看不到结果。
     .on(DM.updateDo, ({ evt }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
       void (async () => {
@@ -2474,7 +2476,8 @@ export function createOrchestrator(
           buildUpdateCard({ phase: 'done', from, to, willRestart }),
         ).catch((e) => log.fail('console', e, { phase: 'update-done' }));
         if (willRestart) {
-          // 给完成卡一点渲染时间，再让 launchd 重启（kill 自己）。
+          // 给完成卡一点渲染时间，再触发重启（mac：kill 自己靠 launchd 复活；Windows：
+          // 委托树外 relauncher，本进程不自杀）。
           await new Promise((r) => setTimeout(r, 800));
           await restartDaemon().catch((e) => log.fail('console', e, { phase: 'update-restart' }));
         }

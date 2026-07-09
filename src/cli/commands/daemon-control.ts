@@ -1,5 +1,6 @@
 import { spawnProcess } from '../../platform/spawn';
 import { getServiceAdapter, isServiceRunning } from '../../service/adapter';
+import { appendServiceErr } from '../../service/common';
 import { installLatest, isDevSource } from '../../service/update';
 import { buildDaemonControlCommand, type DaemonControlAction } from '../../admin/host';
 import { readWebConsole } from '../../web/discovery';
@@ -184,16 +185,24 @@ async function doUpdate(): Promise<void> {
   }
   const res = await installLatest();
   log.info('daemon-control', 'update-installed', { ok: res.ok });
-  if (!res.ok) return; // 装失败就不重启（旧版继续跑，比半装的烂摊子安全）
+  // 同写 service.err.log：内置 `logs` 命令只 tail service.log/service.err.log，
+  // 结构化事件在 logs/*.log 里用户不会去翻，更新/重启轨迹留这一份才查得到。
+  appendServiceErr('daemon-control', `update-installed ok=${res.ok}`);
+  if (!res.ok) {
+    appendServiceErr('daemon-control', 'install failed — keeping old version, not restarting');
+    return; // 装失败就不重启（旧版继续跑，比半装的烂摊子安全）
+  }
   await doRestart('update');
 }
 
 async function doRestart(phase: string): Promise<void> {
   if (!isServiceRunning()) {
-    // 服务没在跑（前台 run 的场景）→ 没有后台服务可重启；什么都不做。
+    // 服务没在跑（前台 run 的场景，或 service.pid 陈旧/对不上）→ 没有后台服务可重启。
     log.info('daemon-control', 'restart-skipped-no-service', { phase });
+    appendServiceErr('daemon-control', `restart-skipped-no-service (phase=${phase}); service.pid 未指向在跑的 daemon`);
     return;
   }
   await getServiceAdapter().restart();
   log.info('daemon-control', 'restart-issued', { phase });
+  appendServiceErr('daemon-control', `restart-issued (phase=${phase})`);
 }

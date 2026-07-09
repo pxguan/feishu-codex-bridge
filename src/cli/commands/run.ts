@@ -2,7 +2,7 @@ import { ensureOnboarded, announceEventsWhenLive } from '../../bot/onboarding';
 import { startBridge } from '../../bot/bridge';
 import { runSupervisor } from '../../bot/supervisor';
 import { acquireSingleInstanceLock, BridgeAlreadyRunningError } from '../../core/single-instance';
-import { recordServicePid } from '../../service/win-startup';
+import { clearServicePid, recordServicePid } from '../../service/win-startup';
 import { activeBots, loadBots } from '../../config/bots';
 import { log } from '../../core/logger';
 import { AdminWriteError } from '../../admin/ops';
@@ -64,6 +64,10 @@ async function runOnboardingConsole(): Promise<void> {
     releaseLock = acquireSingleInstanceLock('__onboarding__');
   } catch (err) {
     if (err instanceof BridgeAlreadyRunningError) {
+      // If we were spawned by startNow (Windows service), it eagerly wrote our
+      // pid to service.pid before we lost the lock — drop it so it doesn't stick
+      // as a dead pid (clearServicePid only unlinks if it still points at us).
+      clearServicePid();
       console.error(`✗ ${err.message}`);
       process.exitCode = 1;
       return;
@@ -137,6 +141,10 @@ async function runSingle(botName?: string): Promise<void> {
     releaseLock = acquireSingleInstanceLock(cfg.accounts.app.id);
   } catch (err) {
     if (err instanceof BridgeAlreadyRunningError) {
+      // startNow (Windows service) eagerly wrote our pid to service.pid before we
+      // lost the lock — drop it so it doesn't linger as a dead pid (no-op unless
+      // service.pid still points at us; the live winner keeps its own).
+      clearServicePid();
       console.error(`✗ ${err.message}`);
       log.info('run', 'already-running', { pid: err.pid });
       process.exitCode = 1;

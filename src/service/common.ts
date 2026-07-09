@@ -1,4 +1,4 @@
-import { createReadStream, statSync } from 'node:fs';
+import { appendFileSync, createReadStream, statSync } from 'node:fs';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +41,22 @@ export async function ensureLogFiles(): Promise<void> {
   await mkdir(paths.appDir, { recursive: true });
   await appendFile(serviceStdoutPath(), '');
   await appendFile(serviceStderrPath(), '');
+}
+
+/**
+ * Append a timestamped diagnostic line to service.err.log (sync, best-effort,
+ * never throws). The update/restart flow and the Windows tree-free relauncher
+ * both write here so the built-in `logs` command surfaces "what happened" — the
+ * relauncher runs detached with no console, and these events otherwise only land
+ * in the daily JSON log, which users don't think to check. Sync because callers
+ * include a short-lived relauncher that may exit before an async write flushes.
+ */
+export function appendServiceErr(tag: string, line: string): void {
+  try {
+    appendFileSync(serviceStderrPath(), `[${new Date().toISOString()}] [${tag}] ${line}\n`);
+  } catch {
+    /* best-effort — diagnostics must never crash the caller */
+  }
 }
 
 /**
