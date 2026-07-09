@@ -125,7 +125,7 @@ export async function installWinStartup(): Promise<ServiceStatus> {
   const reg = spawnSync(
     'reg',
     ['add', RUN_KEY_PATH, '/v', RUN_KEY_NAME, '/t', 'REG_SZ', '/d', `wscript.exe "${launcherVbsPath()}"`, '/f'],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', windowsHide: true },
   );
   if (reg.status !== 0) {
     throw new Error(`写入登录自启注册表项失败（exit ${reg.status ?? 'unknown'}）：${(reg.stderr || reg.stdout || '').trim()}`);
@@ -137,7 +137,7 @@ export async function installWinStartup(): Promise<ServiceStatus> {
 
 export async function uninstallWinStartup(): Promise<void> {
   // Remove autostart (reg delete is fine even if the value is already gone).
-  spawnSync('reg', ['delete', RUN_KEY_PATH, '/v', RUN_KEY_NAME, '/f'], { stdio: 'ignore' });
+  spawnSync('reg', ['delete', RUN_KEY_PATH, '/v', RUN_KEY_NAME, '/f'], { stdio: 'ignore', windowsHide: true });
   killService();
   rmSync(servicePidFile(), { force: true });
 }
@@ -541,8 +541,12 @@ export function clearServicePid(): void {
 }
 
 function isInstalled(): boolean {
+  // windowsHide: without it this spawns a visible console window — and /api/daemon
+  // polls status every 5s while the web console is open, so a black window flashed
+  // once per poll. (Same reason every other Windows spawn here sets it.)
   const r = spawnSync('reg', ['query', RUN_KEY_PATH, '/v', RUN_KEY_NAME], {
     stdio: ['ignore', 'ignore', 'ignore'],
+    windowsHide: true,
   });
   return r.status === 0;
 }

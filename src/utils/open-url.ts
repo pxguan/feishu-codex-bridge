@@ -30,7 +30,9 @@ export function openUrl(url: string): boolean {
   }
 
   try {
-    const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+    // windowsHide: `cmd /c start` would otherwise flash a console window; the
+    // browser it launches is a separate process, so hiding cmd doesn't affect it.
+    const child = spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true });
     child.on('error', () => {}); // launcher missing (e.g. no xdg-open) — ignore
     child.unref();
     return true;
