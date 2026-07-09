@@ -111,7 +111,28 @@ function startNow(opts: { appDir?: string; envPath?: string; userProfile?: strin
     stdio: ['ignore', out, err],
     env: mergeProcessEnv(process.env, overrides),
   });
-  if (child.pid) writeFileSync(join(dir, 'service.pid'), String(child.pid), 'utf8');
+  // Eager-claim service.pid so status/liveness works before the child's own
+  // recordServicePid() lands — BUT only when no LIVE process already owns it. If a
+  // live daemon holds service.pid (a duplicate / racing start that is about to lose
+  // the single-instance lock), overwriting it here — and then deleting it on the
+  // way out via clearServicePid — is exactly what wipes the real daemon's pid and
+  // makes the update/restart buttons silently no-op. Skipping the claim when a live
+  // owner exists lets the lock winner's recordServicePid stay the source of truth.
+  // On the relauncher path the old daemon was force-killed and is already dead, so
+  // cur is stale/dead here → we still claim immediately (unchanged there; test.2).
+  // Read the pid from the SAME dir we'd write to (opts.appDir may differ from this
+  // process's own paths.appDir when the relauncher ran under a foreign profile).
+  if (child.pid) {
+    const pidPath = join(dir, 'service.pid');
+    let cur: number | null = null;
+    try {
+      const n = Number.parseInt(readFileSync(pidPath, 'utf8').trim(), 10);
+      cur = Number.isFinite(n) ? n : null;
+    } catch {
+      cur = null;
+    }
+    if (cur === null || !pidAlive(cur)) writeFileSync(pidPath, String(child.pid), 'utf8');
+  }
   child.unref();
 }
 
@@ -131,7 +152,17 @@ export async function installWinStartup(): Promise<ServiceStatus> {
     throw new Error(`写入登录自启注册表项失败（exit ${reg.status ?? 'unknown'}）：${(reg.stderr || reg.stdout || '').trim()}`);
   }
 
-  startNow();
+  // Only launch if nothing is already running. Unlike launchd/systemd — whose
+  // install does bootout+bootstrap (a clean restart of any live instance) — the
+  // Windows install has no supervisor to displace a live daemon. An unconditional
+  // startNow() while the service (P1) is already up (logon autostart already ran,
+  // a second `feishu-codex-bridge start`, or the Web「启动」button) would spawn a
+  // duplicate P2 that instantly loses the single-instance lock; as P2 exits it
+  // wipes P1's service.pid (see startNow's guarded write + clearServicePid),
+  // leaving isServiceRunning()=false and every update/restart button a silent
+  // no-op — precisely the "updated but not relaunched" symptom. When already live,
+  // we've refreshed the autostart files above; leave the running daemon untouched.
+  if (!winStartupRunning()) startNow();
   return statusWinStartup();
 }
 
