@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildRelauncherPowershell,
+  encodePowershellCommand,
   runWinRelaunch,
   type WinRelaunchDeps,
 } from '../src/service/win-startup';
@@ -42,6 +43,16 @@ describe('buildRelauncherPowershell (WMI tree-free spawn)', () => {
     expect(ps).toContain('catch');
     expect(ps).toContain('schtasks /create');
     expect(ps).toContain('schtasks /run');
+  });
+
+  it('encodes as base64 UTF-16LE for -EncodedCommand so quoting survives the spawn boundary', () => {
+    // The real bug: node path with a space (e.g. C:\Program Files\nodejs) had its
+    // quotes mangled by -Command through Node spawn, so WMI never launched.
+    const script = buildRelauncherPowershell('C:\\Program Files\\app\\bin.mjs', 'C:\\Program Files\\nodejs\\node.exe');
+    const enc = encodePowershellCommand(script);
+    expect(enc).toMatch(/^[A-Za-z0-9+/=]+$/); // pure base64 — nothing for spawn to mangle
+    // PowerShell -EncodedCommand decodes base64 as UTF-16LE → must round-trip exactly
+    expect(Buffer.from(enc, 'base64').toString('utf16le')).toBe(script);
   });
 });
 

@@ -270,6 +270,18 @@ export function buildRelauncherPowershell(
   );
 }
 
+/**
+ * base64(UTF-16LE) of a PowerShell script, for `powershell -EncodedCommand`.
+ * The raw `-Command "<script>"` path mangled the embedded double-quotes around the
+ * node/bin paths as the script crossed Node-spawn → CreateProcess → PowerShell
+ * re-parsing, so WMI got a broken CommandLine and never launched the relauncher
+ * (confirmed on a real box: request left unclaimed, pid unchanged). Encoding the
+ * whole script to base64 makes the spawn arg pure ASCII with nothing to escape.
+ */
+export function encodePowershellCommand(script: string): string {
+  return Buffer.from(script, 'utf16le').toString('base64');
+}
+
 /** Canonical PowerShell path (present on essentially all Windows), or null. */
 function powershellPath(): string | null {
   const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
@@ -289,9 +301,12 @@ function spawnTreeFreeRelauncher(): boolean {
   const ps = powershellPath();
   if (ps) {
     const errFd = openSync(serviceStderrPath(), 'a');
+    // -EncodedCommand (base64/UTF-16LE), NOT -Command: passing the raw script let
+    // Windows arg-quoting corrupt the quotes around the node/bin paths, so WMI
+    // never launched the relauncher. The encoded blob is pure ASCII, unmangleable.
     const child = spawn(
       ps,
-      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', buildRelauncherPowershell()],
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encodePowershellCommand(buildRelauncherPowershell())],
       { detached: true, windowsHide: true, stdio: ['ignore', errFd, errFd] },
     );
     child.on('error', (e) => appendServiceErr('relaunch', `powershell spawn error: ${e.message}`));
