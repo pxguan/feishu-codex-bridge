@@ -6,8 +6,9 @@ import { log } from '../core/logger';
 
 /**
  * Inbound image handling: download the images a user sends to (or forwards to)
- * the bot so they can be passed to codex as `localImage` inputs — codex reads
- * the local file directly (see {@link AgentInput.images} / `toUserInput`).
+ * the bot so they can be shown to the agent — codex reads the local file directly
+ * as a `localImage` input; the claude backend base64-encodes it into an image
+ * content block (both consume {@link AgentInput.images} / see `toUserMessage`).
  *
  * The SDK normalizer already surfaces a message's images two ways:
  *   - `msg.resources` (type 'image') — for plain image messages AND rich-text

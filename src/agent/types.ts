@@ -25,7 +25,8 @@ export type PermissionMode = 'qa' | 'write' | 'full';
 
 export interface AgentInput {
   text?: string;
-  /** absolute local image paths (codex reads them directly) */
+  /** absolute local paths of images the user sent — codex reads them directly as
+   * `localImage`; the claude backend base64-encodes them into image blocks. */
   images?: string[];
 }
 
