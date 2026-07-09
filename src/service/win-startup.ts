@@ -287,7 +287,9 @@ export function buildRelauncherPowershell(
   // visible (Win32_Process.Create ReturnValue: 0=ok, 2=denied, 3/9/21=other) rather
   // than a silent no-op.
   return (
-    `$c=${lit}; ` +
+    // Silence the progress stream: with stderr redirected PowerShell serializes
+    // progress records as noisy #< CLIXML blobs into our captured output.
+    `$ProgressPreference='SilentlyContinue'; $c=${lit}; ` +
     `try { $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine=$c } -ErrorAction Stop; ` +
     `Write-Output ('cim rv=' + $r.ReturnValue + ' pid=' + $r.ProcessId) } ` +
     `catch { Write-Output ('cim-error: ' + $_.Exception.Message); ` +
@@ -327,10 +329,13 @@ function powershellPath(): string | null {
 function spawnTreeFreeRelauncher(reqPath: string): boolean {
   const ps = powershellPath();
   if (ps) {
-    // Run PowerShell SYNCHRONOUSLY and capture it: the WMI create only *issues*
-    // the launch and returns in <1s, so blocking briefly is fine — and it lets us
-    // log Win32_Process.Create's actual ReturnValue / any error. -EncodedCommand
-    // (base64/UTF-16LE) sidesteps all arg-quoting across the spawn boundary.
+    // Run PowerShell SYNCHRONOUSLY — this is load-bearing, do NOT switch back to a
+    // detached spawn+unref: that version never launched the relauncher on a real box
+    // (the fire-and-forget powershell was torn down before it finished the WMI
+    // create). spawnSync keeps us alive until Create() completes. WMI only *issues*
+    // the launch and returns in <1s, so the brief block is fine, and capturing its
+    // output lets us log Win32_Process.Create's ReturnValue / any error.
+    // -EncodedCommand (base64/UTF-16LE) sidesteps arg-quoting across the boundary.
     const r = spawnSync(
       ps,
       ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encodePowershellCommand(buildRelauncherPowershell(reqPath))],
@@ -478,7 +483,15 @@ export async function runWinRelaunch(deps: WinRelaunchDeps = {}): Promise<void> 
 
     await sleep(300); // let the OS reclaim the old daemon's listen socket before the new one binds
     start({ appDir, envPath: req.envPath, userProfile: req.userProfile });
-    logLine(`relaunched; new daemon started (appDir=${appDir})`);
+    // Read back the pid startNow wrote to the (correct) appDir so the trail is
+    // self-consistent — otherwise the log only shows the transient relauncher pid.
+    let newPid = '?';
+    try {
+      newPid = readFileSync(join(appDir, 'service.pid'), 'utf8').trim() || '?';
+    } catch {
+      /* not written (e.g. injected start in tests) */
+    }
+    logLine(`relaunched; new daemon pid=${newPid} (appDir=${appDir})`);
   } finally {
     clearClaim(reqPath);
     // Best-effort: drop the one-shot task if the schtasks fallback created one —
