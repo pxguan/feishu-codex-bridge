@@ -280,13 +280,20 @@ export function buildRelauncherPowershell(
   const inner = `"${nodePath}" "${binPath}" __win-relaunch "${reqPath}"`;
   const lit = `'${inner.replace(/'/g, "''")}'`;
   // Primary: WMI create (parented by WmiPrvSE → escapes taskkill /T). `-ErrorAction
-  // Stop` turns a runtime WMI failure (PowerShell 2.0 / WMI disabled) into a throw
-  // instead of a silent no-op, so we fall back to a one-shot Scheduled Task
-  // (parented by taskeng → also outside the tree). Both keep the relauncher alive.
+  // Stop` turns a runtime WMI failure (PowerShell 2.0 / WMI disabled) into a throw,
+  // so we fall back to a one-shot Scheduled Task (parented by taskeng → also outside
+  // the tree). Every branch WRITES a result string to stdout — the caller runs this
+  // synchronously and logs it, so a submission that doesn't actually launch is
+  // visible (Win32_Process.Create ReturnValue: 0=ok, 2=denied, 3/9/21=other) rather
+  // than a silent no-op.
   return (
     `$c=${lit}; ` +
-    `try { Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine=$c } -ErrorAction Stop | Out-Null } ` +
-    `catch { schtasks /create /tn ${RELAUNCH_TASK_NAME} /tr $c /sc ONCE /st 00:00 /f | Out-Null; schtasks /run /tn ${RELAUNCH_TASK_NAME} | Out-Null }`
+    `try { $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine=$c } -ErrorAction Stop; ` +
+    `Write-Output ('cim rv=' + $r.ReturnValue + ' pid=' + $r.ProcessId) } ` +
+    `catch { Write-Output ('cim-error: ' + $_.Exception.Message); ` +
+    `schtasks /create /tn ${RELAUNCH_TASK_NAME} /tr $c /sc ONCE /st 00:00 /f | Out-Null; $cr=$LASTEXITCODE; ` +
+    `schtasks /run /tn ${RELAUNCH_TASK_NAME} | Out-Null; ` +
+    `Write-Output ('schtasks create=' + $cr + ' run=' + $LASTEXITCODE) }`
   );
 }
 
@@ -320,18 +327,31 @@ function powershellPath(): string | null {
 function spawnTreeFreeRelauncher(reqPath: string): boolean {
   const ps = powershellPath();
   if (ps) {
-    const errFd = openSync(serviceStderrPath(), 'a');
-    // -EncodedCommand (base64/UTF-16LE), NOT -Command: passing the raw script let
-    // Windows arg-quoting corrupt the quotes around the node/bin paths, so WMI
-    // never launched the relauncher. The encoded blob is pure ASCII, unmangleable.
-    const child = spawn(
+    // Run PowerShell SYNCHRONOUSLY and capture it: the WMI create only *issues*
+    // the launch and returns in <1s, so blocking briefly is fine — and it lets us
+    // log Win32_Process.Create's actual ReturnValue / any error. -EncodedCommand
+    // (base64/UTF-16LE) sidesteps all arg-quoting across the spawn boundary.
+    const r = spawnSync(
       ps,
       ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encodePowershellCommand(buildRelauncherPowershell(reqPath))],
-      { detached: true, windowsHide: true, stdio: ['ignore', errFd, errFd] },
+      { encoding: 'utf8', windowsHide: true, timeout: 20_000 },
     );
-    child.on('error', (e) => appendServiceErr('relaunch', `powershell spawn error: ${e.message}`));
-    child.unref();
-    return true;
+    const out = [
+      `exit=${r.status ?? '?'}`,
+      r.error ? `err=${r.error.message}` : '',
+      (r.stdout || '').replace(/\s+/g, ' ').trim(),
+      (r.stderr || '').replace(/\s+/g, ' ').trim(),
+    ]
+      .filter(Boolean)
+      .join(' ');
+    appendServiceErr('relaunch', `powershell submit: ${out.slice(0, 900)}`);
+    // Confirmed launch: WMI ReturnValue 0, or the schtasks fallback's /run succeeded.
+    const stdout = r.stdout || '';
+    if (!r.error && r.status === 0 && (/cim rv=0\b/.test(stdout) || /schtasks .*run=0\b/.test(stdout))) {
+      return true;
+    }
+    appendServiceErr('relaunch', 'powershell did not confirm a launch; trying node-side schtasks fallback');
+    return spawnSchtasksRelauncher(reqPath);
   }
   appendServiceErr('relaunch', 'powershell.exe not found; trying schtasks fallback');
   return spawnSchtasksRelauncher(reqPath);
