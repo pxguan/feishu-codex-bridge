@@ -103,6 +103,8 @@ import {
   buildProjectTopicsCard,
   buildProjectSettingsCard,
   buildReconnectCard,
+  buildRestartConfirmCard,
+  buildRestartingCard,
   buildRmConfirmCard,
   buildCoffeeSettingsCard,
   buildSettingsCard,
@@ -118,6 +120,7 @@ import { inspectCliBridgeHooks, installCliBridgeHooks, resolveBridgeHookCommand 
 import type { CliBridgeRuntimeHooks } from '../cli-bridge/service';
 export type { CliBridgeRuntimeHooks };
 import {
+  acquireUpdateLock,
   currentVersion,
   daemonRunning,
   installLatest,
@@ -2423,6 +2426,32 @@ export function createOrchestrator(
         log.fail('console', err, { cmd: 'reconnect' }),
       );
     })
+    // 重启（第一步）：弹确认卡。重启是破坏性操作（断开所有会话），仿删除项目两步确认；
+    // 顺带展示长连接状态。取代了旧「重连」——真断线时重启才是唯一有效手段。
+    .on(DM.restart, async ({ evt }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const conn = channel.getConnectionStatus?.()?.state ?? 'unknown';
+      await sendManagedCard(channel, evt.chatId, buildRestartConfirmCard(conn), evt.messageId).catch((err) =>
+        log.fail('console', err, { cmd: 'restart' }),
+      );
+    })
+    // 重启（第二步·确认）：先把「正在重启」卡落地，再触发 restartDaemon。重启最终替换掉
+    // 当前 daemon（本回调就跑在它里面）：macOS 走 launchctl kickstart -k，Windows 走树外
+    // relauncher（本进程不自杀）——两种都在卡片渲染落地后才触发。没有后台服务（前台 run）
+    // 时不做无效的 service.restart，改引导去终端。
+    .on(DM.restartDo, ({ evt }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      void (async () => {
+        await new Promise((r) => setTimeout(r, CARD_SETTLE_MS));
+        if (!daemonRunning()) {
+          await updateManagedCard(channel, evt.messageId, buildRestartingCard('foreground')).catch(() => undefined);
+          return;
+        }
+        await updateManagedCard(channel, evt.messageId, buildRestartingCard('restarting')).catch(() => undefined);
+        await new Promise((r) => setTimeout(r, 800)); // 给「正在重启」卡渲染时间，再触发替换
+        await restartDaemon().catch((e) => log.fail('console', e, { phase: 'restart' }));
+      })();
+    })
     // 版本更新（检查）：查 npm 最新版，渲染结果。npm view 走异步 execFile —— 卡片
     // 回调里**绝不能** spawnSync，否则冻结整条 event loop。先 settle 再更新，避开
     // 点击回调窗口；checking→checked 是顺序 await，天然有序。
@@ -2454,10 +2483,26 @@ export function createOrchestrator(
       void (async () => {
         await new Promise((r) => setTimeout(r, CARD_SETTLE_MS));
         const from = currentVersion();
+        // 跨进程更新锁（B）：与 Web「升级」共用一把锁，防止两个 `npm i -g` 并发装坏全局
+        // 目录。拿不到＝已有更新在跑，直接提示「进行中」并退出，不叠跑第二个安装。
+        const release = acquireUpdateLock();
+        if (!release) {
+          await updateManagedCard(
+            channel,
+            evt.messageId,
+            buildUpdateCard({ phase: 'error', from, message: '已有一个更新正在进行中，请稍候再试。' }),
+          ).catch(() => undefined);
+          return;
+        }
         await updateManagedCard(channel, evt.messageId, buildUpdateCard({ phase: 'updating', from })).catch(
           () => undefined,
         );
-        const res = await installLatest();
+        let res;
+        try {
+          res = await installLatest();
+        } finally {
+          release(); // npm 跑完即放锁；重启不需持锁
+        }
         if (!res.ok) {
           log.info('console', 'update-failed', { from });
           await updateManagedCard(
@@ -4315,6 +4360,9 @@ export function createOrchestrator(
           break;
         case DM.reconnect:
           await sendDm(buildReconnectCard(channel.getConnectionStatus?.()?.state ?? 'unknown'));
+          break;
+        case DM.restart:
+          await sendDm(buildRestartConfirmCard(channel.getConnectionStatus?.()?.state ?? 'unknown'));
           break;
         case DM.usage: {
           // 同 runUsage 语义，但锚在自己刚发的 loading 卡上：取数后原地更新；取数失败按

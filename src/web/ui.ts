@@ -765,6 +765,7 @@ ${UI_PURE_JS}
   var lastUpdate = null;     // /api/update/check 结果缓存：总览 5s 重渲不重查（每次查都 spawn npm view）
   var updateCheckedAt = 0;   // 上次检查时间戳；拿到结果超 30min、软失败超 ~2min 才随重渲自动复查
   var updateChecking = false;// in-flight 闸：npm view 可能数秒~20s，期间 5s 重渲不叠发第二个请求
+  var updateInFlight = false; // 「升级并重启」in-flight：禁用按钮防重复点击（并发触发会绕过服务端更新锁的窄窗），并驱动轮询结果
   var drawerProject = null;  // 抽屉里打开的项目名
   var diagBotId = null;      // diag 属于哪个 bot（防串台）
   var bkDetailId = null;     // 后端 Agent 详情视图当前展开的后端 id（null=列表）
@@ -1674,10 +1675,13 @@ ${UI_PURE_JS}
     if (u.hasUpdate && u.latest) {
       box.appendChild(el('div', null, '🆕 有新版 v' + u.latest + '（当前 v' + u.current + '）'));
       var row = el('div', 'statline');
-      var up = el('button', 'btn primary', '⬆️ 更新并重启 · v' + u.latest);
-      up.onclick = function () { askUpdate(u.latest); };
+      // updateInFlight 期间显示禁用的「更新中…」——即使卡片每 5s 重渲，按钮也保持禁用，
+      // 挡住重复提交（重复触发是并发绕过服务端更新锁的入口）。
+      var up = el('button', 'btn primary', updateInFlight ? '⏳ 更新中…' : ('⬆️ 更新并重启 · v' + u.latest));
+      if (updateInFlight) { up.disabled = true; }
+      else { up.onclick = function () { askUpdate(u.latest); }; }
       row.appendChild(up);
-      row.appendChild(el('span', 'note', '默认只检测不自动升级；点上方按钮装最新版并自动重启。'));
+      row.appendChild(el('span', 'note', updateInFlight ? '安装中，完成后会自动重启…' : '默认只检测不自动升级；点上方按钮装最新版并自动重启。'));
       box.appendChild(row);
     } else {
       box.appendChild(el('div', 'note', '✅ 已是最新版 v' + u.current + (u.latest ? '' : '（最新版查询失败，可稍后重试）')));
@@ -1727,8 +1731,51 @@ ${UI_PURE_JS}
         '重启期间所有群短暂无响应；正在进行的会话会被优雅关闭。',
       ],
       confirmLabel: '确认更新',
-      onConfirm: function () { postAction('/api/update', '更新'); },
+      onConfirm: function () { postUpdate(latest); },
     });
+  }
+  // 升级：POST 后轮询 /api/update/status，失败会明确报出来（否则 detached helper 的失败对
+  // 网页端完全静默、用户只看到「已发起」）；成功会重启 daemon → 连接短暂断开，由版本变更流
+  // 接管显示「已是最新版」。updateInFlight 兼作按钮 in-flight 闸，挡住重复点击。
+  function postUpdate(latest) {
+    if (updateInFlight) { toast('⏳ 升级已在进行中…'); return; }
+    updateInFlight = true;
+    var box = $('updateBody'); if (box && lastUpdate) renderUpdate(box, lastUpdate); // 立刻把按钮切成禁用的「更新中…」
+    fetch('/api/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (resp) {
+        if (resp.status !== 202) {
+          updateInFlight = false;
+          toast((resp.status === 501 ? '⏳ ' : '❌ ') + (resp.body.message || ('HTTP ' + resp.status)));
+          var b = $('updateBody'); if (b) loadUpdate(b);
+          return;
+        }
+        toast('✅ ' + (resp.body.message || '升级已发起'));
+        pollUpdateStatus(0, latest);
+      })
+      .catch(function () { updateInFlight = false; toast('❌ 请求失败'); });
+  }
+  function pollUpdateStatus(tries, latest) {
+    if (tries > 60) { updateInFlight = false; toast('⏳ 安装仍在后台进行，稍后刷新页面查看'); return; } // ~90s 兜底：别无限轮询
+    fetch('/api/update/status').then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (!s || s.phase === 'installing' || s.phase === 'restarting') {
+          setTimeout(function () { pollUpdateStatus(tries + 1, latest); }, 1500);
+          return;
+        }
+        updateInFlight = false;
+        if (s.phase === 'error') {
+          toast('❌ 升级失败：' + (s.message || '未知错误'));
+          var box = $('updateBody'); if (box) loadUpdate(box); // 恢复可点的更新卡供重试
+        } else if (s.phase === 'done') {
+          toast('✅ 已更新到 v' + (s.to || latest || '') + '，正在重启…');
+          lastUpdate = null; updateCheckedAt = 0; // 作废缓存：重启后版本变更流会翻成「已是最新版」
+        }
+      })
+      .catch(function () {
+        // 拿不到状态：多半 daemon 正在重启（成功路径）→ 交给重连/版本变更流收尾。
+        updateInFlight = false;
+      });
   }
   // 202 = 已发起（detached helper 接管）；501 = 只读预览（无 daemon）。
   function postAction(path, label) {

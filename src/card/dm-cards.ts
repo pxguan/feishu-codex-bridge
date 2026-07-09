@@ -46,6 +46,8 @@ export const DM = {
   coffeeSettings: 'dm.coffee.settings',
   doctor: 'dm.doctor',
   reconnect: 'dm.reconnect',
+  restart: 'dm.restart',
+  restartDo: 'dm.restart.do',
   update: 'dm.update',
   updateDo: 'dm.update.do',
   // 📊 Codex 用量（限额 + 个人资料统计 + 热力图）；share 打开内容选择卡，
@@ -145,7 +147,7 @@ export function buildDmMenuCard(opts: { webConsoleUrl?: string; version?: string
       actionsFixed([
         button('📊 用量', { a: DM.usage }),
         button('🩺 诊断', { a: DM.doctor }),
-        button('🔄 重连', { a: DM.reconnect }),
+        button('🔁 重启', { a: DM.restart }),
         button('⬆️ 更新', { a: DM.update }),
       ], MENU_BTN_W_BOT),
       // 🌐 网页控制台：刻意低调——小号按钮靠左 + 右侧灰字说明；仅在 daemon 本机控制台
@@ -300,6 +302,47 @@ export function buildReconnectCard(conn: string): CardObject {
       backToMenu(),
     ],
     { header: { title: '🔄 长连接', template } },
+  );
+}
+
+/**
+ * 重启确认卡（🔁 重启）：重启后台服务会断开所有会话、重新拉起进程（约数秒），是破坏性
+ * 操作，故仿「删除项目」走两步确认。顺带展示当前长连接状态供判断——真断线时重启才是唯一
+ * 有效手段（SDK 自动重连之外无可靠 force-reconnect），比旧的只读「重连」卡更有用。
+ */
+export function buildRestartConfirmCard(conn: string): CardObject {
+  return card(
+    [
+      md(`长连接状态：**${conn}**`),
+      note('重启会**断开当前所有会话**并重新拉起后台服务（约数秒，其间机器人短暂离线），完成后自动恢复。仅在长期断连或异常时才需要。'),
+      actions([
+        button('🔁 确认重启', { a: DM.restartDo }, 'danger'),
+        button('取消', { a: DM.menu }),
+      ]),
+    ],
+    { header: { title: '🔁 重启后台服务', template: 'orange' } },
+  );
+}
+
+/**
+ * 「正在重启 / 前台运行」提示卡。restartDaemon 会替换掉当前 daemon（回调就跑在它里面），
+ * 之后没有进程再更新这张卡，所以先把它落地再触发替换。`foreground`＝没有后台守护服务
+ * 可重启（典型：前台 `run`），改为引导去终端，不做无效的 service.restart。
+ */
+export function buildRestartingCard(mode: 'restarting' | 'foreground' = 'restarting'): CardObject {
+  if (mode === 'foreground') {
+    return card(
+      [
+        md('ℹ️ 当前为**前台运行**（非后台守护服务）。'),
+        note('此按钮只重启由 `feishu-codex-bridge start` 安装的后台服务。前台运行请在其终端里 Ctrl+C 后重跑 `feishu-codex-bridge run`。'),
+        backToMenu(),
+      ],
+      { header: { title: '🔁 重启后台服务', template: 'orange' } },
+    );
+  }
+  return card(
+    [md('🔁 正在重启后台服务…'), note('机器人将短暂离线数秒后自动恢复；本卡不再更新。')],
+    { header: { title: '🔁 重启后台服务', template: 'orange' } },
   );
 }
 

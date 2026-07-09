@@ -66,6 +66,8 @@ vi.mock('../src/service/adapter', () => ({
 // 升级检测：固定 mock（绝不打真 npm registry）。
 vi.mock('../src/service/update', () => ({
   checkUpdate: vi.fn(async () => ({ current: '0.3.11', latest: '0.4.0', hasUpdate: true, dev: false })),
+  readUpdateStatus: vi.fn(() => null),
+  clearUpdateStatus: vi.fn(() => undefined),
 }));
 
 const BOT_A = 'cli_hostA';

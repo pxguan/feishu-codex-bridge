@@ -263,6 +263,13 @@ export function createWebServer(opts: WebServerOptions): WebServer {
       return;
     }
 
+    // GET /api/update/status —— 升级进度/结果（前端点「升级」后轮询：失败会明确报出，
+    // 不再像 detached helper 那样静默；成功则 daemon 重启、连接断开由版本变更流接管）。
+    if (req.method === 'GET' && pathName === '/api/update/status') {
+      sendJson(res, 200, opts.service.updateStatus());
+      return;
+    }
+
     // POST /api/update —— 升级（默认只检测不自动升级；点按钮才到这）。
     if (req.method === 'POST' && pathName === '/api/update') {
       try {

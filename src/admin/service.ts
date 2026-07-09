@@ -47,7 +47,13 @@ import {
 import type { BackendDepState, BackendProbe, PermissionMode } from '../agent/types';
 import { readRecentLogs } from '../core/logger';
 import { getServiceAdapter } from '../service/adapter';
-import { checkUpdate as checkUpdateImpl, type UpdateCheck } from '../service/update';
+import {
+  checkUpdate as checkUpdateImpl,
+  clearUpdateStatus,
+  readUpdateStatus,
+  type UpdateCheck,
+  type UpdateStatus,
+} from '../service/update';
 import { bridgeVersion } from '../core/version';
 import { collectHostDoctor, toDaemonStatus, type DaemonStatus, type HostDoctor } from './host';
 import type { AdminWriteOp } from './ops';
@@ -199,6 +205,11 @@ export interface AdminService {
   stopDaemon(): Promise<void>;
   /** 检查 npm 上有无新版（current / latest / hasUpdate / dev）。绝不抛错（latest=null 兜底）。 */
   checkUpdate(): Promise<UpdateCheck>;
+  /**
+   * 读最近一次升级的进度/结果（installing/restarting/done/error），供 Web 轮询——尤其
+   * 失败：detached helper 的失败否则对网页端完全静默。无记录返回 null。绝不抛错。
+   */
+  updateStatus(): UpdateStatus | null;
   /**
    * 升级到最新版（npm i -g + 重启 daemon）。**默认只检测不自动升级**——只有用户
    * 点「升级」按钮才走这里。同 restart 走 detached helper。只读预览抛 NotWiredYetError。
@@ -823,8 +834,14 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       }));
     },
 
+    updateStatus(): UpdateStatus | null {
+      return readUpdateStatus();
+    },
+
     async applyUpdate(): Promise<void> {
       if (!deps.applyUpdate) throw new NotWiredYetError('⬆️ 升级');
+      // 清掉上一次的结果，之后 Web 轮询读到的状态才确定属于本次升级（helper 会重写）。
+      clearUpdateStatus();
       deps.applyUpdate();
     },
 

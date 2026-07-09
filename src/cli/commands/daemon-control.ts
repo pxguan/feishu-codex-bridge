@@ -1,7 +1,14 @@
 import { spawnProcess } from '../../platform/spawn';
 import { getServiceAdapter, isServiceRunning } from '../../service/adapter';
 import { appendServiceErr } from '../../service/common';
-import { installLatest, isDevSource } from '../../service/update';
+import {
+  acquireUpdateLock,
+  currentVersion,
+  installLatest,
+  isDevSource,
+  writeUpdateStatus,
+  type InstallResult,
+} from '../../service/update';
 import { buildDaemonControlCommand, type DaemonControlAction } from '../../admin/host';
 import { readWebConsole } from '../../web/discovery';
 import { log } from '../../core/logger';
@@ -183,16 +190,40 @@ async function doUpdate(): Promise<void> {
     log.info('daemon-control', 'update-skipped-dev', {});
     return;
   }
-  const res = await installLatest();
+  // 跨进程互斥（B）：Web「升级」与私聊「更新」可能并发，两个 `npm i -g` 同时改全局目录
+  // 会把它装坏。拿不到锁＝已有更新在跑，报「进行中」并退出（不叠跑第二个安装）。
+  const release = acquireUpdateLock();
+  if (!release) {
+    // 锁忙＝已有另一个 helper 在装（它才是真进度来源）。刻意**不**写 error 状态：
+    // 否则 Web 轮询会误报「升级失败」；留白让前端继续追那个 helper 的 installing/done。
+    log.info('daemon-control', 'update-skipped-in-progress', {});
+    appendServiceErr('daemon-control', 'update already in progress (lock held by another trigger); skipped');
+    return;
+  }
+  const from = currentVersion();
+  writeUpdateStatus({ phase: 'installing', from, at: Date.now() });
+  let res: InstallResult;
+  try {
+    res = await installLatest();
+  } finally {
+    release(); // npm 已跑完（无论成败）→ 立刻放锁；重启不需要持锁，且放早可避免被 relauncher 杀在锁里
+  }
   log.info('daemon-control', 'update-installed', { ok: res.ok });
   // 同写 service.err.log：内置 `logs` 命令只 tail service.log/service.err.log，
   // 结构化事件在 logs/*.log 里用户不会去翻，更新/重启轨迹留这一份才查得到。
   appendServiceErr('daemon-control', `update-installed ok=${res.ok}`);
   if (!res.ok) {
     appendServiceErr('daemon-control', 'install failed — keeping old version, not restarting');
+    // 失败落状态（D）：否则 detached helper 的失败对网页端完全静默，用户只看到「已发起」。
+    writeUpdateStatus({ phase: 'error', ok: false, from, message: `安装失败：${res.message}`.slice(0, 300), at: Date.now() });
     return; // 装失败就不重启（旧版继续跑，比半装的烂摊子安全）
   }
+  const to = currentVersion();
+  writeUpdateStatus({ phase: 'restarting', ok: true, from, to, at: Date.now() });
   await doRestart('update');
+  // restart 已发起（Windows 树外 relauncher / mac launchd）；daemon 即将被替换、Web 端
+  // 会短暂断连并由版本变更流显示「已是最新版」。仍写一条 done 收尾（若本进程没先被杀）。
+  writeUpdateStatus({ phase: 'done', ok: true, from, to, at: Date.now() });
 }
 
 async function doRestart(phase: string): Promise<void> {

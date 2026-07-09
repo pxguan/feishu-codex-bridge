@@ -181,6 +181,9 @@ function stubService(): AdminService {
     async checkUpdate() {
       return { current: '0.3.11', latest: '0.4.0', hasUpdate: true, dev: false };
     },
+    updateStatus() {
+      return null;
+    },
     async applyUpdate() {
       throw new NotWiredYetError('⬆️ 升级');
     },
