@@ -762,6 +762,9 @@ ${UI_PURE_JS}
   var daemon = null;         // /api/daemon
   var diag = null;           // /api/diagnosis 结果（当前 bot 的探测；切 Tab 必清）
   var catalog = null;        // /api/backends 缓存（后端管理卡 + 项目 picker 复用）
+  var lastUpdate = null;     // /api/update/check 结果缓存：总览 5s 重渲不重查（每次查都 spawn npm view）
+  var updateCheckedAt = 0;   // 上次检查时间戳；拿到结果超 30min、软失败超 ~2min 才随重渲自动复查
+  var updateChecking = false;// in-flight 闸：npm view 可能数秒~20s，期间 5s 重渲不叠发第二个请求
   var drawerProject = null;  // 抽屉里打开的项目名
   var diagBotId = null;      // diag 属于哪个 bot（防串台）
   var bkDetailId = null;     // 后端 Agent 详情视图当前展开的后端 id（null=列表）
@@ -960,6 +963,14 @@ ${UI_PURE_JS}
     fetch('/api/daemon').then(function (r) { return r.json(); })
       .then(function (d) {
         daemon = d;
+        // 运行中的实际版本一旦跟版本检查缓存里的 current 对不上（多半是刚更新+重启完成），
+        // 就作废缓存并当场补查一次（若在总览页），把「有新版」立刻翻成「已是最新版」——不等
+        // 下一轮 renderRoute，消除 loadState/loadDaemon 同周期竞态导致的 ~10s 延迟与横幅残留。
+        // 只在版本真变时才查（稳态 d.version===current），既留住更新后的即时反馈，又不回到 5s 空转。
+        if (lastUpdate && d.version && d.version !== lastUpdate.current) {
+          lastUpdate = null; updateCheckedAt = 0;
+          if (parseRoute(location.hash).tab === 'overview') { var ub = $('updateBody'); if (ub) loadUpdate(ub); }
+        }
         if (parseRoute(location.hash).tab === 'overview') { var b = $('daemonBody'); if (b) renderDaemon(b); }
         renderSidebarFoot();
         renderGlobalSummary();
@@ -1273,7 +1284,14 @@ ${UI_PURE_JS}
     daemonCard.appendChild(updateBody);
     root.appendChild(daemonCard);
     renderDaemon(daemonBody);
-    loadUpdate(updateBody);
+    // 版本检查会在服务端 spawn「npm view」，不能跟着 5s 重渲每次都跑：有缓存就直接渲，
+    // 只在首次或缓存过期（30min）时才真查一次。手动「检查更新」按钮仍强制刷新。
+    if (lastUpdate) {
+      renderUpdate(updateBody, lastUpdate);
+      if (Date.now() - updateCheckedAt > 30 * 60 * 1000) loadUpdate(updateBody);
+    } else {
+      loadUpdate(updateBody);
+    }
 
     // 🤖 机器人（在 Feishu Bridge 卡下面，各自占满宽度）
     var botsCard = el('div', 'card');
@@ -1632,9 +1650,19 @@ ${UI_PURE_JS}
   }
 
   function loadUpdate(box) {
+    if (updateChecking) return;          // 在途就不叠发：慢检查（npm view 最长 20s）期间 5s 重渲不重复 spawn
+    updateChecking = true;
+    updateCheckedAt = Date.now();        // 乐观占位：in-flight 期间 30min 边界不再被反复判真
     fetch('/api/update/check').then(function (r) { return r.json(); })
-      .then(function (u) { renderUpdate(box, u); })
-      .catch(function () { box.textContent = '⚠️ 版本检查失败（网络或 npm registry）'; });
+      .then(function (u) {
+        lastUpdate = u;
+        // 软失败：非 dev 却没拿到 latest（多半 registry 不可达/超时，服务端仍回 200），只缓存 ~2min
+        // 便自动复查，别把「查询失败」钉住 30min；拿到 latest 或 dev 模式才按完整 30min TTL。
+        updateCheckedAt = (u && (u.dev || u.latest)) ? Date.now() : Date.now() - 28 * 60 * 1000;
+        renderUpdate(box, u);
+      })
+      .catch(function () { box.textContent = '⚠️ 版本检查失败（网络或 npm registry）'; })
+      .then(function () { updateChecking = false; });  // finally：无论成败都松闸
   }
   function renderUpdate(box, u) {
     box.textContent = '';
