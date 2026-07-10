@@ -21,6 +21,7 @@ function stubService(): AdminService {
           current: true,
           running: true,
           pid: 4242,
+          completionReminder: { mode: 'failures' as const, longTaskMinutes: 3 },
         },
       ];
     },
@@ -59,6 +60,9 @@ function stubService(): AdminService {
     },
     async setAutoCompact() {
       throw new NotWiredYetError('🗜️ 自动压缩开关');
+    },
+    async setCompletionReminder() {
+      throw new NotWiredYetError('🔔 完成提醒');
     },
     async doctorBackends() {
       return [{ id: 'codex-appserver', name: 'Codex', ok: true, version: '1.0.0', isDefault: true }];
@@ -329,6 +333,7 @@ describe('web server · 只读 API', () => {
     const bot = body.bots[0];
     expect(bot.appId).toBe('cli_a');
     expect(bot.running).toBe(true);
+    expect(bot.completionReminder).toEqual({ mode: 'failures', longTaskMinutes: 3 });
     expect(bot.projects).toHaveLength(1);
     const p = bot.projects[0];
     expect(p).toMatchObject({
@@ -405,6 +410,16 @@ describe('web server · 写操作占位（只读预览：daemon 未跑）', () =
     const res = await get('/api/project/demo/backend', { method: 'POST', body: '{}' });
     expect(res.status).toBe(401);
   });
+
+  it('POST /api/bots/:id/completion-reminder 在只读预览 → 501', async () => {
+    const res = await authed('/api/bots/cli_a/completion-reminder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'failures', longTaskMinutes: 3 }),
+    });
+    expect(res.status).toBe(501);
+    expect((await jsonOf(res)).error).toBe('not_wired_yet');
+  });
 });
 
 describe('web server · 写操作真实现（daemon 进程内 service）', () => {
@@ -421,6 +436,9 @@ describe('web server · 写操作真实现（daemon 进程内 service）', () =>
     };
     svc.setNoMention = async () => {
       throw new AdminWriteError('项目「demo」不存在');
+    };
+    svc.setCompletionReminder = async (botId, value) => {
+      written.push({ botId, completionReminder: value });
     };
     writeWeb = createWebServer({ service: svc, token: TOKEN, logDir });
     const { port } = await writeWeb.listen(0);
@@ -452,6 +470,38 @@ describe('web server · 写操作真实现（daemon 进程内 service）', () =>
     const body = await jsonOf(res);
     expect(body.error).toBe('write_rejected');
     expect(body.message).toContain('不存在');
+  });
+
+  it('完成提醒保存 → 200，并把每 bot 设置交给 service', async () => {
+    const res = await fetch(`${writeBase}/api/bots/cli_a/completion-reminder`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'long', longTaskMinutes: 7 }),
+    });
+    expect(res.status).toBe(200);
+    expect(await jsonOf(res)).toMatchObject({
+      ok: true,
+      completionReminder: { mode: 'long', longTaskMinutes: 7 },
+    });
+    expect(written).toContainEqual({
+      botId: 'cli_a',
+      completionReminder: { mode: 'long', longTaskMinutes: 7 },
+    });
+  });
+
+  it.each([
+    [{ mode: 'smart', longTaskMinutes: 3 }, 'mode'],
+    [{ mode: 'long', longTaskMinutes: 0 }, 'longTaskMinutes'],
+    [{ mode: 'long', longTaskMinutes: 1441 }, 'longTaskMinutes'],
+    [{ mode: 'long', longTaskMinutes: 2.5 }, 'longTaskMinutes'],
+  ])('完成提醒非法输入 %# → 400（%s）', async (input, field) => {
+    const res = await fetch(`${writeBase}/api/bots/cli_a/completion-reminder`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    expect(res.status).toBe(400);
+    expect((await jsonOf(res)).message).toContain(field);
   });
 });
 

@@ -20,9 +20,11 @@ import {
 } from '../agent/types';
 import type { SelectOption } from '../card/cards';
 import {
+  createAppPreferencesWriter,
   createAdminWriteExecutor,
   performBackendSwitch,
   performSetAutoCompact,
+  performSetCompletionReminder,
   performSetModelDefault,
   performSetNoMention,
   performSetPermissionMode,
@@ -37,12 +39,16 @@ import {
   getRunIdleTimeoutMs,
   getShowToolCalls,
   getCommentsConfig,
+  getCompletionReminderConfig,
+  shouldShowCompletionReminderButton,
   isAdmin,
   isChatAllowed,
   isUserAllowedInProject,
   resolveOwner,
   RUN_IDLE_TIMEOUT_MAX_SEC,
   RUN_IDLE_TIMEOUT_MIN_SEC,
+  COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES,
+  COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES,
   secretKeyForApp,
   canEnableCliBridge,
   getCliBridgePreferences,
@@ -50,9 +56,9 @@ import {
   type AppConfig,
   type AppPreferences,
   type CommentsConfig,
+  type CompletionReminderMode,
   type PendingPolicy,
 } from '../config/schema';
-import { saveConfig } from '../config/store';
 import { CardDispatcher } from '../card/dispatcher';
 import { sendManagedCard, updateManagedCard } from '../card/managed';
 import { RunRender } from '../card/run-render';
@@ -116,6 +122,7 @@ import {
   buildRestartingCard,
   buildRmConfirmCard,
   buildCoffeeSettingsCard,
+  buildCompletionReminderCustomCard,
   buildSettingsCard,
   buildUpdateCard,
   buildWatchdogCustomCard,
@@ -128,6 +135,10 @@ import { cliBridgeSettingsSection, CLI } from '../cli-bridge/cards';
 import { inspectCliBridgeHooks, installCliBridgeHooks, resolveBridgeHookCommand } from '../cli-bridge/hooks';
 import type { CliBridgeRuntimeHooks } from '../cli-bridge/service';
 export type { CliBridgeRuntimeHooks };
+import {
+  sendCompletionReminderReply,
+  type CompletionReminderReplyInput,
+} from './completion-reminder';
 import {
   acquireUpdateLock,
   currentVersion,
@@ -367,14 +378,67 @@ export function safeBackendId(formValue: Record<string, unknown> | undefined): s
 // 写同一套逻辑的单一事实源。原处 re-export 保持既有 import 路径（含测试）不变。
 export { BACKEND_PROBE_TIMEOUT_MS, probeBackends, validateBackendSwitch } from '../admin/ops';
 
+/** One ordinary turn waiting behind the current turn in the same session. The
+ * requester and enqueue clock travel with the input so completion @ mentions,
+ * manual-reminder ownership and long-task timing never leak from turn one. */
+export interface QueuedTurn {
+  input: AgentInput;
+  requesterOpenId?: string;
+  requestedAt: number;
+  /** Clean user-authored label; never derive reminder copy from woven input. */
+  summary?: string;
+}
+
+/** Switch the mutable session control state to a queued follow-up. Exported as
+ * a tiny pure-ish seam so requester isolation (and manual-override reset) stays
+ * testable without booting a real agent process. */
+export function activateQueuedTurn(
+  state: { requesterOpenId?: string; completionReminderRequested?: boolean },
+  turn: QueuedTurn,
+): void {
+  state.requesterOpenId = turn.requesterOpenId;
+  state.completionReminderRequested = false;
+}
+
+/** Only the exact turn initiator may opt that turn into the manual reminder. */
+export function isCompletionReminderRequester(operatorOpenId?: string, requesterOpenId?: string): boolean {
+  return Boolean(operatorOpenId && requesterOpenId && operatorOpenId === requesterOpenId);
+}
+
+/**
+ * Settle an ordinary turn after its event stream closes. A dead backend can
+ * close the async iterator without ever emitting `done` or a fatal `error`; in
+ * that case treating a still-running render as success produces a false
+ * “completed” card and success reminder. Preserve every explicit terminal
+ * emitted by the backend, but turn an otherwise-unexplained process exit into
+ * a fatal error.
+ */
+export function settleOrdinaryTurnRender(
+  render: RunRender,
+  input: { interrupted: boolean; timedOut: boolean; idleTimeoutSeconds: number; procDead: boolean },
+): void {
+  if (input.interrupted) render.interrupt();
+  else if (input.timedOut) render.timeout(input.idleTimeoutSeconds);
+  else if (input.procDead && render.terminal() === 'running') {
+    render.apply({ type: 'error', message: 'agent 进程异常退出，请重发本条消息', willRetry: false });
+  } else {
+    // finalize() is a no-op for explicit done/error terminals.
+    render.finalize();
+  }
+}
+
 interface ActiveState {
   /** unset only during the brief "reserved, still resolving the thread" window */
   thread?: AgentThread;
   run?: AgentRun;
   /** follow-up turns queued mid-run; each carries its own text + downloaded images */
-  queue: AgentInput[];
+  queue: QueuedTurn[];
   /** who started this run — gates destructive ⏹ (design §5) */
   requesterOpenId?: string;
+  /** Manual mode, current turn only. May be set while the initial run is still
+   * waiting in the global concurrency queue; reset when a queued follow-up
+   * becomes the current turn. */
+  completionReminderRequested?: boolean;
   /** ⏹ 终止: interrupt the in-flight codex turn. Set per-turn while a run is in
    * flight. codex 0.139+ 在 turn/interrupt 后以 turn/completed(status:
    * "interrupted") 干净收尾（08b 探针实测；旧版「no mappable terminal」行为已
@@ -630,6 +694,10 @@ export function createOrchestrator(
   // the idle timeout applies immediately to every group/thread — no daemon
   // restart. `cfg` is the same object `applyPref` mutates, so this sees edits.
   const currentIdleMs = (): number => getRunIdleTimeoutMs(cfg) ?? 0;
+  // One queue for every DM/Web mutation of this bot's preferences. Each write
+  // reads the latest committed LIVE snapshot, persists its own next snapshot,
+  // then commits it to LIVE — concurrent clicks cannot erase one another.
+  const writePreferences = createAppPreferencesWriter({ cfg });
   // pendingPolicy is read per-message (settings card can change it live)
   /** pending /resume cards, keyed by the card's messageId */
   const resumePending = new Map<string, ResumeCardState>();
@@ -642,6 +710,20 @@ export function createOrchestrator(
   /** CardKit entity backing each run card, by messageId — drives the native
    * typewriter stream and whole-card (button/settings) updates. */
   const runStreams = new Map<string, RunCardStream>();
+  /** Live manual-reminder card repaint, keyed like runsByCard. The closure is
+   * swapped when a queue placeholder flips into a run card, so a double click
+   * can only mutate the one current turn and never an older/future card. */
+  const completionReminderRefreshers = new Map<string, () => void>();
+  /** Repaint every live queue/run card after the global mode changes. This makes
+   * the product rule immediate: manual shows the one-shot button; every other
+   * mode removes it without waiting for the agent's next streamed event. */
+  const refreshCompletionReminderCards = (): void => {
+    for (const refresh of completionReminderRefreshers.values()) refresh();
+  };
+  /** Network attempts are marked before awaiting Feishu: one terminal card can
+   * never produce duplicate reminder replies, even if a surrounding cleanup or
+   * callback path is re-entered. */
+  const completionReminderSent = new RecentIdCache(4096, 24 * 60 * 60_000);
   /** the latest settings-bearing run card per topic thread */
   const lastRunCard = new Map<string, string>();
   /** latest context usage per session (sessionKey → tokens), for `/context`.
@@ -649,6 +731,15 @@ export function createOrchestrator(
   const lastUsage = new Map<string, { used: number; window: number | null }>();
   /** inbound message/comment dedup (at-least-once delivery, see RecentIdCache) */
   const seenInbound = new RecentIdCache();
+
+  /** Render the one-shot affordance only while the current global mode is
+   * manual. Non-manual modes return undefined, so their cards have no button. */
+  const completionReminderView = (state: ActiveState): 'available' | 'requested' | undefined =>
+    shouldShowCompletionReminderButton(cfg)
+      ? state.completionReminderRequested
+        ? 'requested'
+        : 'available'
+      : undefined;
 
   /** 模型列表直通后端：两个后端内部都已缓存成功结果（codex 的 modelCache、
    * claude 的静态常量），这层不再缓存——codex 瞬时不可用时返回的 STATIC_MODELS
@@ -1114,7 +1205,12 @@ export function createOrchestrator(
           }
         }
       }
-      cur.queue.push({ text: woven, images });
+      cur.queue.push({
+        input: { text: woven, images },
+        requesterOpenId: msg.senderId,
+        requestedAt: msg.createTime || Date.now(),
+        summary: stripFileTokens(text).slice(0, 80) || undefined,
+      });
       log.info('intake', 'queued', { depth: cur.queue.length });
       return;
     }
@@ -1175,7 +1271,12 @@ export function createOrchestrator(
       // A run appeared between handleTurn's check and here (we awaited an image
       // download) — queue onto it rather than launch a second turn. `text` is
       // already file-woven when preIngested (handleTurn's fall-through).
-      existing.queue.push({ text, images: preloadedImages });
+      existing.queue.push({
+        input: { text, images: preloadedImages },
+        requesterOpenId: msg.senderId,
+        requestedAt: msg.createTime || Date.now(),
+        summary: stripFileTokens(summaryText ?? text).slice(0, 80) || undefined,
+      });
       log.info('intake', 'queued', { depth: existing.queue.length });
       return;
     }
@@ -1299,7 +1400,9 @@ export function createOrchestrator(
           firstText,
           images,
           knownThreadId: sessionKey,
+          summary: stripFileTokens(summaryText ?? text).slice(0, 80) || '(本轮任务)',
           requesterOpenId: msg.senderId,
+          requestedAt: msg.createTime || tIntake,
           // 编织完成 → turn/start 之间不再读盘：首轮直接用预取的会话记录
           // （prior=undefined 即确知是全新会话，刚 upsert 的记录还没有 model）。
           firstRec: prior ?? null,
@@ -1484,6 +1587,7 @@ export function createOrchestrator(
         cwd,
         summary: stripFileTokens(text).slice(0, 80) || '(空)',
         requesterOpenId: msg.senderId,
+        requestedAt: msg.createTime || tIntake,
         roleSuffix: perm.roleSuffix,
         backendId: be.id,
         timing: { tResolve: tResolveDone - tIntake, tWeave: Date.now() - tIntake },
@@ -2046,6 +2150,45 @@ export function createOrchestrator(
       st.interrupt?.();
       log.info('card', 'action', { actionId: 'run.stop', stopped: Boolean(st.interrupt) });
     })
+    // “仅手动”模式的单轮完成提醒。这不是破坏性操作，但也不允许
+    // 管理员替别人订阅：只有这一轮的真实发起人能开启。
+    .on(RC.remind, ({ evt, value }) => {
+      const key = typeof value.m === 'string' ? value.m : evt.messageId;
+      if (!runAllowed(evt)) return;
+      const st = runsByCard.get(key);
+      if (!st) {
+        if (!runControlNotes.seen(`remind-ended:${key}:${evt.operator?.openId ?? ''}`)) {
+          void channel
+            .send(evt.chatId, { markdown: 'ℹ️ 该任务已结束，无需再开启完成提醒。' }, { replyTo: evt.messageId })
+            .catch(() => undefined);
+        }
+        log.info('card', 'action', { actionId: RC.remind, ended: true });
+        return;
+      }
+      const op = evt.operator?.openId;
+      if (!isCompletionReminderRequester(op, st.requesterOpenId)) {
+        if (!runControlNotes.seen(`remind-deny:${key}:${op ?? ''}`)) {
+          void channel
+            .send(evt.chatId, { markdown: '⚠️ 仅本轮发起人可开启完成提醒。' }, { replyTo: evt.messageId })
+            .catch(() => undefined);
+        }
+        log.info('card', 'action', { actionId: RC.remind, denied: true });
+        return;
+      }
+      // Settings may have changed after this frame was rendered. Refuse a
+      // stale manual button and repaint it away instead of creating a hidden
+      // per-turn override under long/failures/always.
+      if (!shouldShowCompletionReminderButton(cfg)) {
+        completionReminderRefreshers.get(key)?.();
+        log.info('card', 'action', { actionId: RC.remind, stale: true });
+        return;
+      }
+      if (!st.completionReminderRequested) {
+        st.completionReminderRequested = true;
+        completionReminderRefreshers.get(key)?.();
+      }
+      log.info('card', 'action', { actionId: RC.remind, requested: true });
+    })
     // 🎯 结束目标 (goal cards): clear the goal, let the current turn finish, then
     // stop — no auto-continue. Owner-or-admin gated like ⏹.
     .on(RC.endGoal, ({ evt, value }) => {
@@ -2097,14 +2240,57 @@ export function createOrchestrator(
     evt: CardActionEvent,
     mut: (p: AppPreferences) => void,
     opts?: { render?: boolean },
-  ): void {
-    if (!dmAdmin(evt.operator?.openId)) return;
-    const prefs: AppPreferences = { ...(cfg.preferences ?? {}) };
-    mut(prefs);
-    cfg.preferences = prefs;
-    // persist in the background; the card only needs the in-memory cfg
-    void saveConfig(cfg).catch((err) => log.fail('console', err, { phase: 'save-config' }));
-    if (opts?.render !== false) void patch(evt, renderSettings);
+  ): Promise<boolean> {
+    if (!dmAdmin(evt.operator?.openId)) return Promise.resolve(false);
+    const saved = writePreferences(mut).then(
+      () => true,
+      (err) => {
+        log.fail('console', err, { phase: 'save-config' });
+        return false;
+      },
+    );
+    if (opts?.render !== false) {
+      void patch(evt, async () => {
+        await saved;
+        return renderSettings();
+      });
+    }
+    return saved;
+  }
+
+  // CLI service state and its persisted enabled flag are one transition. Keep
+  // rapid on/off clicks ordered; if persistence fails after the side effect,
+  // compensate back to the last committed config so runtime and disk agree.
+  let cliEnabledTransition: Promise<unknown> = Promise.resolve();
+  function setCliBridgeEnabled(evt: CardActionEvent, enabled: boolean): Promise<void> {
+    const run = cliEnabledTransition.then(async () => {
+      if (getCliBridgePreferences(cfg).enabled === enabled) return;
+      try {
+        if (enabled) await cliBridge?.start?.();
+        else await cliBridge?.shutdown?.();
+
+        const saved = await applyPref(
+          evt,
+          (p) => {
+            p.cliBridge = { ...(p.cliBridge ?? {}), enabled };
+          },
+          { render: false },
+        );
+        if (!saved) {
+          // Best-effort rollback of the runtime side effect. The persisted and
+          // LIVE config deliberately stayed unchanged on write failure.
+          if (enabled) await cliBridge?.shutdown?.();
+          else await cliBridge?.start?.();
+        }
+      } catch (err) {
+        log.fail('cli-bridge', err, { phase: enabled ? 'enable' : 'disable' });
+      }
+    });
+    cliEnabledTransition = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   // 「☕ 咖啡一下」那组控件现在独立成二级卡（buildCoffeeSettingsCard），主设置卡只放入口。
@@ -2142,10 +2328,32 @@ export function createOrchestrator(
 
   /** Render the comment-settings card for the CURRENT comments config: fetch the
    * configured backend's live model list so the model/effort dropdowns match it. */
+  let commentSettingsRenderGeneration = 0;
   async function renderCommentSettings(notice?: string): Promise<object> {
-    const comments = getCommentsConfig(cfg);
-    const models = await listModels(backendFor(comments.backend)).catch(() => [] as ModelInfo[]);
-    return buildCommentSettingsCard(cfg, commentBackendOptions(), models, notice);
+    ++commentSettingsRenderGeneration;
+    for (;;) {
+      const generation = commentSettingsRenderGeneration;
+      const comments = getCommentsConfig(cfg);
+      const models = await listModels(backendFor(comments.backend)).catch(() => [] as ModelInfo[]);
+      // Another external settings render started while this backend's model
+      // request was in flight. Retry against that latest generation without
+      // incrementing it again; concurrent stale renders can converge instead
+      // of recursively invalidating one another forever.
+      if (generation !== commentSettingsRenderGeneration) continue;
+      const latest = getCommentsConfig(cfg);
+      if (
+        latest.backend !== comments.backend ||
+        latest.model !== comments.model ||
+        latest.effort !== comments.effort
+      ) {
+        continue;
+      }
+      const snapshot: AppConfig = {
+        ...cfg,
+        preferences: { ...(cfg.preferences ?? {}), comments: { ...comments } },
+      };
+      return buildCommentSettingsCard(snapshot, commentBackendOptions(), models, notice);
+    }
   }
 
   /** Mutate cfg.preferences.comments (admin-gated), persist, and re-render the
@@ -2153,13 +2361,15 @@ export function createOrchestrator(
    * comments block and refreshing the comment card (not the global one). */
   function applyCommentsPref(evt: CardActionEvent, mut: (c: CommentsConfig) => void): void {
     if (!dmAdmin(evt.operator?.openId)) return;
-    const prefs: AppPreferences = { ...(cfg.preferences ?? {}) };
-    const comments: CommentsConfig = { ...(prefs.comments ?? {}) };
-    mut(comments);
-    prefs.comments = comments;
-    cfg.preferences = prefs;
-    void saveConfig(cfg).catch((err) => log.fail('console', err, { phase: 'save-config' }));
-    void patch(evt, () => renderCommentSettings());
+    const saved = writePreferences((prefs) => {
+      const comments: CommentsConfig = { ...(prefs.comments ?? {}) };
+      mut(comments);
+      prefs.comments = comments;
+    }).catch((err) => log.fail('console', err, { phase: 'save-config' }));
+    void patch(evt, async () => {
+      await saved;
+      return renderCommentSettings();
+    });
   }
 
   // Back-to-menu: the settings card is button-only (never locks) and the
@@ -2368,26 +2578,15 @@ export function createOrchestrator(
     .on(DM.coffeeSettings, async ({ evt }) => {
       if (dmAdmin(evt.operator?.openId)) await patch(evt, () => renderCoffeeSettings(true));
     })
-    .on(CLI.toggleEnabled, async ({ evt, value }) => {
+    .on(CLI.toggleEnabled, ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
       const enabled = value.v === 'on';
       if (enabled && !canEnableCliBridge(cfg).ok) return;
-      try {
-        if (enabled) {
-          await cliBridge?.start?.();
-          applyPref(evt, (p) => {
-            p.cliBridge = { ...(p.cliBridge ?? {}), enabled: true };
-          }, { render: false });
-        } else {
-          applyPref(evt, (p) => {
-            p.cliBridge = { ...(p.cliBridge ?? {}), enabled: false };
-          }, { render: false });
-          await cliBridge?.shutdown?.();
-        }
-      } catch (err) {
-        log.fail('cli-bridge', err, { phase: enabled ? 'enable' : 'disable' });
-      }
-      void patch(evt, renderCoffeeSettings);
+      const transition = setCliBridgeEnabled(evt, enabled);
+      void patch(evt, async () => {
+        await transition;
+        return renderCoffeeSettings();
+      });
     })
     .on(CLI.repairHooks, async ({ evt }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
@@ -2411,29 +2610,38 @@ export function createOrchestrator(
     .on(CLI.setNotifyScope, ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
       const scope = value.v === 'bound_projects' || value.v === 'none' ? value.v : 'all';
-      applyPref(evt, (p) => {
+      const saved = applyPref(evt, (p) => {
         p.cliBridge = { ...(p.cliBridge ?? {}), notifyScope: scope };
       }, { render: false });
-      void patch(evt, renderCoffeeSettings);
+      void patch(evt, async () => {
+        await saved;
+        return renderCoffeeSettings();
+      });
     })
     .on(CLI.toggleAgent, ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
       const agent = value.agent === 'codex' ? 'codex' : 'claude';
       const on = value.v === 'on';
-      applyPref(evt, (p) => {
+      const saved = applyPref(evt, (p) => {
         const cur = p.cliBridge ?? {};
         p.cliBridge = { ...cur, agents: { ...(cur.agents ?? {}), [agent]: on } };
       }, { render: false });
-      void patch(evt, renderCoffeeSettings);
+      void patch(evt, async () => {
+        await saved;
+        return renderCoffeeSettings();
+      });
     })
     .on(CLI.toggleKeepAwake, ({ evt, value }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
       const on = value.v === 'on';
-      applyPref(evt, (p) => {
+      const saved = applyPref(evt, (p) => {
         const cur = p.cliBridge ?? {};
         p.cliBridge = { ...cur, keepAwake: { ...(cur.keepAwake ?? {}), enabled: on } };
       }, { render: false });
-      void patch(evt, renderCoffeeSettings);
+      void patch(evt, async () => {
+        await saved;
+        return renderCoffeeSettings();
+      });
     })
     .on(DM.doctor, async ({ evt }) => {
       if (!dmAdmin(evt.operator?.openId)) return;
@@ -2670,6 +2878,66 @@ export function createOrchestrator(
         n === 0 ? 0 : Math.min(Math.max(Math.floor(n), RUN_IDLE_TIMEOUT_MIN_SEC), RUN_IDLE_TIMEOUT_MAX_SEC);
       applyPref(evt, (p) => (p.runIdleTimeoutSeconds = sec));
     })
+    .on(DM.setCompletionReminder, ({ evt, value }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const mode = value.v;
+      if (mode !== 'manual' && mode !== 'long' && mode !== 'failures' && mode !== 'always') return;
+      // Shared writer persists first and only then mutates LIVE cfg, so a disk
+      // failure cannot create a setting that works until restart and vanishes.
+      // Queue the write before the 500ms card-interaction settle delay: a task
+      // finishing immediately after this click must already see the new policy.
+      const saved = performSetCompletionReminder({
+        cfg,
+        mode: mode as CompletionReminderMode,
+        writePreferences,
+      }).then(
+        (result) => {
+          if (!result.ok) log.warn('console', 'completion-reminder-rejected', { reason: result.reason });
+          else refreshCompletionReminderCards();
+        },
+        (err) => log.fail('console', err, { phase: 'save-config' }),
+      );
+      void patch(evt, async () => {
+        await saved;
+        return renderSettings();
+      });
+    })
+    .on(DM.completionReminderCustom, ({ evt }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      void patch(evt, buildCompletionReminderCustomCard(cfg));
+    })
+    .on(DM.completionReminderCustomSubmit, ({ evt, formValue }) => {
+      if (!dmAdmin(evt.operator?.openId)) return;
+      const raw = String(formValue?.minutes ?? '').trim();
+      const minutes = Number(raw);
+      if (
+        !Number.isInteger(minutes) ||
+        minutes < COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES ||
+        minutes > COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES
+      ) {
+        // A submitted form card becomes interaction-locked. Repaint it into a
+        // fresh form so an invalid value is actually retryable instead of
+        // leaving the user with a warning beside a dead input.
+        void patch(evt, buildCompletionReminderCustomCard(cfg));
+        return;
+      }
+      const saved = performSetCompletionReminder({
+        cfg,
+        mode: 'long',
+        longTaskMinutes: minutes,
+        writePreferences,
+      }).then(
+        (result) => {
+          if (!result.ok) log.warn('console', 'completion-reminder-rejected', { reason: result.reason });
+          else refreshCompletionReminderCards();
+        },
+        (err) => log.fail('console', err, { phase: 'save-config' }),
+      );
+      void patch(evt, async () => {
+        await saved;
+        return renderSettings();
+      });
+    })
     .on(DM.setPending, ({ evt, value }) => {
       if (value.v === 'steer' || value.v === 'queue') applyPref(evt, (p) => (p.pendingPolicy = value.v as PendingPolicy));
     })
@@ -2857,11 +3125,12 @@ export function createOrchestrator(
       log.info('console', 'admin-add', { picked: id?.slice(-6) ?? null });
       void (async () => {
         if (id) {
-          const access: AppAccess = { ...(cfg.preferences?.access ?? {}) };
-          access.ownerOpenId ??= resolveOwner(cfg);
-          access.admins = Array.from(new Set([...(access.admins ?? []), id]));
-          cfg.preferences = { ...(cfg.preferences ?? {}), access };
-          await saveConfig(cfg).catch((e) => log.fail('console', e, { phase: 'save-config' }));
+          await writePreferences((preferences) => {
+            const access: AppAccess = { ...(preferences.access ?? {}) };
+            access.ownerOpenId ??= resolveOwner(cfg);
+            access.admins = Array.from(new Set([...(access.admins ?? []), id]));
+            preferences.access = access;
+          }).catch((e) => log.fail('console', e, { phase: 'save-config' }));
         }
         const ids = [resolveOwner(cfg), ...(cfg.preferences?.access?.admins ?? [])];
         const next = buildAdminsCard(cfg, await namesWithOperator(evt, ids));
@@ -2873,11 +3142,12 @@ export function createOrchestrator(
       const id = typeof value.u === 'string' ? value.u : '';
       patch(evt, async () => {
         if (id && id !== resolveOwner(cfg)) {
-          const access: AppAccess = { ...(cfg.preferences?.access ?? {}) };
-          access.ownerOpenId ??= resolveOwner(cfg);
-          access.admins = (access.admins ?? []).filter((x) => x !== id);
-          cfg.preferences = { ...(cfg.preferences ?? {}), access };
-          await saveConfig(cfg).catch((e) => log.fail('console', e, { phase: 'save-config' }));
+          await writePreferences((preferences) => {
+            const access: AppAccess = { ...(preferences.access ?? {}) };
+            access.ownerOpenId ??= resolveOwner(cfg);
+            access.admins = (access.admins ?? []).filter((x) => x !== id);
+            preferences.access = access;
+          }).catch((e) => log.fail('console', e, { phase: 'save-config' }));
         }
         const ids = [resolveOwner(cfg), ...(cfg.preferences?.access?.admins ?? [])];
         return buildAdminsCard(cfg, await namesWithOperator(evt, ids));
@@ -3189,6 +3459,10 @@ export function createOrchestrator(
   }
 
   // ── shared run loop ───────────────────────────────────────────────
+  async function sendCompletionReminder(input: CompletionReminderReplyInput): Promise<void> {
+    await sendCompletionReminderReply({ channel, cfg, dedupe: completionReminderSent }, input);
+  }
+
   interface LaunchOpts {
     chatId: string;
     replyTo: string;
@@ -3206,6 +3480,9 @@ export function createOrchestrator(
     summary?: string;
     /** who triggered this run (for ⏹/⚙️ ownership gating) */
     requesterOpenId?: string;
+    /** wall-clock origin for completion reminders; normally the inbound
+     * message's createTime, so global/session queueing is included. */
+    requestedAt?: number;
     /** single-session group: reply by quoting (no reply_in_thread / topic). */
     flat?: boolean;
     /** when admin/guest tiers are split: 'admin'|'guest' to namespace the
@@ -3249,21 +3526,33 @@ export function createOrchestrator(
     if (sema.hasFree()) return { release: await sema.acquire() };
     const stream = new RunCardStream();
     let msgId: string | undefined;
+    const queueCard = (input: Parameters<typeof buildQueuedCard>[0]) =>
+      buildQueuedCard({
+        ...input,
+        ...(!state.isGoal ? { completionReminder: completionReminderView(state) } : {}),
+      });
     const q = sema.enqueue((pos) => {
       // 前面有人拿到槽/取消 → 原地刷新位置。走合并泵（非阻塞、合并、限频）。
-      if (msgId) stream.streamCoalesced(channel, buildQueuedCard({ position: pos, cardKey: msgId }), null);
+      if (msgId) stream.streamCoalesced(channel, queueCard({ position: pos, cardKey: msgId }), null);
     });
     try {
-      msgId = await stream.create(channel, opts.chatId, buildQueuedCard({ position: q.position() }), {
+      msgId = await stream.create(channel, opts.chatId, queueCard({ position: q.position() }), {
         replyTo: opts.replyTo,
         replyInThread: opts.flat ? false : (opts.replyInThread ?? Boolean(opts.knownThreadId)),
       });
       // 自指按钮（m = 自己的 messageId）只能在拿到 messageId 后补上。建卡 RTT 里
       // 槽可能已到手（position()=0）——那就不补按钮，run 卡马上原地接管。
       const pos = q.position();
-      if (pos > 0) await stream.updateCard(channel, buildQueuedCard({ position: pos, cardKey: msgId }));
+      if (pos > 0) await stream.updateCard(channel, queueCard({ position: pos, cardKey: msgId }));
       runsByCard.set(msgId, state);
       runStreams.set(msgId, stream);
+      if (!state.isGoal) {
+        const key = msgId;
+        completionReminderRefreshers.set(key, () => {
+          const currentPos = q.position();
+          if (currentPos > 0) void stream.updateLiveCard(channel, queueCard({ position: currentPos, cardKey: key }));
+        });
+      }
     } catch (err) {
       // 占位卡失败不阻断排队：没有卡只是不可见/不可取消，run 照常等槽。
       log.fail('card', err, { phase: 'queued-card' });
@@ -3280,7 +3569,8 @@ export function createOrchestrator(
       if (msgId) {
         runsByCard.delete(msgId);
         runStreams.delete(msgId);
-        void stream.updateCard(channel, buildQueuedCard({ cancelled: true, dropped: state.queue.length }));
+        completionReminderRefreshers.delete(msgId);
+        void stream.updateCard(channel, queueCard({ cancelled: true, dropped: state.queue.length }));
       }
       reaction?.done();
       log.info('card', 'action', { actionId: 'run.stop', queuedCancel: true });
@@ -3351,10 +3641,17 @@ export function createOrchestrator(
     let intake = opts.timing;
     let firstRec = opts.firstRec;
     try {
-      let turnInput: AgentInput = { text: opts.firstText, images: opts.images };
+      let currentTurn: QueuedTurn = {
+        input: { text: opts.firstText, images: opts.images },
+        requesterOpenId: opts.requesterOpenId,
+        requestedAt: opts.requestedAt ?? Date.now(),
+        summary: opts.summary,
+      };
       let replyTo = opts.replyTo;
       let replyInThread = opts.flat ? false : (opts.replyInThread ?? Boolean(opts.knownThreadId));
       for (;;) {
+        const turnInput = currentTurn.input;
+        state.requesterOpenId = currentTurn.requesterOpenId;
         // per-turn model/effort: prefer latest persisted (⚙️ may have changed it).
         // First turn uses the intake-prefetched record (null = known absent) so
         // runStreamed — i.e. turn/start — fires with zero awaits after weaving.
@@ -3372,8 +3669,9 @@ export function createOrchestrator(
         let cardMsgId: string | undefined;
         const rc: RunCardState = {
           rs: render.snapshot(),
-          requesterOpenId: opts.requesterOpenId,
+          requesterOpenId: currentTurn.requesterOpenId,
           showTools: render.showTools,
+          completionReminder: completionReminderView(state),
           // 模型显示档位：footnote 本轮 model·推理强度；always 档终态卡也保留。
           ...(modelDisp !== 'off' && turnModel
             ? { model: turnModel, effort: turnEffort, modelOnTerminal: modelDisp === 'always' }
@@ -3435,6 +3733,15 @@ export function createOrchestrator(
         rc.cardKey = cardMsgId;
         runsByCard.set(cardMsgId, state);
         runStreams.set(cardMsgId, stream);
+        completionReminderRefreshers.set(cardMsgId, () => {
+          rc.completionReminder = completionReminderView(state);
+          void stream.updateLiveCard(channel, buildRunCard(rc));
+        });
+        // The entity is created before its carrier messageId exists, so the
+        // initial JSON cannot self-route controls. Establish the first
+        // self-addressed ⏹/🔔 row immediately instead of waiting for an agent
+        // event (a long silent tool startup still needs both controls).
+        stream.streamCoalesced(channel, buildRunCard(rc), ANSWER_EID);
         await adoptThreadId(cardMsgId);
         // first card is live = topic created. The 群@bot 建话题 path flips its
         // reaction to DONE here (creating the topic is the acked action), unlike
@@ -3510,6 +3817,10 @@ export function createOrchestrator(
           }
           render.apply(ev);
           rc.rs = render.snapshot();
+          // The global mode is live-editable. Re-evaluate on every structural /
+          // answer frame so switching away from manual removes the button from
+          // an already-running card instead of leaving a stale affordance.
+          rc.completionReminder = completionReminderView(state);
           // Non-blocking: never stall event consumption on a round-trip. The pump
           // coalesces and routes the latest snapshot — answer text → element
           // typewriter (cardElement.content), structure → whole-card update.
@@ -3523,9 +3834,17 @@ export function createOrchestrator(
         // 杀进程恢复锤只留给「真出事」：watchdog 超时，或 ⏹ 后没等到干净收尾
         // （forced）。优雅 ⏹（done 及时到达）不算 killed —— 线程与进程留用。
         const killed = timedOut || (interrupted && stopper.forced());
-        if (interrupted) render.interrupt();
-        else if (timedOut) render.timeout(Math.round(idleMs / 1000));
-        else render.finalize();
+        // A child crash closes the notification iterator cleanly, so no error
+        // event is guaranteed. Detect liveness BEFORE finalizing: only a still-
+        // running render becomes error; an explicit backend done/error terminal
+        // remains authoritative.
+        const procDead = !killed && !opts.thread.isAlive();
+        settleOrdinaryTurnRender(render, {
+          interrupted,
+          timedOut,
+          idleTimeoutSeconds: Math.round(idleMs / 1000),
+          procDead,
+        });
         rc.rs = render.snapshot();
         if (interrupted) log.info('agent', 'interrupt', { graceful: !stopper.forced(), threadId: topicThreadId ?? null });
 
@@ -3541,7 +3860,6 @@ export function createOrchestrator(
         // 进程级死亡（app-server 中途崩溃 → error 卡 / 轮间死 → 空卡，killed=false）
         // 同走回收：立即清出缓存，下一条消息直接经 resolveThread 的 resume 兜底
         // 自愈（快路径的 isAlive 守卫是兜底的兜底）。
-        const procDead = !killed && !opts.thread.isAlive();
         if (killed || procDead) {
           void opts.thread.close().catch(() => undefined);
           if (topicThreadId) sessions.delete(topicThreadId);
@@ -3573,8 +3891,12 @@ export function createOrchestrator(
         }
 
         // terminal whole-card update: final render with streaming off (clears the
-        // typewriter cursor) and no ⏹ button.
-        await stream.updateCard(channel, buildRunCard(rc));
+        // typewriter cursor) and no ⏹ button. Remove the callback before freezing
+        // live repaints; already-accepted repaint writes are serialized ahead of
+        // finalizeCard, while callbacks arriving from now on cannot overwrite it.
+        const manuallyRequested = Boolean(state.completionReminderRequested);
+        completionReminderRefreshers.delete(cardMsgId);
+        const terminalCardUpdated = await stream.finalizeCard(channel, buildRunCard(rc));
         // One-line per-turn timeline; all ms are relative to the turn's stream start.
         {
           const terminalAt = Date.now();
@@ -3614,6 +3936,16 @@ export function createOrchestrator(
           touchSession(topicThreadId); // 轮次收尾打点（M-3 reaper 的空闲时钟）
           await patchSession(topicThreadId, { updatedAt: Date.now() });
         }
+        await sendCompletionReminder({
+          cardMsgId: finalMsgId,
+          requesterOpenId: currentTurn.requesterOpenId,
+          outcome: rc.rs.terminal === 'running' ? 'done' : rc.rs.terminal,
+          requestedAt: currentTurn.requestedAt,
+          manuallyRequested,
+          summary: currentTurn.summary,
+          cardUpdated: terminalCardUpdated,
+          replyInThread: !opts.flat,
+        });
         replyTo = finalMsgId;
         replyInThread = !opts.flat; // stay in the topic for queued turns (single: stay flat)
         log.info('card', 'final', { terminal: render.terminal() });
@@ -3636,7 +3968,11 @@ export function createOrchestrator(
           break;
         }
         if (state.queue.length === 0) break;
-        turnInput = state.queue.shift()!;
+        currentTurn = state.queue.shift()!;
+        // Per-turn ownership + one-shot override must not leak from the previous
+        // requester. The queued item's timestamp preserves all waiting time for
+        // the `long` policy and notification copy.
+        activateQueuedTurn(state, currentTurn);
       }
     } catch (err) {
       log.fail('intake', err);
@@ -3645,7 +3981,10 @@ export function createOrchestrator(
         .catch(() => undefined);
     } finally {
       active.delete(activeKey);
-      if (curCardKey) runsByCard.delete(curCardKey);
+      if (curCardKey) {
+        runsByCard.delete(curCardKey);
+        completionReminderRefreshers.delete(curCardKey);
+      }
       // F8: adopt 始终没成功的线程对任何后续消息都不可达（pending: 键随本
       // finally 即灭，会话从未 persist，M-3 reaper 只扫 sessions 也看不见它）
       // ——保活只会把常驻 agent 进程（~172MB/个）泄漏到停机。与 goal 路径
@@ -4481,7 +4820,11 @@ export function createOrchestrator(
   // 管理面写执行器（Web 控制台 / supervisor IPC 入口）：与上面 DM 回调共用
   // admin/ops.ts 的 perform*，注入同一个 backendFor + evictLiveSessionsForChat
   // —— 双端写行为同源（同校验、同落盘、同驱逐）。
-  const adminExecute = createAdminWriteExecutor({ backendFor, evictLiveSessionsForChat });
+  const executeAdminWrite = createAdminWriteExecutor({ cfg, backendFor, evictLiveSessionsForChat, writePreferences });
+  const adminExecute = async (op: AdminWriteOp): Promise<void> => {
+    await executeAdminWrite(op);
+    if (op.kind === 'setCompletionReminder') refreshCompletionReminderCards();
+  };
 
   return { onMessage, onComment, onBotAddedToChat, onBotRemovedFromChat, onReaction, onBotMenu, dispatcher, adminExecute, shutdown };
 }

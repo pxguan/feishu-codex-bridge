@@ -605,6 +605,11 @@ export const UI_HTML = `<!doctype html>
   .drawer-mask.open { display: block; }
   .drawer h3 { margin: 0 0 4px; font-size: 16px; }
   .opt-row { display: flex; gap: 8px; margin: 6px 0 2px; flex-wrap: wrap; }
+  .compact-input {
+    width: 84px; border: 1px solid var(--border-2); border-radius: 8px; padding: 7px 9px;
+    font: 13px var(--mono); background: #0c0e0c; color: var(--text);
+  }
+  .compact-input:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
   .backend-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
   .backend-row .grow { flex: 1; min-width: 0; }
   .bk-group { margin: 6px 0 2px; }
@@ -2081,6 +2086,9 @@ ${UI_PURE_JS}
     left.appendChild(projCard);
     renderProjects(projList, pcount, b);
 
+    // 🔔 普通任务结束提醒（每 bot 独立）。选择即保存；仅 long 额外展示分钟阈值。
+    renderCompletionReminderCard(right, b);
+
     cols.appendChild(left);
     cols.appendChild(right);
     root.appendChild(cols);
@@ -2150,6 +2158,58 @@ ${UI_PURE_JS}
       if (!bk.ok && bk.hint) row.appendChild(el('span', 'note', bk.hint));
       box.appendChild(row);
     });
+  }
+
+  function renderCompletionReminderCard(root, b) {
+    var reminder = b.completionReminder || { mode: 'failures', longTaskMinutes: 3 };
+    var card = el('div', 'card');
+    card.appendChild(el('h2', null, '🔔 完成提醒'));
+    card.appendChild(el('div', 'note', '任务结束后是否另发一条消息 @ 发起人。每个机器人独立设置，保存后立即生效。'));
+    var modes = [
+      { label: '仅手动', value: 'manual' },
+      { label: '长任务', value: 'long' },
+      { label: '失败或超时', value: 'failures' },
+      { label: '每次结束', value: 'always' },
+    ];
+    card.appendChild(optButtons(modes, reminder.mode, function (mode) {
+      postWrite('/api/bots/' + encodeURIComponent(b.appId) + '/completion-reminder', {
+        mode: mode,
+        longTaskMinutes: reminder.longTaskMinutes,
+      });
+    }));
+
+    var descriptions = {
+      manual: '运行卡显示「完成后提醒我」，只有本轮发起人点过才通知。',
+      long: '任务耗时达到阈值后通知；运行卡不显示提醒按钮。',
+      failures: '仅任务失败或假死超时时通知；运行卡不显示提醒按钮。',
+      always: '每次正常结束、失败或超时都通知；运行卡不显示提醒按钮。',
+    };
+    card.appendChild(el('div', 'note', descriptions[reminder.mode] || descriptions.failures));
+
+    if (reminder.mode === 'long') {
+      var threshold = el('div', 'statline');
+      threshold.appendChild(el('span', null, '长任务阈值'));
+      var input = el('input', 'compact-input');
+      input.type = 'number'; input.min = '1'; input.max = '1440'; input.step = '1';
+      input.value = String(reminder.longTaskMinutes);
+      input.setAttribute('aria-label', '长任务阈值（分钟）');
+      threshold.appendChild(input);
+      threshold.appendChild(el('span', 'note', '分钟（1–1440）'));
+      var save = el('button', 'btn primary sm', '保存阈值');
+      save.onclick = function () {
+        var minutes = Number(input.value);
+        if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+          toast('❌ 长任务阈值请输入 1–1440 的整数分钟');
+          return;
+        }
+        postWrite('/api/bots/' + encodeURIComponent(b.appId) + '/completion-reminder', {
+          mode: 'long', longTaskMinutes: minutes,
+        });
+      };
+      threshold.appendChild(save);
+      card.appendChild(threshold);
+    }
+    root.appendChild(card);
   }
 
   function renderProjects(box, countEl, b) {

@@ -117,6 +117,16 @@ export class RunCardStream {
   private lastAnswerText = '';
   // Per-chat pacer shared with the chat's other streams (set in create()).
   private pacer: ChatPacer | null = null;
+  // Forced whole-card writes (button/settings repaint, queue → run flip,
+  // terminal frame) must never race one another. In particular, an async
+  // completion-reminder repaint that started just before turn completion must
+  // land BEFORE the terminal frame, not finish late and put the card back into
+  // its running layout. This tail is deliberately separate from the coalesced
+  // pump: event consumption remains non-blocking, and the caller drains that
+  // pump before finalizing.
+  private forcedUpdateTail: Promise<void> = Promise.resolve();
+  /** Once terminal finalization starts, reminder/settings repaint is stale. */
+  private liveUpdatesFrozen = false;
 
   get messageId(): string {
     return this._messageId;
@@ -341,8 +351,10 @@ export class RunCardStream {
     }
   }
 
-  /** Forced whole-card replace for structural/terminal updates. A terminal
-   * card built with streaming off clears the typewriter cursor.
+  /** Forced whole-card replace for structural updates. Calls are serialized in
+   * invocation order so concurrent callback repaints cannot complete out of
+   * order. A terminal card built with streaming off clears the typewriter
+   * cursor.
    *
    * The terminal frame MUST land — losing it leaves the card "streaming"
    * forever (cursor + dead ⏹) while the run is over and `runsByCard` already
@@ -350,10 +362,52 @@ export class RunCardStream {
    * with exponential backoff (1s/2s/4s, {@link TERMINAL_RL_RETRIES} retries);
    * anything else — typically 200810 "card in ongoing interaction" when the
    * update fires inside a ⏹ click's 3s window — waits out the window and
-   * retries once. */
-  async updateCard(channel: LarkChannel, fullCard: CardObject): Promise<void> {
-    if (!this.cardId) return;
+   * retries once. Returns whether the requested frame is observably on the
+   * entity, so terminal callers can emit a truthful fallback notification. */
+  updateCard(channel: LarkChannel, fullCard: CardObject): Promise<boolean> {
+    return this.enqueueForcedUpdate(channel, fullCard);
+  }
+
+  /**
+   * Repaint a still-live card (currently used by the completion-reminder
+   * control). Once {@link finalizeCard} has synchronously frozen live repaints,
+   * late callbacks become a no-op. Repaints accepted before the freeze share
+   * the forced-update tail and therefore finish before the terminal frame.
+   */
+  updateLiveCard(channel: LarkChannel, fullCard: CardObject): Promise<boolean> {
+    if (this.liveUpdatesFrozen) return Promise.resolve(false);
+    return this.enqueueForcedUpdate(channel, fullCard);
+  }
+
+  /**
+   * Freeze live repaints synchronously, then enqueue the terminal whole-card
+   * frame after every already-accepted forced update. Future intentional
+   * non-live updates (for example demoting an old terminal card's settings
+   * control) may still use {@link updateCard}.
+   */
+  finalizeCard(channel: LarkChannel, fullCard: CardObject): Promise<boolean> {
+    this.liveUpdatesFrozen = true;
+    return this.enqueueForcedUpdate(channel, fullCard);
+  }
+
+  private enqueueForcedUpdate(channel: LarkChannel, fullCard: CardObject): Promise<boolean> {
+    if (!this.cardId) return Promise.resolve(false);
+    // Capture the exact frame at invocation time; callers often mutate their
+    // RunCardState again while this queued network write is waiting its turn.
     const data = JSON.stringify(fullCard);
+    const task = this.forcedUpdateTail.then(() => this.pushForcedUpdate(channel, data));
+    // A surprising transport failure must not poison the serialization tail and
+    // prevent the terminal frame. pushForcedUpdate normally absorbs failures,
+    // but keep the tail resilient to any future exception too.
+    this.forcedUpdateTail = task.then(
+      () => undefined,
+      () => undefined,
+    );
+    return task;
+  }
+
+  private async pushForcedUpdate(channel: LarkChannel, data: string): Promise<boolean> {
+    if (!this.cardId) return false;
     const push = async (): Promise<void> => {
       await channel.rawClient.cardkit.v1.card.update({
         path: { card_id: this.cardId },
@@ -365,13 +419,13 @@ export class RunCardStream {
       await this.pacer?.wait();
       try {
         await push();
-        return;
+        return true;
       } catch (err) {
         const rl = isRateLimited(err);
         if (rl) this.pacer?.penalize();
         if (i >= (rl ? TERMINAL_RL_RETRIES : 1)) {
           log.fail('card', err, { phase: 'run-update-retry', cardId: this.cardId, seq: this.seq });
-          return;
+          return false;
         }
         log.fail('card', err, { phase: 'run-update', cardId: this.cardId, seq: this.seq, retry: true, rateLimited: rl });
         await new Promise((r) => setTimeout(r, rl ? RL_BACKOFF_BASE_MS * 2 ** i : 3200));

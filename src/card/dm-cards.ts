@@ -1,4 +1,7 @@
 import {
+  COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES,
+  COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES,
+  getCompletionReminderConfig,
   getMaxConcurrentRuns,
   getModelDisplay,
   getPendingPolicy,
@@ -72,6 +75,10 @@ export const DM = {
   // 假死超时「自定义…」：watchdogCustom 打开输入卡，watchdogCustomSubmit 保存任意秒数
   watchdogCustom: 'dm.set.watchdog.custom',
   watchdogCustomSubmit: 'dm.set.watchdog.customSubmit',
+  // 普通群任务结束提醒（与 ☕ CLI Stop 通知无关）：四档策略 + 长任务阈值子卡
+  setCompletionReminder: 'dm.set.completionReminder',
+  completionReminderCustom: 'dm.set.completionReminder.custom',
+  completionReminderCustomSubmit: 'dm.set.completionReminder.customSubmit',
   setPending: 'dm.set.pending',
   setConcurrency: 'dm.set.concurrency',
   // 权限管理：全局 admins（settings 卡进入）+ 项目响应白名单（项目列表 / 建项目完成卡进入）
@@ -876,6 +883,7 @@ function settingItem(
  */
 export function buildSettingsCard(cfg: AppConfig): CardObject {
   const watchdogSec = cfg.preferences?.runIdleTimeoutSeconds ?? 120;
+  const completionReminder = getCompletionReminderConfig(cfg);
   return card(
     [
       settingSection('📤 输出展示'),
@@ -910,6 +918,25 @@ export function buildSettingsCard(cfg: AppConfig): CardObject {
         ),
         button('自定义…', { a: DM.watchdogCustom }),
       ]),
+      ...settingItem(
+        '🔔 任务结束提醒',
+        '结束后额外回复一条消息并 @ 发起人。「仅手动」会在运行卡显示提醒按钮；其他档位自动判断，不显示按钮。',
+        DM.setCompletionReminder,
+        completionReminder.mode,
+        [
+          { label: '仅手动', value: 'manual' },
+          { label: '长任务', value: 'long' },
+          { label: '失败或超时', value: 'failures' },
+          { label: '每次结束', value: 'always' },
+        ],
+      ),
+      ...(completionReminder.mode === 'long'
+        ? [
+            md(`**⏳ 长任务阈值** · 当前 **${completionReminder.longTaskMinutes} 分钟**`),
+            note('任务耗时达到这个阈值后，结束时才会提醒。'),
+            actions([button('修改阈值…', { a: DM.completionReminderCustom })]),
+          ]
+        : []),
       ...settingItem(
         '📥 运行中来新消息',
         '正在跑时你又发消息：引导＝插进当前轮纠偏；排队＝等这轮跑完再处理。',
@@ -1164,6 +1191,30 @@ export function buildWatchdogCustomCard(cfg: AppConfig): CardObject {
       actions([button('⬅️ 返回设置', { a: DM.settings })]),
     ],
     { header: { title: '⏱ 自定义超时', template: 'blue' } },
+  );
+}
+
+/**
+ * Custom duration threshold for the ordinary task-completion `long` policy.
+ * Kept on a dedicated form card so the main settings card remains button-only.
+ */
+export function buildCompletionReminderCustomCard(cfg: AppConfig): CardObject {
+  const cur = getCompletionReminderConfig(cfg).longTaskMinutes;
+  return card(
+    [
+      md('**自定义长任务阈值**'),
+      note(
+        `任务耗时达到这个时长，结束时额外回复消息并 @ 发起人。范围 ${COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES}–${COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES} 分钟。`,
+      ),
+      form('completion_reminder_custom', [
+        input({ name: 'minutes', label: '时长（分钟）', placeholder: '例如 10', value: String(cur), required: true }),
+        actions([
+          submitButton('✅ 保存', { a: DM.completionReminderCustomSubmit }, 'primary', 'submit_completion_reminder'),
+        ]),
+      ]),
+      actions([button('⬅️ 返回设置', { a: DM.settings })]),
+    ],
+    { header: { title: '🔔 长任务阈值', template: 'blue' } },
   );
 }
 

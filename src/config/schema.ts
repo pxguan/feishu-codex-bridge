@@ -44,6 +44,30 @@ export type MessageReplyMode = 'card' | 'markdown' | 'text';
 export type PendingPolicy = 'steer' | 'queue';
 
 /**
+ * 普通群任务结束提醒策略。这与 {@link CliBridgePreferences.taskCompletion}
+ * （本地 CLI agent 的 Stop 转发）是两条完全独立的通知链路。
+ */
+export type CompletionReminderMode = 'manual' | 'long' | 'failures' | 'always';
+
+/** Raw (partial) completion-reminder preferences as stored in config.json. */
+export interface CompletionReminderConfig {
+  /** manual=仅用户本轮手动开启；long=超过阈值；failures=失败/假死超时；always=每次结束。 */
+  mode?: CompletionReminderMode;
+  /** `long` 策略的耗时阈值（分钟）。默认 3，有效范围 1–1440。 */
+  longTaskMinutes?: number;
+}
+
+/** Fully-resolved completion-reminder preferences. */
+export interface ResolvedCompletionReminderConfig {
+  mode: CompletionReminderMode;
+  longTaskMinutes: number;
+}
+
+export const COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES = 1;
+export const COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES = 1440;
+export const COMPLETION_REMINDER_LONG_TASK_DEFAULT_MINUTES = 3;
+
+/**
  * 「模型显示」三档：off(关闭) · running(仅输出时，只在运行卡显示) ·
  * always(始终，运行卡 + 终态卡都保留)。控制运行卡右下角「模型 · 推理强度」脚注。
  */
@@ -84,6 +108,8 @@ export interface AppPreferences {
   runIdleTimeoutSeconds?: number;
   /** new-message-mid-turn behavior. Default 'steer'. */
   pendingPolicy?: PendingPolicy;
+  /** 普通群任务的结束提醒；默认只在失败或假死超时时发送。 */
+  completionReminder?: CompletionReminderConfig;
   /** groups require @bot to respond. Default true. */
   requireMentionInGroup?: boolean;
   /** access control — see AppAccess. */
@@ -176,6 +202,66 @@ export function getRequireMentionInGroup(cfg: AppConfig): boolean {
 
 export function getPendingPolicy(cfg: AppConfig): PendingPolicy {
   return cfg.preferences?.pendingPolicy === 'queue' ? 'queue' : 'steer';
+}
+
+/**
+ * Safely normalize the ordinary group-task completion reminder settings.
+ * Unknown modes fall back to `failures`; invalid/non-positive thresholds use
+ * the 3-minute default, while positive out-of-range values are clamped.
+ */
+export function getCompletionReminderConfig(cfg: AppConfig): ResolvedCompletionReminderConfig {
+  const raw = cfg.preferences?.completionReminder;
+  const mode: CompletionReminderMode =
+    raw?.mode === 'manual' || raw?.mode === 'long' || raw?.mode === 'always'
+      ? raw.mode
+      : 'failures';
+  const minutes = raw?.longTaskMinutes;
+  const longTaskMinutes =
+    typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes <= 0
+      ? COMPLETION_REMINDER_LONG_TASK_DEFAULT_MINUTES
+      : Math.min(
+          COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES,
+          Math.max(COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES, Math.floor(minutes)),
+        );
+  return { mode, longTaskMinutes };
+}
+
+/** The per-run “完成后提醒我” button only exists in manual mode. */
+export function shouldShowCompletionReminderButton(cfg: AppConfig): boolean {
+  return getCompletionReminderConfig(cfg).mode === 'manual';
+}
+
+/** Terminal states understood by the ordinary group-task reminder policy. */
+export type CompletionReminderOutcome = 'done' | 'error' | 'idle_timeout' | 'interrupted' | 'cancelled';
+
+export interface CompletionReminderDecision {
+  outcome: CompletionReminderOutcome;
+  /** Wall-clock duration for this queued/running turn, in milliseconds. */
+  elapsedMs: number;
+  /** Whether the initiator enabled the one-shot reminder on this run. */
+  manuallyRequested?: boolean;
+}
+
+/**
+ * Decide whether an ordinary task terminal should emit a separate reminder.
+ * User interruption / queue cancellation never notify. `long` is based only on
+ * elapsed wall-clock time; `failures` covers agent errors and the idle watchdog.
+ */
+export function shouldSendCompletionReminder(cfg: AppConfig, decision: CompletionReminderDecision): boolean {
+  if (decision.outcome === 'interrupted' || decision.outcome === 'cancelled') return false;
+  const reminder = getCompletionReminderConfig(cfg);
+  switch (reminder.mode) {
+    case 'manual':
+      return decision.manuallyRequested === true;
+    case 'long': {
+      const elapsedMs = Number.isFinite(decision.elapsedMs) ? Math.max(0, decision.elapsedMs) : 0;
+      return elapsedMs >= reminder.longTaskMinutes * 60_000;
+    }
+    case 'always':
+      return true;
+    case 'failures':
+      return decision.outcome === 'error' || decision.outcome === 'idle_timeout';
+  }
 }
 
 export function getAgentStopGraceMs(cfg: AppConfig): number {

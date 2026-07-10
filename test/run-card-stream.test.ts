@@ -106,10 +106,11 @@ describe('RunCardStream.updateCard — 终局帧保障（M-4）', () => {
     await s.create(ch, 'oc_m4_rl', frame('hi'), {});
     const done = s.updateCard(ch, frame('terminal'));
     await vi.runAllTimersAsync();
-    await done;
+    const delivered = await done;
 
     expect(ch.updates).toHaveLength(1);
     expect(ch.updates[0].data).toContain('terminal');
+    expect(delivered).toBe(true);
   });
 
   it('keeps the single 200810-window retry for non-rate-limit errors, then gives up without throwing', async () => {
@@ -119,9 +120,51 @@ describe('RunCardStream.updateCard — 终局帧保障（M-4）', () => {
     await s.create(ch, 'oc_m4_810', frame('hi'), {});
     const done = s.updateCard(ch, frame('terminal'));
     await vi.runAllTimersAsync();
-    await done; // 初次 + 1 次重试均失败 → 放弃（吞错，不抛）
+    const delivered = await done; // 初次 + 1 次重试均失败 → 放弃（吞错，不抛）
 
     expect(ch.updates).toHaveLength(0);
+    expect(delivered).toBe(false);
+  });
+
+  it('serializes an accepted live repaint before terminal and freezes every late repaint', async () => {
+    const ch = fakeChannel();
+    const rawUpdate = ch.rawClient.cardkit.v1.card.update;
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    let calls = 0;
+    ch.rawClient.cardkit.v1.card.update = async (p: Parameters<typeof rawUpdate>[0]) => {
+      calls++;
+      if (calls === 1) {
+        markFirstStarted();
+        await firstGate;
+      }
+      return rawUpdate(p);
+    };
+
+    const s = new RunCardStream();
+    await s.create(ch, 'oc_terminal_freeze', frame('initial'), {});
+    const repaint = s.updateLiveCard(ch, frame('live repaint'));
+    await firstStarted;
+
+    // finalizeCard freezes synchronously. The accepted repaint must finish
+    // first; a callback that arrives after the freeze is ignored immediately.
+    const terminal = s.finalizeCard(ch, frame('terminal'));
+    await expect(s.updateLiveCard(ch, frame('late repaint'))).resolves.toBe(false);
+    releaseFirst();
+    await expect(repaint).resolves.toBe(true);
+    await expect(terminal).resolves.toBe(true);
+
+    expect(ch.updates).toHaveLength(2);
+    expect(ch.updates[0].data).toContain('live repaint');
+    expect(ch.updates[1].data).toContain('terminal');
+    expect(ch.updates[1].data).not.toContain('late repaint');
+    expect(ch.updates[1].sequence).toBeGreaterThan(ch.updates[0].sequence);
   });
 });
 

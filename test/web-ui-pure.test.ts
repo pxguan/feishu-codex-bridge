@@ -30,6 +30,15 @@ describe('ui.ts UI_PURE_JS 内联进 UI_HTML（同一份字符串，零漂移）
   it('UI_HTML 内联了 UI_PURE_JS 全文', () => {
     expect(UI_HTML).toContain(UI_PURE_JS);
   });
+
+  it('每 bot 完成提醒设置展示四档、长任务阈值与保存接口', () => {
+    for (const label of ['仅手动', '长任务', '失败或超时', '每次结束']) {
+      expect(UI_HTML).toContain(label);
+    }
+    expect(UI_HTML).toContain('/completion-reminder');
+    expect(UI_HTML).toContain('1–1440');
+    expect(UI_HTML).toContain('运行卡不显示提醒按钮');
+  });
 });
 
 describe('parseRoute —— hash 路由（overview / bot）', () => {
