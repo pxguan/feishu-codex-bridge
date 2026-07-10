@@ -22,6 +22,9 @@ func tailLines(path string, n int) ([]string, error) {
 	for sc.Scan() {
 		lines = append(lines, sc.Text())
 	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
 	if n > 0 && len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}
@@ -78,7 +81,10 @@ func (m *Manager) FollowLogs(ctx context.Context) (<-chan string, error) {
 			}
 			// 读到 EOF / 错误：处理日志轮转（文件被截断时回到文件头）。
 			if fi, serr := f.Stat(); serr == nil {
-				if pos, _ := f.Seek(0, 1); pos > fi.Size() {
+				pos, perr := f.Seek(0, 1)
+				if perr != nil {
+					// Seek 失败：跳过本次轮转检测，下个 ticker 周期重试。
+				} else if pos > fi.Size() {
 					if _, serr2 := f.Seek(0, 0); serr2 == nil {
 						reader.Reset(f)
 						line = line[:0]
