@@ -1,0 +1,42 @@
+# CodeRabbit 评审行为配置
+# 文档：https://docs.coderabbit.ai/getting-started/yaml-configuration
+# 本文件可选；装好 CodeRabbit GitHub App 后，PR 触发评审时自动读取。
+# 本项目的 Go 侧（internal/ + cmd/）是飞书桥，评审聚焦：
+# 错误处理不吞、并发安全、飞书 SDK / 网络调用规范。
+# 注：TS（src/）不在评审范围，path_filters 已排除。
+language: zh-CN
+
+reviews:
+  # 跳过生成物与噪音文件，不浪费评审额度
+  path_filters:
+    - "!**/node_modules/**"
+    - "!**/dist/**"
+    - "!**/coverage/**"
+    - "!**/*.lock"
+    - "!**/go.sum"
+    - "!**/package-lock.json"
+    - "!**/bun.lock"
+    - "!**/*.generated.*"
+    - "!**/*.ts"
+    - "!**/*.tsx"
+
+  # 按语言注入评审侧重（呼应 superduck PR #187 被 CodeRabbit 评出的安全类问题）
+  path_instructions:
+    - path: "**/*.go"
+      instructions: |
+        重点检查：
+        - error 必须处理，不得用 `_` 吞错或忽略返回值（尤其 chmod、文件 IO、网络/SDK 调用）
+        - goroutine 泄漏与并发安全（共享状态、锁、channel）
+        - context 取消与超时必须向下传递，不得用 context.Background() 截断
+        - defer 释放资源；临时文件/目录权限收紧（敏感目录 0700）
+        - 凭证 / token 写入应原子化（临时文件 + rename），避免明文泄漏
+        本项目桥接飞书，所有飞书 SDK / OpenAPI 调用的 error 都不得静默忽略。
+
+  # 自动评审：正式 PR 评，draft PR 不评（减少噪音）
+  auto_review:
+    enabled: true
+    drafts: false
+
+# 允许在 PR 评论里 @coderabbitai 对话（/review、/ask、/describe 等）
+chat:
+  auto_reply: true
