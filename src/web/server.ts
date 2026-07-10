@@ -4,6 +4,11 @@ import { mkdirSync, watch, type FSWatcher } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { paths } from '../config/paths';
+import {
+  COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES,
+  COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES,
+  type CompletionReminderMode,
+} from '../config/schema';
 import { bridgeVersion } from '../core/version';
 import { NotWiredYetError, type AdminService } from '../admin/service';
 import { AdminWriteError } from '../admin/ops';
@@ -27,7 +32,7 @@ const LOGO_PNG = Buffer.from(LOGO_PNG_BASE64, 'base64');
  *   3. Host/Origin 校验防 DNS rebinding（只认 127.0.0.1 / localhost / [::1]）。
  *   4. 端点最小化：只读（state / diagnosis / logs / sessions / setup-status /
  *      daemon / update.check / host-doctor / backends）+「DM 卡片已有等价操作」的
- *      写入（backend / permission / no-mention / auto-compact）+ Web 专属（POST
+ *      写入（backend / permission / no-mention / auto-compact / completion-reminder）+ Web 专属（POST
  *      /api/bots 手填注册；GET /api/bots/register-qr/stream 扫码注册 SSE + DELETE
  *      取消；POST /api/backends/:id/install 按需安装 SSE；PATCH/DELETE /api/bots/:id
  *      多 bot 管理；POST /api/daemon/restart 与 /api/update 经 detached helper）。
@@ -73,6 +78,7 @@ export interface WebServer {
 const COOKIE_NAME = 'fcb_console_token';
 /** SSE 初始回放的日志尾部字节数。 */
 const SSE_INITIAL_TAIL_BYTES = 16 * 1024;
+const COMPLETION_REMINDER_MODES: readonly CompletionReminderMode[] = ['manual', 'long', 'failures', 'always'];
 
 export function createWebServer(opts: WebServerOptions): WebServer {
   const token = opts.token ?? randomUUID();
@@ -323,6 +329,55 @@ export function createWebServer(opts: WebServerOptions): WebServer {
     if (req.method === 'GET' && setupMatch) {
       const status = await opts.service.getSetupStatus(decodeURIComponent(setupMatch[1]!));
       sendJson(res, 200, status);
+      return;
+    }
+
+    // POST /api/bots/:appId/completion-reminder —— 每 bot 的普通任务结束提醒。
+    // Web 只投递结构化 op；真正的 config.json 落盘与 LIVE cfg 热更新在 bot 进程内完成。
+    const completionReminderMatch = /^\/api\/bots\/([^/]+)\/completion-reminder$/.exec(pathName);
+    if (req.method === 'POST' && completionReminderMatch) {
+      let body: Record<string, unknown>;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_body', message: '请求体必须是 JSON' });
+        return;
+      }
+      const mode = body.mode as CompletionReminderMode;
+      const minutes = body.longTaskMinutes;
+      if (!COMPLETION_REMINDER_MODES.includes(mode)) {
+        sendJson(res, 400, { error: 'invalid_input', message: 'mode 必须是 manual / long / failures / always' });
+        return;
+      }
+      if (
+        typeof minutes !== 'number' ||
+        !Number.isInteger(minutes) ||
+        minutes < COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES ||
+        minutes > COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES
+      ) {
+        sendJson(res, 400, {
+          error: 'invalid_input',
+          message:
+            `longTaskMinutes 必须是 ${COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES}–` +
+            `${COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES} 之间的整数`,
+        });
+        return;
+      }
+      try {
+        await opts.service.setCompletionReminder(decodeURIComponent(completionReminderMatch[1]!), {
+          mode,
+          longTaskMinutes: minutes,
+        });
+        sendJson(res, 200, { ok: true, completionReminder: { mode, longTaskMinutes: minutes } });
+      } catch (err) {
+        if (err instanceof NotWiredYetError) {
+          sendJson(res, 501, { error: 'not_wired_yet', message: err.message });
+        } else if (err instanceof AdminWriteError) {
+          sendJson(res, 409, { error: 'write_rejected', message: err.message });
+        } else {
+          throw err;
+        }
+      }
       return;
     }
 

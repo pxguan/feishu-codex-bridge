@@ -32,6 +32,8 @@ function gaugeEl(state: RunState): CardElement | null {
 /** Action ids for the in-topic run card. */
 export const RC = {
   stop: 'run.stop',
+  /** manual completion-reminder mode: notify this turn's requester when it ends. */
+  remind: 'run.remind',
   /** goal-only: clear the goal but let the in-flight turn finish (no auto-continue). */
   endGoal: 'goal.end',
 } as const;
@@ -106,6 +108,11 @@ export interface RunCardState {
   modelOnTerminal?: boolean;
   /** suppress the ⏹ 终止 button (used by non-goal cards that opt out of stop). */
   hideStop?: boolean;
+  /** Present only in the global `manual` reminder mode. `available` renders the
+   * one-shot “完成后提醒我” button; `requested` replaces it with a visible
+   * confirmation. Non-manual modes leave this unset and therefore never expose
+   * the per-turn button. */
+  completionReminder?: 'available' | 'requested';
   /** goal run cards: show TWO controls — `⏹ 终止` (clear goal + cut output now)
    * and `🎯 结束目标` (clear goal, let the current turn finish, then stop). */
   goalControls?: boolean;
@@ -213,8 +220,20 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
         ),
       );
     }
-  } else if (rc.cardKey && !rc.hideStop) {
-    elements.push(actions([button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger')], CONTROLS_EID));
+  } else if (rc.cardKey) {
+    // Ordinary turns only: the one-shot reminder is deliberately absent from
+    // goal cards (goal has its own terminal summary) and from every non-manual
+    // global strategy. Once tapped, make the state explicit instead of leaving
+    // a button that looks tappable twice.
+    if (rc.completionReminder === 'requested') {
+      elements.push(noteMd('_🔔 本轮结束后会提醒发起人_'));
+    }
+    const controls: CardElement[] = [];
+    if (!rc.hideStop) controls.push(button('⏹ 终止', { a: RC.stop, m: rc.cardKey }, 'danger'));
+    if (rc.completionReminder === 'available') {
+      controls.push(button('🔔 完成后提醒我', { a: RC.remind, m: rc.cardKey }, 'default'));
+    }
+    if (controls.length > 0) elements.push(actions(controls, CONTROLS_EID));
   }
 
   return elements;
@@ -395,6 +414,8 @@ export interface QueuedCardState {
   /** goal runs only: slot granted — the goal's own (lazily created) run cards
    * take over, this entity is repainted into a short started note. */
   started?: boolean;
+  /** Same manual-only, per-turn reminder control as {@link RunCardState}. */
+  completionReminder?: 'available' | 'requested';
 }
 
 /**
@@ -417,7 +438,14 @@ export function buildQueuedCard(qc: QueuedCardState): CardObject {
     md(`⏳ 排队中（第 **${qc.position ?? 1}** 位）`),
     noteMd('全局并发池已满（所有群/话题共享），轮到后自动开始。'),
   ];
-  if (qc.cardKey) els.push(actions([button('⏹ 取消', { a: RC.stop, m: qc.cardKey }, 'danger')], CONTROLS_EID));
+  if (qc.completionReminder === 'requested') els.push(noteMd('_🔔 本轮结束后会提醒发起人_'));
+  if (qc.cardKey) {
+    const controls: CardElement[] = [button('⏹ 取消', { a: RC.stop, m: qc.cardKey }, 'danger')];
+    if (qc.completionReminder === 'available') {
+      controls.push(button('🔔 完成后提醒我', { a: RC.remind, m: qc.cardKey }, 'default'));
+    }
+    els.push(actions(controls, CONTROLS_EID));
+  }
   return card(els, { summary: '排队中' });
 }
 
