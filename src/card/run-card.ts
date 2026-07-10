@@ -534,7 +534,7 @@ function footerStatus(status: Exclude<FooterStatus, null>): CardElement {
 
 /**
  * Effort → 中文档位 + 飞书颜色。只给 effort 词上色（模型名保持灰）：低=黄 / 中=绿 /
- * 高=浅紫(violet) / 极高=深紫(purple)；none·minimal 不强调（灰）。命名色取自飞书
+ * 高=浅紫(violet) / 极高及以上=深紫(purple)；none·minimal 不强调（灰）。命名色取自飞书
  * 色板，浅深紫的差异以真机为准（可在此调成色阶或换色名）。
  */
 const EFFORT_TIER: Record<ReasoningEffort, { label: string; color: string }> = {
@@ -544,6 +544,8 @@ const EFFORT_TIER: Record<ReasoningEffort, { label: string; color: string }> = {
   medium: { label: '中', color: 'green' },
   high: { label: '高', color: 'violet' },
   xhigh: { label: '极高', color: 'purple' },
+  max: { label: '最高', color: 'purple' },
+  ultra: { label: '超强', color: 'purple' },
 };
 
 /**

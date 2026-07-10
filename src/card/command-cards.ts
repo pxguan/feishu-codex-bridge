@@ -19,7 +19,14 @@ export const EFFORT_LABEL: Record<ReasoningEffort, string> = {
   medium: '中',
   high: '高',
   xhigh: '极高',
+  max: '最高',
+  ultra: '超强',
 };
+
+/** Keep model cards forward-compatible when Codex adds a new effort tier. */
+export function reasoningEffortLabel(effort: string): string {
+  return EFFORT_LABEL[effort as ReasoningEffort] ?? (effort || '未知');
+}
 
 // ── /model ────────────────────────────────────────────────────────────────
 
@@ -77,7 +84,7 @@ export function buildModelCard(state: ModelCardState): CardObject {
           actionId: MC.effort,
           placeholder: 'effort',
           initial: state.effort,
-          options: efforts.map((e) => ({ label: `effort：${EFFORT_LABEL[e]}`, value: e })),
+          options: efforts.map((e) => ({ label: `effort：${reasoningEffortLabel(e)}`, value: e })),
         }),
       );
     }

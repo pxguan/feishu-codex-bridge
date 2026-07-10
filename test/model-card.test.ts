@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildModelCard, type ModelCardState } from '../src/card/command-cards';
+import { buildModelCard, reasoningEffortLabel, type ModelCardState } from '../src/card/command-cards';
 import type { ModelInfo } from '../src/agent/types';
 
 // /model 卡按「当前模型能力」自适应（对齐 Codex 的诚实体验）：
@@ -31,7 +31,12 @@ const state = (models: ModelInfo[], cur: string): ModelCardState => ({
 
 // 多模型 + 真 effort（codex 的常态）。
 const codex = [
-  model({ id: 'gpt-5.5', displayName: 'GPT-5.5', supportedEfforts: ['low', 'medium', 'high'], isDefault: true }),
+  model({
+    id: 'gpt-5.6-sol',
+    displayName: 'GPT-5.6-Sol',
+    supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    isDefault: true,
+  }),
   model({ id: 'gpt-5-codex', displayName: 'GPT-5 Codex', supportedEfforts: ['low', 'medium', 'high'] }),
 ];
 // 多模型但当前模型无 effort 档 → 有模型下拉、无 effort 下拉。
@@ -46,10 +51,17 @@ const json = (s: ModelCardState): string => JSON.stringify(buildModelCard(s));
 
 describe('buildModelCard · 按当前模型能力自适应', () => {
   it('多模型 + 真 effort（codex）→ 模型下拉 + effort 下拉都在', () => {
-    const j = json(state(codex, 'gpt-5.5'));
+    const j = json(state(codex, 'gpt-5.6-sol'));
     expect(j).toContain('model.set'); // 模型下拉
     expect(j).toContain('model.effort'); // effort 下拉
     expect(j).toContain('effort：中');
+    expect(j).toContain('effort：最高');
+    expect(j).toContain('effort：超强');
+    expect(j).not.toContain('undefined');
+  });
+
+  it('未知的新 effort 档回退显示原始值，不显示 undefined', () => {
+    expect(reasoningEffortLabel('future-tier')).toBe('future-tier');
   });
 
   it('多模型，当前模型无 effort 档 → 有模型下拉，无 effort 下拉，有说明', () => {

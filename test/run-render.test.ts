@@ -418,4 +418,13 @@ describe('模型 · 推理强度 footnote（模型显示三档）', () => {
     expect(json).toContain('极高');
     expect(json).toContain('purple'); // 深紫
   });
+
+  it('GPT-5.6 ultra 档显示中文强度，不泄漏 undefined', () => {
+    const json = JSON.stringify(
+      buildRunCard({ rs: running(), cardKey: 'm1', model: 'gpt-5.6-sol', effort: 'ultra', modelOnTerminal: false }),
+    );
+    expect(json).toContain('超强');
+    expect(json).toContain('purple');
+    expect(json).not.toContain('undefined');
+  });
 });

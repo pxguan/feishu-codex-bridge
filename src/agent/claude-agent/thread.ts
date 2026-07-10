@@ -108,7 +108,8 @@ class PushablePrompt {
 function toSdkEffort(e: ReasoningEffort | undefined): Options['effort'] | undefined {
   if (!e) return undefined;
   if (e === 'none' || e === 'minimal') return 'low';
-  return e; // low/medium/high/xhigh pass through
+  if (e === 'ultra') return 'max'; // Claude has no delegation-aware ultra tier
+  return e; // low/medium/high/xhigh/max pass through
 }
 
 /** Content blocks the SDK accepts in a streaming user message, derived from the

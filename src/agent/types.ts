@@ -10,7 +10,9 @@
  * session-store can backfill old records without importing the registry. */
 export const DEFAULT_BACKEND_ID = 'codex-appserver';
 
-export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 /**
  * Permission tier for a project's codex sandbox:

@@ -242,6 +242,8 @@ describe('effortLabel', () => {
   it('maps reasoning efforts to the official Chinese labels', () => {
     expect(effortLabel('xhigh')).toBe('超高');
     expect(effortLabel('high')).toBe('高');
+    expect(effortLabel('max')).toBe('最高');
+    expect(effortLabel('ultra')).toBe('超强');
     expect(effortLabel('unknown-tier')).toBe('unknown-tier');
   });
 });

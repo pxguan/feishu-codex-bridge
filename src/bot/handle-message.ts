@@ -8,7 +8,16 @@ import type {
 } from '@larksuiteoapi/node-sdk';
 import { DEFAULT_BACKEND_ID, backendIds, createBackend, isBackendEntryInstalled } from '../agent';
 import { catalogById, projectCreatableBackends, visibleCatalog } from '../agent/catalog';
-import type { AgentBackend, AgentInput, AgentRun, AgentThread, ModelInfo, PermissionMode, ReasoningEffort } from '../agent/types';
+import {
+  REASONING_EFFORTS,
+  type AgentBackend,
+  type AgentInput,
+  type AgentRun,
+  type AgentThread,
+  type ModelInfo,
+  type PermissionMode,
+  type ReasoningEffort,
+} from '../agent/types';
 import type { SelectOption } from '../card/cards';
 import {
   createAdminWriteExecutor,
@@ -290,7 +299,6 @@ function asTier(v: string | undefined): PermissionMode | undefined {
 }
 
 /** Narrow an arbitrary string to a ReasoningEffort, else undefined. */
-const REASONING_EFFORTS: readonly ReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 function asEffort(v: string | undefined): ReasoningEffort | undefined {
   return v !== undefined && (REASONING_EFFORTS as readonly string[]).includes(v) ? (v as ReasoningEffort) : undefined;
 }

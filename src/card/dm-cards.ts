@@ -9,13 +9,20 @@ import {
   type AppConfig,
 } from '../config/schema';
 import { defaultNoMention, effectiveGuestMode, effectiveMode, type Project } from '../project/registry';
-import { DEFAULT_BACKEND_ID, type BackendProbe, type ModelInfo, type PermissionMode, type ReasoningEffort } from '../agent/types';
+import {
+  DEFAULT_BACKEND_ID,
+  REASONING_EFFORTS,
+  type BackendProbe,
+  type ModelInfo,
+  type PermissionMode,
+  type ReasoningEffort,
+} from '../agent/types';
 import { catalogById } from '../agent/catalog';
 import type { SessionRecord } from '../bot/session-store';
 import { labelScope } from '../config/scopes';
 import { summarizeEventDiagnosis, type EventDiagnosis } from '../utils/event-diagnosis';
 import { actions, actionsFixed, button, card, form, hr, input, linkButton, md, note, selectMenu, splitRow, submitButton, type CardElement, type CardObject, type SelectOption } from './cards';
-import { EFFORT_LABEL, relativeTime } from './command-cards';
+import { reasoningEffortLabel, relativeTime } from './command-cards';
 
 /** applink to open a Feishu group chat by chat_id (oc_xxx). Feishu has no
  * deep link to a specific thread/topic, so this lands in the group and the
@@ -1034,7 +1041,7 @@ export function buildCommentSettingsCard(
         selectMenu({
           name: 'effort',
           placeholder: '选择推理强度',
-          options: unionEfforts.map((e) => ({ label: EFFORT_LABEL[e], value: e })),
+          options: unionEfforts.map((e) => ({ label: reasoningEffortLabel(e), value: e })),
           initial: curEffort,
         }),
       );
@@ -1347,13 +1354,13 @@ export function buildPermissionCard(p: Pick<Project, 'name' | 'mode' | 'guestMod
 }
 
 /** Canonical reasoning-effort ladder (low→high), to order the effort dropdown. */
-const EFFORT_ORDER: ReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+const EFFORT_ORDER: readonly ReasoningEffort[] = REASONING_EFFORTS;
 
 /** One-line summary of a project's default model/effort, for the settings cards.
  * Sync (no model list) — shows the raw stored id (e.g. `gpt-5.5`) or「后端默认」. */
 export function modelDefaultSummary(p: Pick<Project, 'defaultModel' | 'defaultEffort'>): string {
   if (!p.defaultModel) return '后端默认（未设）';
-  const eff = p.defaultEffort ? ` · 强度 ${EFFORT_LABEL[p.defaultEffort]}` : '';
+  const eff = p.defaultEffort ? ` · 强度 ${reasoningEffortLabel(p.defaultEffort)}` : '';
   return `${p.defaultModel}${eff}`;
 }
 
@@ -1428,7 +1435,7 @@ export function buildModelDefaultCard(
       selectMenu({
         name: 'effort',
         placeholder: '选择默认推理强度',
-        options: unionEfforts.map((e) => ({ label: `强度：${EFFORT_LABEL[e]}`, value: e })),
+        options: unionEfforts.map((e) => ({ label: `强度：${reasoningEffortLabel(e)}`, value: e })),
         initial: curEffort,
       }),
     );

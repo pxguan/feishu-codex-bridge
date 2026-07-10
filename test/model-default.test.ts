@@ -22,6 +22,11 @@ const model = (over: Partial<ModelInfo> & Pick<ModelInfo, 'id' | 'displayName'>)
 const codex = [
   model({ id: 'gpt-5.5', displayName: 'GPT-5.5', supportedEfforts: ['low', 'medium', 'high'], isDefault: true }),
   model({ id: 'gpt-5-codex', displayName: 'GPT-5 Codex', supportedEfforts: ['low', 'medium', 'high'], defaultEffort: 'high' }),
+  model({
+    id: 'gpt-5.6-sol',
+    displayName: 'GPT-5.6-Sol',
+    supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+  }),
 ];
 // claude 形态：多模型但都不调 effort（supportedEfforts 空），各自 defaultEffort 不同。
 const claude = [
@@ -79,6 +84,9 @@ describe('buildModelDefaultCard · 按后端能力自适应 + ctx 路由', () =>
     const j = json({ name: 'p' }, codex, 'dm');
     expect(j).toContain('model'); // 模型 selectMenu name
     expect(j).toContain('强度：'); // effort 选项
+    expect(j).toContain('强度：最高');
+    expect(j).toContain('强度：超强');
+    expect(j).not.toContain('undefined');
     expect(j).toContain('dm.proj.modelDefault.submit'); // dm 提交
     expect(j).toContain('dm.projectSettings'); // dm 返回
     expect(j).not.toContain('gs.modelDefault'); // 不串到群入口
