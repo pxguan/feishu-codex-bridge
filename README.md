@@ -125,6 +125,20 @@ feishu-codex-bridge doctor                      本地自检：后端 / 登录 /
 
 所有本地状态都在 `~/.feishu-codex-bridge/`（机器人配置、项目 / 会话注册表、AES-256-GCM 加密的密钥库）。卸载时删掉这个目录即可清干净。
 
+### 自定义空白项目目录（可选）
+
+「新建项目」时把**文件夹路径留空**，默认会创建到 `~/.feishu-codex-bridge/projects/<项目名>`。如需改到其他磁盘，可编辑诊断卡所显示的当前机器人 `config.json`（通常是 `~/.feishu-codex-bridge/bots/<appId>/config.json`），在已有 `preferences` 中加入：
+
+```json
+{
+  "preferences": {
+    "projectsRootDir": "D:\\feishu-codex-projects"
+  }
+}
+```
+
+也支持绝对路径和 `~/code` 这类路径。请保留配置文件里的其他字段，修改后重启 bridge；该项只影响之后留空路径创建的空白项目，不会移动已有项目，也不影响手动填写的文件夹路径。
+
 ---
 
 ## ⚠️ 安全须知

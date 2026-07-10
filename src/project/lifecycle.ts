@@ -1,5 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { LarkChannel } from '@larksuiteoapi/node-sdk';
 import { paths } from '../config/paths';
@@ -36,6 +37,8 @@ export interface CreateProjectInput {
   ownerOpenId: string;
   /** when set, bind this existing folder; otherwise create a blank project. */
   existingPath?: string;
+  /** optional config.json override for the parent directory of blank projects. */
+  projectsRootDir?: string;
   /** session model for the group (default 'multi'). */
   kind?: 'multi' | 'single';
   /** permission tier (default 'full' for self-created projects). */
@@ -56,6 +59,8 @@ export interface JoinGroupInput {
   addedBy: string;
   /** when set, bind this existing folder; otherwise create a blank project. */
   existingPath?: string;
+  /** optional config.json override for the parent directory of blank projects. */
+  projectsRootDir?: string;
   /** session model for the group (default 'multi'). */
   kind?: 'multi' | 'single';
   /** permission tier (default 'qa' — read-only — for joined external groups). */
@@ -69,18 +74,45 @@ export interface JoinGroupInput {
 /**
  * Resolve the working directory for a project: an explicit `existingPath` (must
  * exist) binds a folder you already have; otherwise a blank project dir is
- * created under {@link paths.projectsRootDir}. Throws before any group is
- * touched so a bad path never leaves an orphan group.
+ * created under the configured projects root (falling back to
+ * {@link paths.projectsRootDir}). Throws before any group is touched so a bad
+ * path never leaves an orphan group.
  */
-async function resolveCwd(name: string, existingPath?: string): Promise<{ cwd: string; blank: boolean }> {
+async function resolveCwd(
+  name: string,
+  existingPath?: string,
+  configuredProjectsRootDir?: string,
+): Promise<{ cwd: string; blank: boolean }> {
   if (existingPath) {
     const cwd = isAbsolute(existingPath) ? existingPath : resolve(existingPath);
     if (!existsSync(cwd)) throw new Error(`文件夹不存在：${cwd}`);
     return { cwd, blank: false };
   }
-  const cwd = join(paths.projectsRootDir, name);
+  const cwd = join(resolveProjectsRootDir(configuredProjectsRootDir), name);
   await mkdir(cwd, { recursive: true });
   return { cwd, blank: true };
+}
+
+/**
+ * Resolve `preferences.projectsRootDir` without depending on the daemon's cwd.
+ * An empty value preserves the historical default; a relative value is
+ * rejected because a background service may start from different directories.
+ */
+export function resolveProjectsRootDir(configured?: unknown): string {
+  if (configured === undefined || configured === null) return paths.projectsRootDir;
+  if (typeof configured !== 'string') {
+    throw new Error('配置 preferences.projectsRootDir 必须是字符串');
+  }
+  const value = configured.trim();
+  if (!value) return paths.projectsRootDir;
+  if (value === '~') return homedir();
+  if (value.startsWith('~/') || value.startsWith('~\\')) {
+    return resolve(homedir(), value.slice(2));
+  }
+  if (!isAbsolute(value)) {
+    throw new Error('配置 preferences.projectsRootDir 必须是绝对路径或以 ~ 开头');
+  }
+  return resolve(value);
 }
 
 /**
@@ -97,7 +129,7 @@ export async function createProject(channel: LarkChannel, input: CreateProjectIn
   assertBackendUsable(input.backend, input.mode ?? 'full'); // 创建默认「完全访问」档
 
   // 1. resolve cwd
-  const { cwd, blank } = await resolveCwd(name, input.existingPath);
+  const { cwd, blank } = await resolveCwd(name, input.existingPath, input.projectsRootDir);
 
   // 2. create the bound group — bot stays as owner (no owner_id passed); the
   //    creator is invited as a member here, then promoted to admin in 2b so the
@@ -161,7 +193,7 @@ export async function joinExistingGroup(channel: LarkChannel, input: JoinGroupIn
   if (bound) throw new Error(`该群已绑定为项目「${bound.name}」`);
   assertBackendUsable(input.backend, input.mode ?? 'qa'); // 外部群默认「只读」档
 
-  const { cwd, blank } = await resolveCwd(name, input.existingPath);
+  const { cwd, blank } = await resolveCwd(name, input.existingPath, input.projectsRootDir);
 
   const project: Project = {
     name,

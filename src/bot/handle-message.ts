@@ -2294,7 +2294,14 @@ export function createOrchestrator(
         else if (!op) result = buildNewProjectFormCard({ name, cwd: cwdIn, error: '无法识别操作者身份', backends });
         else {
           try {
-            const p = await createProject(channel, { name, ownerOpenId: op, existingPath: cwdIn || undefined, kind, backend });
+            const p = await createProject(channel, {
+              name,
+              ownerOpenId: op,
+              existingPath: cwdIn || undefined,
+              projectsRootDir: cfg.preferences?.projectsRootDir,
+              kind,
+              backend,
+            });
             log.info('console', 'new-project', { name: p.name, blank: p.blank, backend: p.backend });
             result = buildNewProjectDoneCard(p);
           } catch (err) {
@@ -2328,7 +2335,16 @@ export function createOrchestrator(
         else if (!op) result = buildJoinGroupFormCard({ chatId, name, cwd: cwdIn, error: '无法识别操作者身份', backends });
         else {
           try {
-            const p = await joinExistingGroup(channel, { name, chatId, addedBy: op, existingPath: cwdIn || undefined, kind, backend, mode: bindModeFor(backend) });
+            const p = await joinExistingGroup(channel, {
+              name,
+              chatId,
+              addedBy: op,
+              existingPath: cwdIn || undefined,
+              projectsRootDir: cfg.preferences?.projectsRootDir,
+              kind,
+              backend,
+              mode: bindModeFor(backend),
+            });
             log.info('console', 'join-group', { name: p.name, blank: p.blank, backend: p.backend, mode: p.mode });
             result = buildNewProjectDoneCard(p);
           } catch (err) {

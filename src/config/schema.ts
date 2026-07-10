@@ -67,6 +67,9 @@ export interface AppAccess {
 }
 
 export interface AppPreferences {
+  /** 空白项目的默认父目录。仅通过 config.json 配置；缺省时仍使用
+   * `~/.feishu-codex-bridge/projects`。支持绝对路径或 `~` 开头的路径。 */
+  projectsRootDir?: string;
   /** reply rendering for IM messages. Default 'card'. */
   messageReply?: MessageReplyMode;
   /** render tool-call blocks in output. Default true. */
