@@ -38,6 +38,9 @@ jobs:
 
       - name: Claude Code Review
         uses: anthropics/claude-code-action@v1
+        env:
+          # 接内网 GLM 网关：claude-code-action 经此 base url 走网关，而非公网 Anthropic
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           model: claude-sonnet-4-6
