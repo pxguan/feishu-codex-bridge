@@ -40,3 +40,13 @@ docs/assets/_local/
 
 # 本机非代码产物（方案文档、一次性脚本）——见 CLAUDE.md
 .private/
+
+# Go 构建产物
+/feishu-codex-bridge
+/feishu-codex-bridge-*
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+vendor/
