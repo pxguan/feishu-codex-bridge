@@ -26,7 +26,7 @@ jobs:
         with:
           fetch-depth: 1
       - name: Run agent
-        uses: pxguan/pullfrog@5b9061272a870ea616c143b6033e37d1adf27a60  # pin SHA 绕 tag 缓存
+        uses: pxguan/pullfrog@c0b187d4c0d5840d25e37c18506367fb0b43d3f9
         with:
           prompt: ${{ inputs.prompt }}
         env:
