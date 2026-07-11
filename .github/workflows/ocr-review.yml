@@ -1,0 +1,38 @@
+name: OCR Review
+
+# 三 reviewer 之二：alibaba/open-code-review（开源 Apache-2.0，阿里大规模验证的混合架构）
+# 评审范围由 .opencodereview/rule.json 限定为「仅 Go」（与 CodeRabbit 的 path_filters 等价）
+# 与 CodeRabbit（SaaS）、Claude（claude-code-action）并存；每个 PR 三路独立评审。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ocr-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 官方 composite action：内部自动装 ocr、跑 review、贴 inline+summary 评论、重试/幂等
+      # inputs 以 https://github.com/alibaba/open-code-review 的 action.yml 为准
+      - name: OpenCodeReview
+        uses: alibaba/open-code-review@v1.7.7
+        with:
+          llm_url: ${{ secrets.OCR_LLM_URL }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_model: ${{ vars.OCR_LLM_MODEL }}
+          llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
