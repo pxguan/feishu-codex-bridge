@@ -26,7 +26,7 @@ jobs:
         with:
           fetch-depth: 1
       - name: Run agent
-        uses: pullfrog/pullfrog@v0
+        uses: pxguan/pullfrog@v0.1.34-gateway  # fork：含 gatewayProvider() 走内网网关
         with:
           prompt: ${{ inputs.prompt }}
         env:
@@ -42,8 +42,11 @@ jobs:
           MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENCODE_API_KEY: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
-          # 赌 opencode 读 base_url env 走内网网关（pullfrog 透传 env 给 spawn 的 opencode 子进程）
-          OPENCODE_BASE_URL: ${{ secrets.OCR_LLM_URL }}
+          # fork 改造：gatewayProvider() 读这两个 env 注入自定义 mygateway provider
+          PULLFROG_GATEWAY_URL: ${{ secrets.OCR_LLM_URL }}
+          PULLFROG_GATEWAY_API_KEY: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          # 让 opencode 经 mygateway 走内网网关（resolveModel 原样透传带斜杠非别名）
+          PULLFROG_MODEL: mygateway/glm-5.2
           
           # for Amazon Bedrock (https://docs.pullfrog.com/bedrock)
           # AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
