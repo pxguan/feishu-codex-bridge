@@ -26,7 +26,7 @@ jobs:
         with:
           fetch-depth: 1
       - name: Run agent
-        uses: pxguan/pullfrog@2af586a1acbd190a8f7aa8ab2007ed2b253dff7d  # fork：含 byokAuthorized mygateway 特例 + gatewayProvider
+        uses: pxguan/pullfrog@7339afda4f52e00d830fe44b09a60fd85b3ed909
         with:
           prompt: ${{ inputs.prompt }}
           model: mygateway/glm-5.2  # 自定义网关 provider（fork gatewayProvider 注入，走内网网关）
