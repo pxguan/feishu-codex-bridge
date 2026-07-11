@@ -45,8 +45,7 @@ jobs:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: claude-sonnet-4-6
-          direct_prompt: |
+          prompt: |
             用中文评审这个 PR 的 **Go 代码**改动（仅 *.go，忽略 TS / 测试 / 生成代码）。聚焦：
             - error 必须处理，不得用 _ 吞错（尤其 chmod、文件 IO、网络 / 飞书 SDK 调用）
             - goroutine 泄漏与并发安全（共享状态、锁、channel）
