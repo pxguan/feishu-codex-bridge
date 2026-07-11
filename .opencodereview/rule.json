@@ -1,0 +1,17 @@
+{
+  "rules": [
+    {
+      "path": "**/*.go",
+      "rule": "重点检查：error 必须处理（不得用 _ 吞错或忽略返回值，尤其 chmod、文件 IO、网络/飞书 SDK 调用）；goroutine 泄漏与并发安全（共享状态、锁、channel）；context 取消与超时必须向下传递，不得用 context.Background() 截断；defer 释放资源；临时文件/目录权限收紧（敏感目录 0700）；凭证/token 写入应原子化（临时文件 + rename）。本项目桥接飞书，所有飞书 SDK / OpenAPI 调用的 error 都不得静默忽略。",
+      "merge_system_rule": true
+    }
+  ],
+  "include": ["**/*.go"],
+  "exclude": [
+    "**/*_test.go",
+    "**/vendor/**",
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/*.generated.*"
+  ]
+}
