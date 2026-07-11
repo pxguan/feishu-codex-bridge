@@ -41,7 +41,9 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          # 赌 opencode 读 base_url env 走内网网关（pullfrog 透传 env 给 spawn 的 opencode 子进程）
+          OPENCODE_BASE_URL: ${{ secrets.OCR_LLM_URL }}
           
           # for Amazon Bedrock (https://docs.pullfrog.com/bedrock)
           # AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
