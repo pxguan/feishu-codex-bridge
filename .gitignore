@@ -25,7 +25,6 @@ skills-lock.json
 # internal AI-dev-team coordination + instructions (local only)
 .plans/
 CLAUDE.md
-AGENTS.md
 
 # local-only smoke-test runbook (dev scratch, never published)
 docs/testing/local-agent-smoke-test.md

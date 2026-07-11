@@ -1,0 +1,100 @@
+# feishu-codex-bridge (Go) CODEOWNERS
+#
+# Reference: https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Order matters: the LAST matching pattern for a file wins. Keep generic
+# patterns at the top and progressively narrow down by directory below.
+#
+# Owners listed here are auto-requested as reviewers when a PR touches the
+# matching paths. Combined with branch-protection ("Require review from Code
+# Owners"), every change to a sensitive surface is signed off by its maintainer
+# — including changes authored by AI agents.
+#
+# 当前仓库单一维护者；分区结构为未来新增 reviewer 预留（在对应区域加 handle 即可）。
+# area 划分见 AGENTS.md「目录入口速查」与 .github/labels.yml 的 area: 组。
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Default fallback — every file not matched by a more specific rule below
+# ─────────────────────────────────────────────────────────────────────────────
+*                                   @pxguan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Repository-wide config & meta
+# ─────────────────────────────────────────────────────────────────────────────
+/AGENTS.md                          @pxguan
+/README.md                          @pxguan
+/.gitignore                         @pxguan
+/go.mod                             @pxguan
+/go.sum                             @pxguan
+/Makefile                           @pxguan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CI / GitHub automation — extra scrutiny because it can ship anywhere
+# ─────────────────────────────────────────────────────────────────────────────
+/.github/                           @pxguan
+/.coderabbit.yaml                   @pxguan
+/.opencodereview/                   @pxguan
+/scripts/                           @pxguan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# area: agent — 后端中立 agent 协议 + codex/claude 实现
+# ─────────────────────────────────────────────────────────────────────────────
+/internal/agent/                    @pxguan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# area: bot — 飞书编排 / 会话 / 项目 / 咖啡一下反桥
+# ─────────────────────────────────────────────────────────────────────────────
+/internal/bot/                      @pxguan
+/internal/project/                  @pxguan
+/internal/clibridge/                @pxguan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# area: card — CardKit schema 2.0 卡片体系
+# ─────────────────────────────────────────────────────────────────────────────
+/internal/card/                     @pxguan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# area: feishu — 飞书 OpenAPI wrapper（业务层不直接碰 SDK 的隔离层）
+# ─────────────────────────────────────────────────────────────────────────────
+/internal/feishu/                   @pxguan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# area: infra — 配置 / 进程管理 / OS 服务 / 平台 / 更新 / 工具 / 管理 / 跨切面
+#   注: daemon（进程生命周期，start/stop/restart）≠ service（OS 级系统服务安装，bot install/uninstall）
+# ─────────────────────────────────────────────────────────────────────────────
+/internal/config/                   @pxguan
+/internal/daemon/                   @pxguan
+/internal/service/                  @pxguan
+/internal/platform/                 @pxguan
+/internal/update/                   @pxguan
+/internal/utils/                    @pxguan
+/internal/admin/                    @pxguan
+/internal/core/                     @pxguan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# area: cli — cobra 命令树 + 二进制入口
+# ─────────────────────────────────────────────────────────────────────────────
+/internal/cli/                      @pxguan
+/cmd/                               @pxguan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# area: web — 本机 Web 控制台
+# ─────────────────────────────────────────────────────────────────────────────
+/internal/web/                      @pxguan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# area: docs — 文档
+# ─────────────────────────────────────────────────────────────────────────────
+/docs/                              @pxguan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TS 重写基线（agent 勿改；仅供理解 Go 实现意图的对照）
+#   src/ 是 TS 原版，test/ 是 TS 测试（89 个 *.ts），tsconfig/tsup/vitest 是 TS 构建配置。
+#   .coderabbit.yaml 已用 path_filters 排除 *.ts 评审。
+# ─────────────────────────────────────────────────────────────────────────────
+/src/                               @pxguan
+/test/                              @pxguan
+/tsconfig.json                      @pxguan
+/tsup.config.ts                     @pxguan
+/vitest.config.ts                   @pxguan
+/package.json                       @pxguan

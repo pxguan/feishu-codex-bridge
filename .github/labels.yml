@@ -1,0 +1,159 @@
+# feishu-codex-bridge (Go) issue / PR label catalog.
+#
+# 本文件是仓库 label 的 SOURCE OF TRUTH。.github/workflows/labels-sync.yml
+# 用 EndBug/label-sync 把本列表镜像到 GitHub（每次 push 到 main/dev-go + 手动触发）。
+#
+# 命名约定（与 issue 模板、PR 模板、AGENTS.md 一致）:
+#
+#   - "type:"     工作类型。每个 issue 必填。
+#   - "priority:" 紧急度（P0..P3）。bug / agent-task 必填。
+#   - "area:"     影响的职责域。镜像 AGENTS.md「目录入口速查」。
+#   - "status:"   流转状态。triager / bot 维护。
+#   - "needs:"    阻塞项。
+#   - "good-*":   可发现性辅助（新贡献者 / agent）。
+#
+# 命名规则: `<group>: <slug>` 小写 kebab-case，无 emoji。
+
+# -----------------------------------------------------------------------------
+# Type — 工作类型。每个 issue 必填一个。
+# -----------------------------------------------------------------------------
+- name: "type: bug"
+  color: "d73a4a"
+  description: "Something is broken or behaves incorrectly."
+- name: "type: feature"
+  color: "1f6feb"
+  description: "New user-facing functionality."
+- name: "type: enhancement"
+  color: "a2eeef"
+  description: "Improvement to an existing feature."
+- name: "type: chore"
+  color: "ededed"
+  description: "Refactor, dependency bump, build or CI maintenance."
+- name: "type: docs"
+  color: "0075ca"
+  description: "Documentation-only change (README, AGENTS.md, comments)."
+- name: "type: test"
+  color: "0e8a16"
+  description: "Adds or updates tests / coverage."
+- name: "type: perf"
+  color: "fbca04"
+  description: "Performance improvement."
+- name: "type: security"
+  color: "b60205"
+  description: "Security vulnerability or hardening."
+- name: "type: agent-task"
+  color: "5319e7"
+  description: "Self-contained task suitable for an autonomous AI coding agent."
+- name: "type: question"
+  color: "cc317c"
+  description: "Discussion or clarification request."
+
+# -----------------------------------------------------------------------------
+# Priority — P0（放下一切）到 P3（锦上添花）。
+# -----------------------------------------------------------------------------
+- name: "priority: P0"
+  color: "b60205"
+  description: "Critical — data loss, broken main flow, security incident. Drop everything."
+- name: "priority: P1"
+  color: "d93f0b"
+  description: "High — core feature broken with no workaround."
+- name: "priority: P2"
+  color: "fbca04"
+  description: "Medium — feature degraded but workaround exists."
+- name: "priority: P3"
+  color: "0e8a16"
+  description: "Low — cosmetic or minor; address opportunistically."
+
+# -----------------------------------------------------------------------------
+# Area — 影响的职责域。镜像 AGENTS.md「目录入口速查」。
+# -----------------------------------------------------------------------------
+- name: "area: agent"
+  color: "1d76db"
+  description: "internal/agent/（含 claude/、codex/）— 后端中立 agent 协议 + 实现。"
+- name: "area: bot"
+  color: "5319e7"
+  description: "internal/bot/ + project/ + clibridge/ — 飞书编排/会话/项目/咖啡一下反桥。"
+- name: "area: card"
+  color: "0052cc"
+  description: "internal/card/ — CardKit schema 2.0 卡片体系。"
+- name: "area: feishu"
+  color: "0e8a16"
+  description: "internal/feishu/ — 飞书 OpenAPI wrapper（业务层不直接碰 SDK 的隔离层）。"
+- name: "area: infra"
+  color: "bfd4f2"
+  description: "config/daemon/service/platform/update/utils/admin/core — 配置/进程/OS服务/平台/更新/工具/管理/跨切面。"
+- name: "area: cli"
+  color: "c5def5"
+  description: "internal/cli/ + cmd/ — cobra 命令树 + 二进制入口。"
+- name: "area: web"
+  color: "006b75"
+  description: "internal/web/ — 本机 Web 控制台。"
+- name: "area: ci"
+  color: "ededed"
+  description: ".github/ + scripts/ + Makefile + .coderabbit.yaml/.opencodereview/ — Actions/评审/构建。"
+- name: "area: docs"
+  color: "0075ca"
+  description: "README.md / AGENTS.md / docs/ — 文档。"
+
+# -----------------------------------------------------------------------------
+# Status — 流转状态。triager 与 bot 维护。
+# -----------------------------------------------------------------------------
+- name: "status: triage"
+  color: "fef2c0"
+  description: "Newly filed; awaiting triage."
+- name: "status: ready"
+  color: "0e8a16"
+  description: "Triaged and ready to be picked up (humans or agents)."
+- name: "status: in-progress"
+  color: "1d76db"
+  description: "Actively being worked on."
+- name: "status: blocked"
+  color: "d73a4a"
+  description: "Blocked on something external (issue, decision, dependency)."
+- name: "status: needs-review"
+  color: "fbca04"
+  description: "Implementation submitted; awaiting review."
+- name: "status: stale"
+  color: "ededed"
+  description: "No activity for a long time; will be closed if not refreshed."
+- name: "status: wontfix"
+  color: "ffffff"
+  description: "Will not be addressed; closing rationale should be in a comment."
+- name: "status: duplicate"
+  color: "cfd3d7"
+  description: "Duplicates another issue (link the original)."
+
+# -----------------------------------------------------------------------------
+# Needs — 推进所需。
+# -----------------------------------------------------------------------------
+- name: "needs: repro"
+  color: "fbca04"
+  description: "Cannot reproduce; reporter should provide a minimal repro."
+- name: "needs: design"
+  color: "c5def5"
+  description: "Design / spec decision required before implementation."
+- name: "needs: tests"
+  color: "0e8a16"
+  description: "Implementation lacks tests; add coverage before merging."
+- name: "needs: docs"
+  color: "0075ca"
+  description: "Docs (README / AGENTS.md) need updating to match the change."
+
+# -----------------------------------------------------------------------------
+# Discoverability helpers.
+# -----------------------------------------------------------------------------
+- name: "good first issue"
+  color: "7057ff"
+  description: "Approachable for newcomers to the codebase."
+- name: "help wanted"
+  color: "008672"
+  description: "Maintainers welcome external contributions here."
+- name: "agent: ready"
+  color: "5319e7"
+  description: "Issue is fully specified and safe for an autonomous AI agent to pick up."
+- name: "breaking-change"
+  color: "b60205"
+  description: "Introduces a backward-incompatible change for users."
+- name: "dependencies"
+  color: "0366d6"
+  description: "Dependency update (typically opened by Dependabot / Renovate)."

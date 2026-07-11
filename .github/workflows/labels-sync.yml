@@ -1,0 +1,46 @@
+name: Sync issue labels
+
+# 把 .github/labels.yml（唯一 label 目录）镜像到 GitHub。
+# 每次 push 到 main / dev-go（改了 labels.yml 或本 workflow）时触发，也可手动触发。
+#
+# 用 EndBug/label-sync（按 major 锁版）。action 幂等:
+#   - 创建缺失的 label
+#   - color / description 漂移则更新
+#   - delete-other-labels=true 时删除未声明的 label（让 labels.yml 成为唯一真源）
+#
+# 不带删除的干跑: Actions 页手动 workflow_dispatch，delete-other-labels=false，
+# run summary 列出计划变更。
+
+on:
+  push:
+    branches: [main, dev-go]
+    paths:
+      - .github/labels.yml
+      - .github/workflows/labels-sync.yml
+  workflow_dispatch:
+    inputs:
+      delete-other-labels:
+        description: "Delete labels that are not declared in labels.yml"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  sync:
+    name: Apply label catalog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Sync labels
+        uses: EndBug/label-sync@v2
+        with:
+          config-file: .github/labels.yml
+          delete-other-labels: ${{ github.event_name == 'workflow_dispatch' && inputs.delete-other-labels == 'true' || github.event_name == 'push' }}

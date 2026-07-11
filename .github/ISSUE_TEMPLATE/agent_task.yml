@@ -1,0 +1,98 @@
+name: Agent Task
+description: 适合自主 AI 编码 agent（Claude Code、Codex、Cursor 等）领取的、自包含的任务。
+title: "[agent]: "
+labels:
+  - "type: agent-task"
+  - "status: ready"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本模板为自主 agent 优化。仓库约定见 [`AGENTS.md`](../../AGENTS.md)。
+
+        **agent 领取前必备**:范围、文件指针、验收标准、确切的验证命令。
+        保持任务小而独立，一个 PR 可评审完毕。
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component（area）
+      description: 影响的职责域，对应 AGENTS.md「目录入口速查」与 labels.yml 的 `area:` 组。
+      options:
+        - agent
+        - bot
+        - card
+        - feishu
+        - infra
+        - cli
+        - web
+        - ci
+        - docs
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: 一段话描述「成功长什么样」。
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / file pointers
+      description: 指向范围内的确切文件 / 目录，用仓库相对路径。
+      placeholder: |
+        - internal/bot/orchestrator.go
+        - internal/clibridge/service.go
+        - internal/feishu/message.go
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: 哪些不能动？公共 API、文件布局、依赖？
+      placeholder: |
+        - 不破坏现有 agent 协议（internal/agent/types.go 的导出类型）。
+        - 不引入新的顶层依赖。
+        - 业务层不直接 import Lark SDK，走 internal/feishu/。
+        - 遵循 AGENTS.md 的命名约定与文件头注释规范。
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: 具体、可勾选的验收结果。
+      placeholder: |
+        - [ ] 新增 internal/bot/xxx_test.go 单测
+        - [ ] make lint 与 make test 通过
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification commands
+      description: agent 开 PR 前必须跑的确切命令。
+      placeholder: |
+        make lint && make test
+        # 改了并发逻辑时加: make test-race
+        # 改了构建时加:   make build
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - "P1 - high"
+        - "P2 - medium"
+        - "P3 - low"
+    validations:
+      required: true
