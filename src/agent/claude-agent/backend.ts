@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import { log } from '../../core/logger';
 import type {
   AgentBackend,
@@ -21,6 +22,39 @@ import { ClaudeAgentThread } from './thread';
 
 /** The on-demand npm package backing this backend. */
 const SDK_PKG = '@anthropic-ai/claude-agent-sdk';
+
+/**
+ * Make every bridge-started claude session behave like Claude Code in its cwd:
+ * load project + user `CLAUDE.md`, skills, and `.claude/settings.json`. The SDK
+ * default is `[]` (load nothing), which is why a project's CLAUDE.md / the user's
+ * lark-* skills were previously ignored. The programmatic permission tier
+ * (permission.ts: bypassPermissions + sandbox) still takes precedence, so a
+ * loaded settings.json cannot weaken the sandbox.
+ *
+ * TRADEOFF (intentional): loading 'user'/'project' also loads any hooks / mcpServers
+ * declared in those `.claude/settings.json` files — and the SDK WILL execute them in
+ * bridge-owned sessions. The FEISHU_CODEX_BRIDGE marker below only stops the cli-bridge
+ * from self-forwarding its OWN Stop/PermissionRequest notifications (no loop); it does
+ * NOT suppress other user-defined hooks (PreToolUse/Stop/etc.). A user whose global
+ * settings has an output-mutating hook will see it run here too. Accepted as the cost
+ * of "claude backend = Claude Code in cwd"; revert to ['project'] (or drop 'user') if
+ * that's undesirable. */
+const BRIDGE_SETTING_SOURCES: SettingSource[] = ['user', 'project'];
+
+/**
+ * Env for the SDK's spawned CLI. The SDK does NOT merge with process.env, so we
+ * spread it and add the re-entrancy marker the cli-bridge hook handler reads
+ * (parser.ts `bridgeOwned`): a bridge-owned session is not self-forwarded to
+ * Feishu by default (schema.ts `includeBridgeOwnedSessionsForDebugging`). Mirrors
+ * the codex app-server child (app-server-client.ts). NOTE: this only governs the
+ * cli-bridge's own forwarding — it does not gate execution of other SDK hooks loaded
+ * via settingSources (see BRIDGE_SETTING_SOURCES). */
+function bridgeClaudeEnv(): Record<string, string> {
+  const base: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (typeof v === 'string') base[k] = v;
+  base.FEISHU_CODEX_BRIDGE = '1';
+  return base;
+}
 
 /** The SDK's runtime surface we use (typed off the package, erased at build). */
 type ClaudeSdk = typeof import('@anthropic-ai/claude-agent-sdk');
@@ -144,6 +178,8 @@ export class ClaudeAgentBackend implements AgentBackend {
       effort: opts.effort,
       permission: permissionOptions(opts.mode, opts.network, opts.cwd),
       systemPromptAppend: BRIDGE_DEVELOPER_INSTRUCTIONS,
+      settingSources: BRIDGE_SETTING_SOURCES,
+      env: bridgeClaudeEnv(),
       query: sdk.query,
     });
   }
@@ -158,6 +194,8 @@ export class ClaudeAgentBackend implements AgentBackend {
       effort: opts.effort,
       permission: permissionOptions(opts.mode, opts.network, opts.cwd),
       systemPromptAppend: BRIDGE_DEVELOPER_INSTRUCTIONS,
+      settingSources: BRIDGE_SETTING_SOURCES,
+      env: bridgeClaudeEnv(),
       query: sdk.query,
     });
   }

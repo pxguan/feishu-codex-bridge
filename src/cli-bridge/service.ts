@@ -18,7 +18,7 @@ import { resolveCliLocalActivity, resolveCliPresenceRoute, type CliPresenceRoute
 import { createKeepAwakeController, type KeepAwakeController } from './keep-awake';
 import type { CliBridgeAgent, CliHookMessage, CliHookResponse } from './types';
 
-// Marks a task_completion resolved by the user clicking 等待确认: resolveAction
+// Marks a task_completion resolved by the user clicking「收工」: resolveAction
 // already re-rendered that card, so handleMessage's post-wait close skips it to
 // avoid a duplicate update. Internal-only — buildHookStdout ignores `reason`.
 const TASK_DONE_CLICKED = 'task_done_clicked';
@@ -368,7 +368,7 @@ export function createCliBridgeService(opts: {
       setPendingCliMessageId(pending.id, sent.messageId);
       const result = await waitWithLocalReturn(pending.id, p.taskCompletion.replyTimeoutSeconds * 1000, { decision: 'allow' });
       // 回复窗口结束（续聊回复 / 本机回归 / 超时）。把卡片刷成无按钮的收尾态，否则
-      // “等待确认”按钮会一直挂着，点了也已无对应 pending。点“等待确认”自行结束的那条
+      // “收工”按钮会一直挂着，点了也已无对应 pending。点“收工”自行结束的那条
       // 已由 resolveAction 改过卡（标记 TASK_DONE_CLICKED），这里跳过免重复刷。
       if (result.reason !== TASK_DONE_CLICKED) {
         closeCard(sent.messageId, renderPendingCard(pending), 'close-task-card');

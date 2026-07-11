@@ -605,6 +605,11 @@ export const UI_HTML = `<!doctype html>
   .drawer-mask.open { display: block; }
   .drawer h3 { margin: 0 0 4px; font-size: 16px; }
   .opt-row { display: flex; gap: 8px; margin: 6px 0 2px; flex-wrap: wrap; }
+  .compact-input {
+    width: 84px; border: 1px solid var(--border-2); border-radius: 8px; padding: 7px 9px;
+    font: 13px var(--mono); background: #0c0e0c; color: var(--text);
+  }
+  .compact-input:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
   .backend-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
   .backend-row .grow { flex: 1; min-width: 0; }
   .bk-group { margin: 6px 0 2px; }
@@ -762,6 +767,10 @@ ${UI_PURE_JS}
   var daemon = null;         // /api/daemon
   var diag = null;           // /api/diagnosis 结果（当前 bot 的探测；切 Tab 必清）
   var catalog = null;        // /api/backends 缓存（后端管理卡 + 项目 picker 复用）
+  var lastUpdate = null;     // /api/update/check 结果缓存：总览 5s 重渲不重查（每次查都 spawn npm view）
+  var updateCheckedAt = 0;   // 上次检查时间戳；拿到结果超 30min、软失败超 ~2min 才随重渲自动复查
+  var updateChecking = false;// in-flight 闸：npm view 可能数秒~20s，期间 5s 重渲不叠发第二个请求
+  var updateInFlight = false; // 「升级并重启」in-flight：禁用按钮防重复点击（并发触发会绕过服务端更新锁的窄窗），并驱动轮询结果
   var drawerProject = null;  // 抽屉里打开的项目名
   var diagBotId = null;      // diag 属于哪个 bot（防串台）
   var bkDetailId = null;     // 后端 Agent 详情视图当前展开的后端 id（null=列表）
@@ -960,6 +969,14 @@ ${UI_PURE_JS}
     fetch('/api/daemon').then(function (r) { return r.json(); })
       .then(function (d) {
         daemon = d;
+        // 运行中的实际版本一旦跟版本检查缓存里的 current 对不上（多半是刚更新+重启完成），
+        // 就作废缓存并当场补查一次（若在总览页），把「有新版」立刻翻成「已是最新版」——不等
+        // 下一轮 renderRoute，消除 loadState/loadDaemon 同周期竞态导致的 ~10s 延迟与横幅残留。
+        // 只在版本真变时才查（稳态 d.version===current），既留住更新后的即时反馈，又不回到 5s 空转。
+        if (lastUpdate && d.version && d.version !== lastUpdate.current) {
+          lastUpdate = null; updateCheckedAt = 0;
+          if (parseRoute(location.hash).tab === 'overview') { var ub = $('updateBody'); if (ub) loadUpdate(ub); }
+        }
         if (parseRoute(location.hash).tab === 'overview') { var b = $('daemonBody'); if (b) renderDaemon(b); }
         renderSidebarFoot();
         renderGlobalSummary();
@@ -1273,7 +1290,14 @@ ${UI_PURE_JS}
     daemonCard.appendChild(updateBody);
     root.appendChild(daemonCard);
     renderDaemon(daemonBody);
-    loadUpdate(updateBody);
+    // 版本检查会在服务端 spawn「npm view」，不能跟着 5s 重渲每次都跑：有缓存就直接渲，
+    // 只在首次或缓存过期（30min）时才真查一次。手动「检查更新」按钮仍强制刷新。
+    if (lastUpdate) {
+      renderUpdate(updateBody, lastUpdate);
+      if (Date.now() - updateCheckedAt > 30 * 60 * 1000) loadUpdate(updateBody);
+    } else {
+      loadUpdate(updateBody);
+    }
 
     // 🤖 机器人（在 Feishu Bridge 卡下面，各自占满宽度）
     var botsCard = el('div', 'card');
@@ -1632,9 +1656,19 @@ ${UI_PURE_JS}
   }
 
   function loadUpdate(box) {
+    if (updateChecking) return;          // 在途就不叠发：慢检查（npm view 最长 20s）期间 5s 重渲不重复 spawn
+    updateChecking = true;
+    updateCheckedAt = Date.now();        // 乐观占位：in-flight 期间 30min 边界不再被反复判真
     fetch('/api/update/check').then(function (r) { return r.json(); })
-      .then(function (u) { renderUpdate(box, u); })
-      .catch(function () { box.textContent = '⚠️ 版本检查失败（网络或 npm registry）'; });
+      .then(function (u) {
+        lastUpdate = u;
+        // 软失败：非 dev 却没拿到 latest（多半 registry 不可达/超时，服务端仍回 200），只缓存 ~2min
+        // 便自动复查，别把「查询失败」钉住 30min；拿到 latest 或 dev 模式才按完整 30min TTL。
+        updateCheckedAt = (u && (u.dev || u.latest)) ? Date.now() : Date.now() - 28 * 60 * 1000;
+        renderUpdate(box, u);
+      })
+      .catch(function () { box.textContent = '⚠️ 版本检查失败（网络或 npm registry）'; })
+      .then(function () { updateChecking = false; });  // finally：无论成败都松闸
   }
   function renderUpdate(box, u) {
     box.textContent = '';
@@ -1646,10 +1680,13 @@ ${UI_PURE_JS}
     if (u.hasUpdate && u.latest) {
       box.appendChild(el('div', null, '🆕 有新版 v' + u.latest + '（当前 v' + u.current + '）'));
       var row = el('div', 'statline');
-      var up = el('button', 'btn primary', '⬆️ 更新并重启 · v' + u.latest);
-      up.onclick = function () { askUpdate(u.latest); };
+      // updateInFlight 期间显示禁用的「更新中…」——即使卡片每 5s 重渲，按钮也保持禁用，
+      // 挡住重复提交（重复触发是并发绕过服务端更新锁的入口）。
+      var up = el('button', 'btn primary', updateInFlight ? '⏳ 更新中…' : ('⬆️ 更新并重启 · v' + u.latest));
+      if (updateInFlight) { up.disabled = true; }
+      else { up.onclick = function () { askUpdate(u.latest); }; }
       row.appendChild(up);
-      row.appendChild(el('span', 'note', '默认只检测不自动升级；点上方按钮装最新版并自动重启。'));
+      row.appendChild(el('span', 'note', updateInFlight ? '安装中，完成后会自动重启…' : '默认只检测不自动升级；点上方按钮装最新版并自动重启。'));
       box.appendChild(row);
     } else {
       box.appendChild(el('div', 'note', '✅ 已是最新版 v' + u.current + (u.latest ? '' : '（最新版查询失败，可稍后重试）')));
@@ -1699,8 +1736,51 @@ ${UI_PURE_JS}
         '重启期间所有群短暂无响应；正在进行的会话会被优雅关闭。',
       ],
       confirmLabel: '确认更新',
-      onConfirm: function () { postAction('/api/update', '更新'); },
+      onConfirm: function () { postUpdate(latest); },
     });
+  }
+  // 升级：POST 后轮询 /api/update/status，失败会明确报出来（否则 detached helper 的失败对
+  // 网页端完全静默、用户只看到「已发起」）；成功会重启 daemon → 连接短暂断开，由版本变更流
+  // 接管显示「已是最新版」。updateInFlight 兼作按钮 in-flight 闸，挡住重复点击。
+  function postUpdate(latest) {
+    if (updateInFlight) { toast('⏳ 升级已在进行中…'); return; }
+    updateInFlight = true;
+    var box = $('updateBody'); if (box && lastUpdate) renderUpdate(box, lastUpdate); // 立刻把按钮切成禁用的「更新中…」
+    fetch('/api/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (resp) {
+        if (resp.status !== 202) {
+          updateInFlight = false;
+          toast((resp.status === 501 ? '⏳ ' : '❌ ') + (resp.body.message || ('HTTP ' + resp.status)));
+          var b = $('updateBody'); if (b) loadUpdate(b);
+          return;
+        }
+        toast('✅ ' + (resp.body.message || '升级已发起'));
+        pollUpdateStatus(0, latest);
+      })
+      .catch(function () { updateInFlight = false; toast('❌ 请求失败'); });
+  }
+  function pollUpdateStatus(tries, latest) {
+    if (tries > 60) { updateInFlight = false; toast('⏳ 安装仍在后台进行，稍后刷新页面查看'); return; } // ~90s 兜底：别无限轮询
+    fetch('/api/update/status').then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (!s || s.phase === 'installing' || s.phase === 'restarting') {
+          setTimeout(function () { pollUpdateStatus(tries + 1, latest); }, 1500);
+          return;
+        }
+        updateInFlight = false;
+        if (s.phase === 'error') {
+          toast('❌ 升级失败：' + (s.message || '未知错误'));
+          var box = $('updateBody'); if (box) loadUpdate(box); // 恢复可点的更新卡供重试
+        } else if (s.phase === 'done') {
+          toast('✅ 已更新到 v' + (s.to || latest || '') + '，正在重启…');
+          lastUpdate = null; updateCheckedAt = 0; // 作废缓存：重启后版本变更流会翻成「已是最新版」
+        }
+      })
+      .catch(function () {
+        // 拿不到状态：多半 daemon 正在重启（成功路径）→ 交给重连/版本变更流收尾。
+        updateInFlight = false;
+      });
   }
   // 202 = 已发起（detached helper 接管）；501 = 只读预览（无 daemon）。
   function postAction(path, label) {
@@ -2006,6 +2086,9 @@ ${UI_PURE_JS}
     left.appendChild(projCard);
     renderProjects(projList, pcount, b);
 
+    // 🔔 普通任务结束提醒（每 bot 独立）。选择即保存；仅 long 额外展示分钟阈值。
+    renderCompletionReminderCard(right, b);
+
     cols.appendChild(left);
     cols.appendChild(right);
     root.appendChild(cols);
@@ -2075,6 +2158,58 @@ ${UI_PURE_JS}
       if (!bk.ok && bk.hint) row.appendChild(el('span', 'note', bk.hint));
       box.appendChild(row);
     });
+  }
+
+  function renderCompletionReminderCard(root, b) {
+    var reminder = b.completionReminder || { mode: 'failures', longTaskMinutes: 3 };
+    var card = el('div', 'card');
+    card.appendChild(el('h2', null, '🔔 完成提醒'));
+    card.appendChild(el('div', 'note', '任务结束后是否另发一条消息 @ 发起人。每个机器人独立设置，保存后立即生效。'));
+    var modes = [
+      { label: '仅手动', value: 'manual' },
+      { label: '长任务', value: 'long' },
+      { label: '失败或超时', value: 'failures' },
+      { label: '每次结束', value: 'always' },
+    ];
+    card.appendChild(optButtons(modes, reminder.mode, function (mode) {
+      postWrite('/api/bots/' + encodeURIComponent(b.appId) + '/completion-reminder', {
+        mode: mode,
+        longTaskMinutes: reminder.longTaskMinutes,
+      });
+    }));
+
+    var descriptions = {
+      manual: '运行卡显示「完成后提醒我」，只有本轮发起人点过才通知。',
+      long: '任务耗时达到阈值后通知；运行卡不显示提醒按钮。',
+      failures: '仅任务失败或假死超时时通知；运行卡不显示提醒按钮。',
+      always: '每次正常结束、失败或超时都通知；运行卡不显示提醒按钮。',
+    };
+    card.appendChild(el('div', 'note', descriptions[reminder.mode] || descriptions.failures));
+
+    if (reminder.mode === 'long') {
+      var threshold = el('div', 'statline');
+      threshold.appendChild(el('span', null, '长任务阈值'));
+      var input = el('input', 'compact-input');
+      input.type = 'number'; input.min = '1'; input.max = '1440'; input.step = '1';
+      input.value = String(reminder.longTaskMinutes);
+      input.setAttribute('aria-label', '长任务阈值（分钟）');
+      threshold.appendChild(input);
+      threshold.appendChild(el('span', 'note', '分钟（1–1440）'));
+      var save = el('button', 'btn primary sm', '保存阈值');
+      save.onclick = function () {
+        var minutes = Number(input.value);
+        if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+          toast('❌ 长任务阈值请输入 1–1440 的整数分钟');
+          return;
+        }
+        postWrite('/api/bots/' + encodeURIComponent(b.appId) + '/completion-reminder', {
+          mode: 'long', longTaskMinutes: minutes,
+        });
+      };
+      threshold.appendChild(save);
+      card.appendChild(threshold);
+    }
+    root.appendChild(card);
   }
 
   function renderProjects(box, countEl, b) {

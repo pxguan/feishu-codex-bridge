@@ -1,3 +1,5 @@
+import type { ReasoningEffort } from '../agent/types';
+
 export type TenantBrand = 'feishu' | 'lark';
 
 /**
@@ -42,6 +44,30 @@ export type MessageReplyMode = 'card' | 'markdown' | 'text';
 export type PendingPolicy = 'steer' | 'queue';
 
 /**
+ * 普通群任务结束提醒策略。这与 {@link CliBridgePreferences.taskCompletion}
+ * （本地 CLI agent 的 Stop 转发）是两条完全独立的通知链路。
+ */
+export type CompletionReminderMode = 'manual' | 'long' | 'failures' | 'always';
+
+/** Raw (partial) completion-reminder preferences as stored in config.json. */
+export interface CompletionReminderConfig {
+  /** manual=仅用户本轮手动开启；long=超过阈值；failures=失败/假死超时；always=每次结束。 */
+  mode?: CompletionReminderMode;
+  /** `long` 策略的耗时阈值（分钟）。默认 3，有效范围 1–1440。 */
+  longTaskMinutes?: number;
+}
+
+/** Fully-resolved completion-reminder preferences. */
+export interface ResolvedCompletionReminderConfig {
+  mode: CompletionReminderMode;
+  longTaskMinutes: number;
+}
+
+export const COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES = 1;
+export const COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES = 1440;
+export const COMPLETION_REMINDER_LONG_TASK_DEFAULT_MINUTES = 3;
+
+/**
  * 「模型显示」三档：off(关闭) · running(仅输出时，只在运行卡显示) ·
  * always(始终，运行卡 + 终态卡都保留)。控制运行卡右下角「模型 · 推理强度」脚注。
  */
@@ -65,6 +91,9 @@ export interface AppAccess {
 }
 
 export interface AppPreferences {
+  /** 空白项目的默认父目录。仅通过 config.json 配置；缺省时仍使用
+   * `~/.feishu-codex-bridge/projects`。支持绝对路径或 `~` 开头的路径。 */
+  projectsRootDir?: string;
   /** reply rendering for IM messages. Default 'card'. */
   messageReply?: MessageReplyMode;
   /** render tool-call blocks in output. Default true. */
@@ -79,6 +108,8 @@ export interface AppPreferences {
   runIdleTimeoutSeconds?: number;
   /** new-message-mid-turn behavior. Default 'steer'. */
   pendingPolicy?: PendingPolicy;
+  /** 普通群任务的结束提醒；默认只在失败或假死超时时发送。 */
+  completionReminder?: CompletionReminderConfig;
   /** groups require @bot to respond. Default true. */
   requireMentionInGroup?: boolean;
   /** access control — see AppAccess. */
@@ -87,6 +118,25 @@ export interface AppPreferences {
   agentStopGraceMs?: number;
   /** local Claude Code / Codex CLI bridge — see {@link CliBridgePreferences}. */
   cliBridge?: CliBridgePreferences;
+  /** 云文档评论 @bot 流的全局配置（评论链统一用这套，不按项目/文档分）。
+   * 缺省时后端回落默认 codex、模型/推理强度回落后端默认（见 {@link getCommentsConfig}）。
+   * 自定义提示词不在这里——它落在每 bot 的 `comment-instructions.md` 文件里，由桥同步进
+   * 每个文档的评论工作目录（AGENTS.md / CLAUDE.md），见 bot/comments.ts。 */
+  comments?: CommentsConfig;
+}
+
+/**
+ * 云文档评论流的全局可配项。仅三个短标量（后端 / 模型 / 推理强度），都可空——
+ * 空即回落后端默认。提示词刻意不放这里（多行长文本不适合塞 config.json），而是
+ * 用磁盘上的 `comment-instructions.md`，让用户像编辑 AGENTS.md 一样直接改。
+ */
+export interface CommentsConfig {
+  /** 评论流新会话用的后端 id（如 'codex-appserver' / 'claude-agent'）。缺省 → DEFAULT_BACKEND_ID。 */
+  backend?: string;
+  /** 评论流新会话的默认模型 id。缺省 → 后端默认模型。 */
+  model?: string;
+  /** 评论流新会话的默认推理强度。缺省 → 模型默认。 */
+  effort?: ReasoningEffort;
 }
 
 export interface AppConfig {
@@ -152,6 +202,66 @@ export function getRequireMentionInGroup(cfg: AppConfig): boolean {
 
 export function getPendingPolicy(cfg: AppConfig): PendingPolicy {
   return cfg.preferences?.pendingPolicy === 'queue' ? 'queue' : 'steer';
+}
+
+/**
+ * Safely normalize the ordinary group-task completion reminder settings.
+ * Unknown modes fall back to `failures`; invalid/non-positive thresholds use
+ * the 3-minute default, while positive out-of-range values are clamped.
+ */
+export function getCompletionReminderConfig(cfg: AppConfig): ResolvedCompletionReminderConfig {
+  const raw = cfg.preferences?.completionReminder;
+  const mode: CompletionReminderMode =
+    raw?.mode === 'manual' || raw?.mode === 'long' || raw?.mode === 'always'
+      ? raw.mode
+      : 'failures';
+  const minutes = raw?.longTaskMinutes;
+  const longTaskMinutes =
+    typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes <= 0
+      ? COMPLETION_REMINDER_LONG_TASK_DEFAULT_MINUTES
+      : Math.min(
+          COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES,
+          Math.max(COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES, Math.floor(minutes)),
+        );
+  return { mode, longTaskMinutes };
+}
+
+/** The per-run “完成后提醒我” button only exists in manual mode. */
+export function shouldShowCompletionReminderButton(cfg: AppConfig): boolean {
+  return getCompletionReminderConfig(cfg).mode === 'manual';
+}
+
+/** Terminal states understood by the ordinary group-task reminder policy. */
+export type CompletionReminderOutcome = 'done' | 'error' | 'idle_timeout' | 'interrupted' | 'cancelled';
+
+export interface CompletionReminderDecision {
+  outcome: CompletionReminderOutcome;
+  /** Wall-clock duration for this queued/running turn, in milliseconds. */
+  elapsedMs: number;
+  /** Whether the initiator enabled the one-shot reminder on this run. */
+  manuallyRequested?: boolean;
+}
+
+/**
+ * Decide whether an ordinary task terminal should emit a separate reminder.
+ * User interruption / queue cancellation never notify. `long` is based only on
+ * elapsed wall-clock time; `failures` covers agent errors and the idle watchdog.
+ */
+export function shouldSendCompletionReminder(cfg: AppConfig, decision: CompletionReminderDecision): boolean {
+  if (decision.outcome === 'interrupted' || decision.outcome === 'cancelled') return false;
+  const reminder = getCompletionReminderConfig(cfg);
+  switch (reminder.mode) {
+    case 'manual':
+      return decision.manuallyRequested === true;
+    case 'long': {
+      const elapsedMs = Number.isFinite(decision.elapsedMs) ? Math.max(0, decision.elapsedMs) : 0;
+      return elapsedMs >= reminder.longTaskMinutes * 60_000;
+    }
+    case 'always':
+      return true;
+    case 'failures':
+      return decision.outcome === 'error' || decision.outcome === 'idle_timeout';
+  }
 }
 
 export function getAgentStopGraceMs(cfg: AppConfig): number {
@@ -384,4 +494,10 @@ export function resolveCliBridgeTarget(
 /** Whether the CLI bridge master switch can be enabled (needs a bot owner). */
 export function canEnableCliBridge(cfg: AppConfig): { ok: true } | { ok: false; reason: 'missing_owner' } {
   return resolveCliBridgeTarget(cfg) ? { ok: true } : { ok: false, reason: 'missing_owner' };
+}
+
+/** 云文档评论流的全局配置（每个字段都可空，消费侧自带回落）。缺字段不崩——
+ * loadConfig 返回 Partial 时这里返回空对象。 */
+export function getCommentsConfig(cfg: AppConfig): CommentsConfig {
+  return cfg.preferences?.comments ?? {};
 }

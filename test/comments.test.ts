@@ -1,12 +1,21 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { CommentEvent, LarkChannel } from '@larksuiteoapi/node-sdk';
 import {
   buildCommentPrompt,
+  commentCwd,
+  commentSessionKey,
+  DEFAULT_COMMENT_INSTRUCTIONS,
   fetchCommentContext,
+  loadCommentInstructions,
   postCommentReply,
+  renderCommentInstructions,
   resolveComment,
   stripMarkdown,
   SUPPORTED_FILE_TYPES,
+  syncCommentInstructions,
   type ResolvedTarget,
 } from '../src/bot/comments';
 import { finalMessageText, initialState, reduce } from '../src/card/run-state';
@@ -89,16 +98,20 @@ describe('finalMessageText (run-state)', () => {
   });
 });
 
-describe('buildCommentPrompt', () => {
-  it('includes the question/token/scope/url, and forbids self-posting + demands final-answer-only plain text', () => {
+describe('buildCommentPrompt (facts only — behavioral instructions live in AGENTS.md/CLAUDE.md)', () => {
+  it('includes the question/token/scope/url', () => {
     const p = buildCommentPrompt(docxTarget, { question: '这样对吗?', isWhole: true }, 'feishu');
     expect(p).toContain('这样对吗?');
     expect(p).toContain('doccnAAA');
     expect(p).toContain('全文评论');
     expect(p).toContain('https://feishu.cn/docx/doccnAAA');
-    expect(p).toContain('纯文本'); // the no-markdown instruction
-    expect(p).toContain('系统会自动'); // the bridge posts the reply, not the agent
-    expect(p).toContain('最终答案'); // only the final answer, no process narration
+  });
+
+  it('no longer carries the behavioral instructions (they moved to the synced AGENTS.md/CLAUDE.md)', () => {
+    const p = buildCommentPrompt(docxTarget, { question: '这样对吗?', isWhole: true }, 'feishu');
+    expect(p).not.toContain('纯文本'); // no-markdown rule now lives in the instructions file
+    expect(p).not.toContain('系统会自动'); // ditto for the self-post contract
+    expect(p).not.toContain('最终答案');
   });
 
   it('renders the selected quote for inline comments and uses the lark host', () => {
@@ -107,12 +120,126 @@ describe('buildCommentPrompt', () => {
     expect(p).toContain('> line one\n> line two');
     expect(p).toContain('https://larksuite.com/docx/doccnAAA');
   });
+
+  it('maps each file type to its real URL path segment (sheet→/sheets/, doc→/docs/, bitable→/base/)', () => {
+    const link = (t: ResolvedTarget): string =>
+      buildCommentPrompt(t, { question: 'q', isWhole: true }, 'feishu');
+    // bitable: the web URL is /base/<app_token>, NOT /bitable/ (that's only the REST path)
+    expect(link({ fileToken: 'bascnX', fileType: 'bitable' })).toContain('https://feishu.cn/base/bascnX');
+    expect(link({ fileToken: 'bascnX', fileType: 'bitable' })).not.toContain('/bitable/');
+    expect(link({ fileToken: 'shtX', fileType: 'sheet' })).toContain('https://feishu.cn/sheets/shtX');
+    expect(link({ fileToken: 'docX', fileType: 'doc' })).toContain('https://feishu.cn/docs/docX');
+    // docx matches the type string verbatim — already covered by the test above
+  });
+});
+
+describe('DEFAULT_COMMENT_INSTRUCTIONS (the seeded AGENTS.md/CLAUDE.md content)', () => {
+  it('carries the machine contract + read/edit + anchor-preservation guidance', () => {
+    expect(DEFAULT_COMMENT_INSTRUCTIONS).toContain('系统会自动'); // the bridge posts the reply, not the agent
+    expect(DEFAULT_COMMENT_INSTRUCTIONS).toContain('纯文本'); // no-markdown output rule
+    expect(DEFAULT_COMMENT_INSTRUCTIONS).toContain('lark-cli'); // read/edit the doc via lark-cli
+    expect(DEFAULT_COMMENT_INSTRUCTIONS).toContain('原文已被删除'); // anchor-preservation rule: don't delete the commented text
+    expect(DEFAULT_COMMENT_INSTRUCTIONS).toContain('解决 / 删除'); // don't self-resolve/delete comments
+  });
+
+  it('uses the doc-level variables so each synced copy is doc-specific', () => {
+    expect(DEFAULT_COMMENT_INSTRUCTIONS).toContain('{fileToken}'); // the read/edit line uses the token var
+    expect(DEFAULT_COMMENT_INSTRUCTIONS).toContain('{fileType}');
+    expect(DEFAULT_COMMENT_INSTRUCTIONS).toContain('{docUrl}');
+    expect(DEFAULT_COMMENT_INSTRUCTIONS).not.toContain('<file_token>'); // no prose placeholder
+  });
+
+  it('stays within the in-card editor cap (1000 chars) so it can be edited in the card', () => {
+    expect(DEFAULT_COMMENT_INSTRUCTIONS.length).toBeLessThanOrEqual(1000);
+  });
+
+  it('substitutes its variables to the real doc values when synced', () => {
+    const rendered = renderCommentInstructions(DEFAULT_COMMENT_INSTRUCTIONS, 'feishu', 'docx', 'doccnAAA');
+    expect(rendered).not.toContain('{fileToken}'); // all placeholders resolved
+    expect(rendered).not.toContain('{docUrl}');
+    expect(rendered).toContain('doccnAAA'); // the real token
+    expect(rendered).toContain('https://feishu.cn/docx/doccnAAA'); // the real link
+  });
+
+  it('substitutes a 多维表格 (bitable) link at /base/', () => {
+    const rendered = renderCommentInstructions(DEFAULT_COMMENT_INSTRUCTIONS, 'feishu', 'bitable', 'bascnX');
+    expect(rendered).toContain('https://feishu.cn/base/bascnX');
+    expect(rendered).not.toContain('/bitable/');
+  });
+});
+
+describe('commentSessionKey (one session per comment THREAD)', () => {
+  it('keys by doc:<fileToken>:<commentId>', () => {
+    expect(commentSessionKey('doccnAAA', 'cmt1')).toBe('doc:doccnAAA:cmt1');
+  });
+
+  it('gives distinct keys to distinct threads on the same doc', () => {
+    expect(commentSessionKey('doccnAAA', 'cmt1')).not.toBe(commentSessionKey('doccnAAA', 'cmt2'));
+  });
+});
+
+describe('commentCwd (one working dir per document)', () => {
+  it('joins projectsRoot with comment-<fileType>-<fileToken>', () => {
+    expect(commentCwd('/root', 'docx', 'doccnAAA')).toBe(join('/root', 'comment-docx-doccnAAA'));
+  });
+
+  it('is shared by all comment threads on the same doc (no commentId in the path)', () => {
+    expect(commentCwd('/root', 'docx', 'doccnAAA')).toBe(commentCwd('/root', 'docx', 'doccnAAA'));
+  });
+});
+
+describe('comment instructions file lifecycle', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  const tmp = (): string => {
+    const d = mkdtempSync(join(tmpdir(), 'comment-instr-'));
+    dirs.push(d);
+    return d;
+  };
+
+  it('seeds the master file with the default when absent, then returns it', async () => {
+    const root = tmp();
+    const master = join(root, 'comment-instructions.md');
+    const loaded = await loadCommentInstructions(master);
+    expect(loaded).toBe(DEFAULT_COMMENT_INSTRUCTIONS);
+    expect(readFileSync(master, 'utf8')).toBe(DEFAULT_COMMENT_INSTRUCTIONS); // written to disk
+  });
+
+  it('returns the user-edited master content on subsequent loads (no clobber)', async () => {
+    const root = tmp();
+    const master = join(root, 'comment-instructions.md');
+    await loadCommentInstructions(master); // seed
+    rmSync(master);
+    const edited = '# 我的自定义评论助手\n只回三段：风险/待确认人/下一步。';
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(master, edited, 'utf8');
+    expect(await loadCommentInstructions(master)).toBe(edited);
+  });
+
+  it('does NOT overwrite an existing blank/whitespace master file (uses default for the run, leaves file intact)', async () => {
+    const root = tmp();
+    const master = join(root, 'comment-instructions.md');
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(master, '   \n\n', 'utf8'); // user emptied it on purpose
+    expect(await loadCommentInstructions(master)).toBe(DEFAULT_COMMENT_INSTRUCTIONS); // run still gets the contract
+    expect(readFileSync(master, 'utf8')).toBe('   \n\n'); // but the file on disk is untouched (no silent clobber)
+  });
+
+  it('syncs instructions into BOTH AGENTS.md and CLAUDE.md of the cwd', async () => {
+    const cwd = join(tmp(), 'comment-docx-doccnAAA');
+    const content = '# 助手\n回答要真诚';
+    await syncCommentInstructions(cwd, content);
+    expect(readFileSync(join(cwd, 'AGENTS.md'), 'utf8')).toBe(content);
+    expect(readFileSync(join(cwd, 'CLAUDE.md'), 'utf8')).toBe(content);
+  });
 });
 
 describe('SUPPORTED_FILE_TYPES', () => {
-  it('covers doc/docx/sheet/file and excludes slides/bitable/mindnote', () => {
-    for (const t of ['doc', 'docx', 'sheet', 'file']) expect(SUPPORTED_FILE_TYPES.has(t)).toBe(true);
-    for (const t of ['slides', 'bitable', 'mindnote', 'wiki']) expect(SUPPORTED_FILE_TYPES.has(t)).toBe(false);
+  it('covers doc/docx/sheet/bitable and excludes file/slides/mindnote/wiki', () => {
+    for (const t of ['doc', 'docx', 'sheet', 'bitable']) expect(SUPPORTED_FILE_TYPES.has(t)).toBe(true);
+    for (const t of ['file', 'slides', 'mindnote', 'wiki']) expect(SUPPORTED_FILE_TYPES.has(t)).toBe(false);
   });
 });
 
@@ -158,7 +285,7 @@ describe('resolveComment', () => {
   it('returns null for unsupported file types without calling any API', async () => {
     const { channel, getNode } = channelFor({});
     const get = channel.rawClient.drive.v1.fileComment.get as ReturnType<typeof vi.fn>;
-    expect(await resolveComment(channel, evt({ fileType: 'bitable' }))).toBeNull();
+    expect(await resolveComment(channel, evt({ fileType: 'mindnote' }))).toBeNull();
     expect(get).not.toHaveBeenCalled();
     expect(getNode).not.toHaveBeenCalled();
   });

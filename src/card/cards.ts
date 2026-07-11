@@ -46,10 +46,15 @@ export function card(
      * Feishu's default is true (forwardable); only opt out for cards whose
      * buttons would be dead/confusing in the forwarded copy. */
     forward?: boolean;
+    /** Card width on PC/iPad (config.width_mode). 'default' ≤600px (the implicit
+     * default), 'compact' ≤400px, 'fill' = fill the chat window. Set 'fill' for
+     * cards with a wide editor (e.g. the multiline prompt box) so it isn't cramped. */
+    widthMode?: 'default' | 'compact' | 'fill';
   } = {},
 ): CardObject {
   const config: Record<string, unknown> = { update_multi: true };
   if (opts.forward === false) config.enable_forward = false;
+  if (opts.widthMode) config.width_mode = opts.widthMode;
   if (opts.streaming) {
     // streaming_mode is REQUIRED for element-level streaming (cardElement.content),
     // which the answer text uses for the native typewriter. Per Feishu's docs,
@@ -298,13 +303,28 @@ export function input(opts: {
   placeholder?: string;
   value?: string;
   required?: boolean;
+  /** Feishu max input length. Valid range 1–1000 (default 1000); values outside it
+   * make Feishu reject the whole card, so callers must stay within [1,1000]. */
+  maxLength?: number;
+  /** 'text' (single-line, default) | 'multiline_text' (textarea, newlines kept). */
+  inputType?: 'text' | 'multiline_text';
+  /** multiline_text only: initial visible rows (the box auto-grows as needed). */
+  rows?: number;
+  /** Box width. 'default' is a fixed narrow width; 'fill' spans the card's max
+   * width (pair with the card's widthMode:'fill' for a roomy editor); a number
+   * is a custom pixel width (≥100). Omit for Feishu's narrow default. */
+  width?: 'default' | 'fill' | number;
 }): CardElement {
   return {
     tag: 'input',
     name: opts.name,
+    ...(opts.inputType ? { input_type: opts.inputType } : {}),
+    ...(opts.rows ? { rows: opts.rows, auto_resize: true } : {}),
+    ...(opts.width !== undefined ? { width: opts.width } : {}),
     ...(opts.label ? { label: { tag: 'plain_text', content: opts.label } } : {}),
     ...(opts.placeholder ? { placeholder: { tag: 'plain_text', content: opts.placeholder } } : {}),
     ...(opts.value ? { default_value: opts.value } : {}),
+    ...(opts.maxLength ? { max_length: opts.maxLength } : {}),
     required: Boolean(opts.required),
   };
 }

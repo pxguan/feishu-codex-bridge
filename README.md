@@ -4,6 +4,9 @@
 [![total downloads](https://badgen.net/npm/dt/@modelzen/feishu-codex-bridge)](https://www.npmjs.com/package/@modelzen/feishu-codex-bridge)
 [![downloads/month](https://badgen.net/npm/dm/@modelzen/feishu-codex-bridge)](https://www.npmjs.com/package/@modelzen/feishu-codex-bridge)
 [![license](https://badgen.net/npm/license/@modelzen/feishu-codex-bridge)](https://github.com/modelzen/feishu-codex-bridge/blob/main/LICENSE)
+[![官网](https://badgen.net/badge/%E5%AE%98%E7%BD%91/bridge.vonvon.cc/blue)](https://bridge.vonvon.cc)
+
+🌐 **官网：<https://bridge.vonvon.cc>**
 
 > 把飞书 / Lark 桥接到你本机的 [Codex](https://github.com/openai/codex) 或 [Claude Code](https://www.anthropic.com/claude-code)，在群里 @ 机器人就能让它在指定项目目录里干活，结果以流式 Markdown 卡片实时回到群里。
 >
@@ -23,22 +26,42 @@
 
 ## ⚡ 安装
 
-两条命令装好、打开网页控制台，**剩下全在网页里点**（扫码加机器人 / 开权限 / 启停）：
+两步打开本机网页控制台。装好 Bridge、打开控制台，再在页面里启动后台服务、添加第一个 Bridge 机器人。
 
 ```bash
-npm i -g @modelzen/feishu-codex-bridge   # 1. 装命令
-feishu-codex-bridge web                  # 2. 打开本机网页控制台
+# 1. 全局安装 Bridge
+npm i -g @modelzen/feishu-codex-bridge
+
+# 2. 打开本机网页控制台
+# 启动服务、添加好机器人后，这条前台命令即可 Ctrl+C 关闭
+feishu-codex-bridge web
 ```
 
-让 **Codex / Claude** 替你装？把下面这段发给它：
+不想自己敲？把下面这段发给 **Codex / Claude** 等 AI agent，让它替你装好并跑起来：
 
 ```text
-如果本地没有 feishu-codex-bridge 命令，就先用 npm i -g @modelzen/feishu-codex-bridge 安装。
-然后运行 feishu-codex-bridge web 打开网页控制台，把输出的网址给我打开。
-装好、开完网页就停，别的不用做。
+帮我在这台电脑上安装并跑起来 feishu-codex-bridge：
+
+1) 先 node -v 确认有 Node.js(≥18)，没有就先装好；
+2) 再 codex --version 确认已经安装了 codex CLI，没有就先装好；
+3) 全局安装：
+   npm i -g @modelzen/feishu-codex-bridge
+4) 前台运行，打开本机 Web 控制台：
+   feishu-codex-bridge web
+   它一启动会打印一个 http://127.0.0.1:xxxx/?token=... 的链接。
+5) 把那个链接发给我；
+6) 然后用文字告诉我接下来怎么做：
+   - 我在浏览器打开这个链接；
+   - 点页面上的「启动」按钮，把后台服务跑起来；
+   - 启动后页面会自动进入可写控制台，在里面扫码添加我的第一个飞书机器人；
+   - 成功创建机器人后，前台那条 feishu-codex-bridge web 就可以 Ctrl+C 关掉，不影响后台服务。
 ```
 
-> 前置：**Node ≥ 20**，外加一个登录好的后端 —— **Codex**（`npm i -g @openai/codex && codex login`）或 **Claude Code**（SDK 随桥内置、复用本机 `claude` 登录态，首次按需下载约 265MB）。打开网页后扫码加机器人、按 checklist 开权限 / 订阅事件，全程点点点，不用碰命令行。
+### 三分钟，看它入职你的飞书
+
+从全局装包、打开本机网页控制台，到扫码建机器人、私聊报到，一整段带解说录屏。点击下面封面去 B 站观看高清版。
+
+[![3 分钟跑通：飞书里直接发任务，Codex 在你本机真干活](docs/assets/install-demo-cover.jpg)](https://www.bilibili.com/video/BV1xP7V6fESb)
 
 ---
 
@@ -50,7 +73,7 @@ feishu-codex-bridge web                  # 2. 打开本机网页控制台
 - **免 @ + 自主目标**：话题 / 单会话群里可直接说话不必每次 @；`/goal <目标>` 让它自主多轮干到完成。
 - **多模态**：消息里直接发图片（读图）、发文件附件（下载到本地交给 agent 打开分析）。
 - **☕ 咖啡一下（反向桥）**：离开电脑时，把你本机正在跑的 Claude Code / Codex CLI 的「需要审批 / 提问 / 任务完成」接管到飞书私聊 —— 在手机上点确认 / 回答它就继续，机器保持不睡。
-- **文档评论回复**：在飞书云文档（doc / docx / sheet / file，含 wiki）的评论里 @ 机器人，它读评论、跑 agent、把答案回到同一条评论线程。
+- **文档评论回复**：在飞书云文档（doc / docx / sheet / bitable 多维表格，含 wiki）的评论里 @ 机器人，它读评论、跑 agent、把答案回到同一条评论线程。
 - **双控制台**：私聊机器人弹交互菜单（新建项目 / 设置 / 用量 / 诊断 / 重连）；网页控制台还能管后台服务、看实时日志、扫码加机器人。
 - **多飞书机器人**：一台机器注册多个机器人、可同时连接，各自项目 / 会话独立。
 - **三档权限沙箱**：每个项目可设「只读 / 读写 / 完全访问」，由 OS 沙箱强制（macOS / 原生 Windows）。
@@ -102,6 +125,20 @@ feishu-codex-bridge doctor                      本地自检：后端 / 登录 /
 
 所有本地状态都在 `~/.feishu-codex-bridge/`（机器人配置、项目 / 会话注册表、AES-256-GCM 加密的密钥库）。卸载时删掉这个目录即可清干净。
 
+### 自定义空白项目目录（可选）
+
+「新建项目」时把**文件夹路径留空**，默认会创建到 `~/.feishu-codex-bridge/projects/<项目名>`。如需改到其他磁盘，可编辑诊断卡所显示的当前机器人 `config.json`（通常是 `~/.feishu-codex-bridge/bots/<appId>/config.json`），在已有 `preferences` 中加入：
+
+```json
+{
+  "preferences": {
+    "projectsRootDir": "D:\\feishu-codex-projects"
+  }
+}
+```
+
+也支持绝对路径和 `~/code` 这类路径。请保留配置文件里的其他字段，修改后重启 bridge；该项只影响之后留空路径创建的空白项目，不会移动已有项目，也不影响手动填写的文件夹路径。
+
 ---
 
 ## ⚠️ 安全须知
@@ -140,6 +177,7 @@ npm test            # vitest
 
 ## 💬 文档 & 交流
 
+- 🌐 **官网**：<https://bridge.vonvon.cc>
 - 🎀 **图文介绍**：<https://my.feishu.cn/docx/AFKNdf4QaooL5OxSR8bc5H7vn7b> —— 配大量截图，讲清它在飞书里长什么样、怎么用。
 - 📖 **命令手册**：<https://my.feishu.cn/wiki/PZ23wGr7JiKK5RkIG4rcZXzGn5g> —— 各场景可用命令速查。
 - 🐛 **反馈 / 贡献**：<https://github.com/modelzen/feishu-codex-bridge/issues>

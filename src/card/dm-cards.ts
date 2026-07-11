@@ -1,4 +1,7 @@
 import {
+  COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES,
+  COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES,
+  getCompletionReminderConfig,
   getMaxConcurrentRuns,
   getModelDisplay,
   getPendingPolicy,
@@ -9,13 +12,20 @@ import {
   type AppConfig,
 } from '../config/schema';
 import { defaultNoMention, effectiveGuestMode, effectiveMode, type Project } from '../project/registry';
-import { DEFAULT_BACKEND_ID, type BackendProbe, type ModelInfo, type PermissionMode, type ReasoningEffort } from '../agent/types';
+import {
+  DEFAULT_BACKEND_ID,
+  REASONING_EFFORTS,
+  type BackendProbe,
+  type ModelInfo,
+  type PermissionMode,
+  type ReasoningEffort,
+} from '../agent/types';
 import { catalogById } from '../agent/catalog';
 import type { SessionRecord } from '../bot/session-store';
 import { labelScope } from '../config/scopes';
 import { summarizeEventDiagnosis, type EventDiagnosis } from '../utils/event-diagnosis';
 import { actions, actionsFixed, button, card, form, hr, input, linkButton, md, note, selectMenu, splitRow, submitButton, type CardElement, type CardObject, type SelectOption } from './cards';
-import { EFFORT_LABEL, relativeTime } from './command-cards';
+import { reasoningEffortLabel, relativeTime } from './command-cards';
 
 /** applink to open a Feishu group chat by chat_id (oc_xxx). Feishu has no
  * deep link to a specific thread/topic, so this lands in the group and the
@@ -42,8 +52,12 @@ export const DM = {
   joinGroupSubmit: 'dm.joinGroup.submit',
   projects: 'dm.projects',
   settings: 'dm.settings',
+  // ☕ 咖啡一下（离开接管）：从全局设置卡进入的二级卡片（仿云文档评论那样的子卡入口）
+  coffeeSettings: 'dm.coffee.settings',
   doctor: 'dm.doctor',
   reconnect: 'dm.reconnect',
+  restart: 'dm.restart',
+  restartDo: 'dm.restart.do',
   update: 'dm.update',
   updateDo: 'dm.update.do',
   // 📊 Codex 用量（限额 + 个人资料统计 + 热力图）；share 打开内容选择卡，
@@ -61,6 +75,10 @@ export const DM = {
   // 假死超时「自定义…」：watchdogCustom 打开输入卡，watchdogCustomSubmit 保存任意秒数
   watchdogCustom: 'dm.set.watchdog.custom',
   watchdogCustomSubmit: 'dm.set.watchdog.customSubmit',
+  // 普通群任务结束提醒（与 ☕ CLI Stop 通知无关）：四档策略 + 长任务阈值子卡
+  setCompletionReminder: 'dm.set.completionReminder',
+  completionReminderCustom: 'dm.set.completionReminder.custom',
+  completionReminderCustomSubmit: 'dm.set.completionReminder.customSubmit',
   setPending: 'dm.set.pending',
   setConcurrency: 'dm.set.concurrency',
   // 权限管理：全局 admins（settings 卡进入）+ 项目响应白名单（项目列表 / 建项目完成卡进入）
@@ -87,6 +105,13 @@ export const DM = {
   permissionSubmit: 'dm.proj.perm.submit',
   // 🧠 后端 backend/backendSubmit 已移除：后端改为「创建时选定、运行时固定、不支持切换」，
   // 新建卡选后端见 newProjectSubmit；项目设置卡只读展示。
+  // 📝 云文档评论 @bot 全局设置：后端按钮(级联)→模型/强度下拉表单提交；提示词在卡内编辑。
+  commentSettings: 'dm.comment.settings',
+  commentSetBackend: 'dm.comment.setBackend',
+  commentSubmit: 'dm.comment.submit',
+  commentEditPrompt: 'dm.comment.editPrompt',
+  commentPromptSubmit: 'dm.comment.promptSubmit',
+  commentResetPrompt: 'dm.comment.resetPrompt',
 } as const;
 
 /** Action ids for the in-group settings card (@bot /settings). */
@@ -136,7 +161,7 @@ export function buildDmMenuCard(opts: { webConsoleUrl?: string; version?: string
       actionsFixed([
         button('📊 用量', { a: DM.usage }),
         button('🩺 诊断', { a: DM.doctor }),
-        button('🔄 重连', { a: DM.reconnect }),
+        button('🔁 重启', { a: DM.restart }),
         button('⬆️ 更新', { a: DM.update }),
       ], MENU_BTN_W_BOT),
       // 🌐 网页控制台：刻意低调——小号按钮靠左 + 右侧灰字说明；仅在 daemon 本机控制台
@@ -291,6 +316,47 @@ export function buildReconnectCard(conn: string): CardObject {
       backToMenu(),
     ],
     { header: { title: '🔄 长连接', template } },
+  );
+}
+
+/**
+ * 重启确认卡（🔁 重启）：重启后台服务会断开所有会话、重新拉起进程（约数秒），是破坏性
+ * 操作，故仿「删除项目」走两步确认。顺带展示当前长连接状态供判断——真断线时重启才是唯一
+ * 有效手段（SDK 自动重连之外无可靠 force-reconnect），比旧的只读「重连」卡更有用。
+ */
+export function buildRestartConfirmCard(conn: string): CardObject {
+  return card(
+    [
+      md(`长连接状态：**${conn}**`),
+      note('重启会**断开当前所有会话**并重新拉起后台服务（约数秒，其间机器人短暂离线），完成后自动恢复。仅在长期断连或异常时才需要。'),
+      actions([
+        button('🔁 确认重启', { a: DM.restartDo }, 'danger'),
+        button('取消', { a: DM.menu }),
+      ]),
+    ],
+    { header: { title: '🔁 重启后台服务', template: 'orange' } },
+  );
+}
+
+/**
+ * 「正在重启 / 前台运行」提示卡。restartDaemon 会替换掉当前 daemon（回调就跑在它里面），
+ * 之后没有进程再更新这张卡，所以先把它落地再触发替换。`foreground`＝没有后台守护服务
+ * 可重启（典型：前台 `run`），改为引导去终端，不做无效的 service.restart。
+ */
+export function buildRestartingCard(mode: 'restarting' | 'foreground' = 'restarting'): CardObject {
+  if (mode === 'foreground') {
+    return card(
+      [
+        md('ℹ️ 当前为**前台运行**（非后台守护服务）。'),
+        note('此按钮只重启由 `feishu-codex-bridge start` 安装的后台服务。前台运行请在其终端里 Ctrl+C 后重跑 `feishu-codex-bridge run`。'),
+        backToMenu(),
+      ],
+      { header: { title: '🔁 重启后台服务', template: 'orange' } },
+    );
+  }
+  return card(
+    [md('🔁 正在重启后台服务…'), note('机器人将短暂离线数秒后自动恢复；本卡不再更新。')],
+    { header: { title: '🔁 重启后台服务', template: 'orange' } },
   );
 }
 
@@ -815,8 +881,9 @@ function settingItem(
  * *every* button on it (including ⬅️ 菜单) stops firing. Buttons never lock, so
  * this card stays fully interactive and updates in place.
  */
-export function buildSettingsCard(cfg: AppConfig, localAgents: CardElement[] = []): CardObject {
+export function buildSettingsCard(cfg: AppConfig): CardObject {
   const watchdogSec = cfg.preferences?.runIdleTimeoutSeconds ?? 120;
+  const completionReminder = getCompletionReminderConfig(cfg);
   return card(
     [
       settingSection('📤 输出展示'),
@@ -852,6 +919,25 @@ export function buildSettingsCard(cfg: AppConfig, localAgents: CardElement[] = [
         button('自定义…', { a: DM.watchdogCustom }),
       ]),
       ...settingItem(
+        '🔔 任务结束提醒',
+        '结束后额外回复一条消息并 @ 发起人。「仅手动」会在运行卡显示提醒按钮；其他档位自动判断，不显示按钮。',
+        DM.setCompletionReminder,
+        completionReminder.mode,
+        [
+          { label: '仅手动', value: 'manual' },
+          { label: '长任务', value: 'long' },
+          { label: '失败或超时', value: 'failures' },
+          { label: '每次结束', value: 'always' },
+        ],
+      ),
+      ...(completionReminder.mode === 'long'
+        ? [
+            md(`**⏳ 长任务阈值** · 当前 **${completionReminder.longTaskMinutes} 分钟**`),
+            note('任务耗时达到这个阈值后，结束时才会提醒。'),
+            actions([button('修改阈值…', { a: DM.completionReminderCustom })]),
+          ]
+        : []),
+      ...settingItem(
         '📥 运行中来新消息',
         '正在跑时你又发消息：引导＝插进当前轮纠偏；排队＝等这轮跑完再处理。',
         DM.setPending,
@@ -873,11 +959,215 @@ export function buildSettingsCard(cfg: AppConfig, localAgents: CardElement[] = [
           { label: '20', value: '20' },
         ],
       ),
-      ...localAgents,
+      hr(),
+      settingSection('☕ 咖啡一下'),
+      note('去倒杯咖啡的工夫，我替你盯着本机的 Claude Code / Codex——它要审批、要问你、或跑完了，都推到这个私聊。含通知范围、转发后端、离开保活、hooks 修复。'),
+      actions([button('设置咖啡一下 / 通知 / 保活 / hooks', { a: DM.coffeeSettings }, 'primary')]),
+      hr(),
+      settingSection('📝 云文档评论'),
+      note('在飞书云文档（文档 / 表格 / 多维表格，含 wiki）的评论里 @我，我读评论、跑 agent、把答案贴回评论。可设置评论响应用的后端 agent / 模型 / 推理强度，以及自定义提示词（全局，不分项目；仅管理员可 @）。'),
+      actions([button('设置后端 / 模型 / 强度 / 提示词', { a: DM.commentSettings }, 'primary')]),
       hr(),
       actions([button('👮 管理员', { a: DM.admins }), button('⬅️ 菜单', { a: DM.menu })]),
     ],
     { header: { title: '⚙️ 全局设置', template: 'blue' } },
+  );
+}
+
+/**
+ * ☕ 咖啡一下（离开接管）二级设置卡（DM「⚙️ 设置 → ☕ 咖啡一下」进入）。把本机
+ * Claude Code / Codex 的离开转发那组控件（总开关 / 通知范围 / 转发后端 / 离开保活 /
+ * hooks 修复）从主设置卡抽出、独立成卡，主卡只留入口。`section` 是
+ * {@link cliBridgeSettingsSection} 的输出（调用方传入，含实时 hook 状态）——其首元素是
+ * 当年内联进主卡用的分隔线，独立成卡时去掉。
+ */
+export function buildCoffeeSettingsCard(section: CardElement[]): CardObject {
+  return card(
+    [
+      ...section.slice(1), // 去掉为「内联进主卡」而加的开头 hr()
+      hr(),
+      actions([button('⬅️ 返回设置', { a: DM.settings })]),
+    ],
+    { header: { title: '☕ 咖啡一下', template: 'blue' } },
+  );
+}
+
+/** 飞书 CLI（lark-cli）使用文档——评论里读/改文档依赖它。 */
+const LARK_CLI_DOC_URL = 'https://bytedance.larkoffice.com/wiki/ILuTww7Xcimb6GkhH0mcK2f4nS7';
+
+/**
+ * 云文档评论 @bot 的全局设置卡（DM「⚙️ 设置 → 📝 云文档评论」进入）。后端用按钮做级联源
+ * （点了重渲下面的模型 / 强度下拉）；模型 + 推理强度是一个表单（下拉，不锁卡），预选当前
+ * 生效值、一次提交两者——不再有「默认」这种显式空选项。提示词在卡内单独子卡编辑
+ * （{@link buildCommentPromptCard}）。`models` 为当前后端的实时模型列表（调用方传入）。
+ */
+export function buildCommentSettingsCard(
+  cfg: AppConfig,
+  backendOptions: { id: string; label: string }[],
+  models: ModelInfo[],
+  notice?: string,
+): CardObject {
+  const comments = cfg.preferences?.comments ?? {};
+  const visible = models.filter((m) => !m.hidden);
+  const curBackend =
+    comments.backend && backendOptions.some((b) => b.id === comments.backend)
+      ? comments.backend
+      : (backendOptions.find((b) => b.id === DEFAULT_BACKEND_ID)?.id ?? backendOptions[0]?.id ?? DEFAULT_BACKEND_ID);
+  // Resolved current values — no explicit "unset" option; just preselect the
+  // effective default (backend's own default when nothing is configured).
+  const explicit = comments.model ? visible.find((m) => m.id === comments.model) : undefined;
+  const curModel = explicit ?? visible.find((m) => m.isDefault) ?? visible[0];
+  const unionEfforts = EFFORT_ORDER.filter((e) => visible.some((m) => (m.supportedEfforts ?? []).includes(e)));
+  const curEffort =
+    comments.effort && (curModel?.supportedEfforts ?? []).includes(comments.effort)
+      ? comments.effort
+      : curModel?.defaultEffort;
+  const canPickModel = visible.length > 1;
+  const canPickEffort = unionEfforts.length > 0;
+
+  const els: CardElement[] = [
+    ...(notice ? [md(notice)] : []),
+    md('**📝 云文档评论 @bot**'),
+    note('评论里 @我时用的后端 / 模型 / 推理强度。只影响之后新建的评论。'),
+    hr(),
+  ];
+
+  // 后端：级联源。多后端给按钮（点了重渲下面的模型/强度表单），单后端只读。
+  if (backendOptions.length > 1) {
+    els.push(
+      md('🧠 **后端**'),
+      actions(
+        backendOptions.map((b) =>
+          button(b.label, { a: DM.commentSetBackend, v: b.id }, b.id === curBackend ? 'primary' : 'default'),
+        ),
+      ),
+    );
+  } else {
+    els.push(md(`🧠 **后端**：${backendOptions[0]?.label ?? curBackend}`));
+  }
+
+  // 模型 + 推理强度：表单下拉（selectMenu 不锁卡），预选当前值，一次提交两者。
+  if (canPickModel || canPickEffort) {
+    const formEls: CardElement[] = [];
+    if (canPickModel) {
+      formEls.push(
+        md('🤖 **模型**'),
+        selectMenu({
+          name: 'model',
+          placeholder: '选择模型',
+          options: visible.map((m) => ({ label: m.displayName, value: m.id })),
+          initial: curModel?.id,
+        }),
+      );
+    } else {
+      formEls.push(md(`🤖 **模型**：${curModel?.displayName ?? '后端默认'}（该后端仅一个模型）`));
+    }
+    if (canPickEffort) {
+      formEls.push(
+        md('🎚 **推理强度**'),
+        selectMenu({
+          name: 'effort',
+          placeholder: '选择推理强度',
+          options: unionEfforts.map((e) => ({ label: reasoningEffortLabel(e), value: e })),
+          initial: curEffort,
+        }),
+      );
+    }
+    formEls.push(actions([submitButton('✅ 保存模型 / 强度', { a: DM.commentSubmit }, 'primary', 'submit_comment')]));
+    els.push(form('comment_model_effort', formEls));
+  } else {
+    els.push(note('该后端只有一个模型且不调推理强度，无需设置。'));
+  }
+
+  els.push(
+    hr(),
+    md('✍️ **提示词**'),
+    note('评论 @我 时我的角色与回复规则（含怎么读 / 改文档）。点开可直接在卡里编辑。'),
+    actions([button('编辑提示词', { a: DM.commentEditPrompt }, 'primary')]),
+    hr(),
+    md('📎 **配合飞书 CLI**'),
+    note(
+      '评论里要**读 / 改文档**，靠飞书 CLI（lark-cli）：装好并登录后即可（用你自己的身份读写、对自己的文档有权限）。' +
+        `Tips：飞书 CLI 可与本机器人复用同一个 App。安装与用法见 [飞书 CLI 文档](${LARK_CLI_DOC_URL})。`,
+    ),
+    hr(),
+    actions([button('⬅️ 返回设置', { a: DM.settings })]),
+  );
+
+  return card(els, { header: { title: '📝 文档评论设置', template: 'blue' } });
+}
+
+/**
+ * 评论提示词编辑子卡（📝 文档评论设置 →「编辑提示词」）。一个表单：撑满卡宽的多行输入框，
+ * 预填当前 master 模板内容（含 {变量}）+ 保存按钮。保存后由 handler 写 master 并同步进
+ * 所有文档（含历史）。卡里同时展示每轮自动追加给 agent 的实时消息长什么样，让用户清楚
+ * 「固定人设（这段）+ 每轮实时facts」的分工。飞书 input 硬上限 1000 字（range 1–1000），
+ * 更长的提示词需直接编辑 master 文件（无限制）；传入 `masterFile` 时把路径显示出来。
+ */
+export function buildCommentPromptCard(
+  currentPrompt: string,
+  notice?: string,
+  masterFile?: string,
+): CardObject {
+  return card(
+    [
+      ...(notice ? [md(notice)] : []),
+      md('**✍️ 评论提示词**'),
+      note('评论 @我 时我的固定人设与回复规则——保存后会同步到所有文档（含历史），下一条评论生效。'),
+      md(
+        [
+          '**可用变量**（同步到每篇文档时自动替换成该文档自己的值）：',
+          '- `{docUrl}` 文档链接',
+          '- `{fileToken}` 文档 token（链接里类型后那段）',
+          '- `{fileType}` 文档类型，取值：',
+          '    - `doc`/`docx`（飞书云文档）',
+          '    - `sheet`（飞书表格）',
+          '    - `bitable`（多维表格）',
+        ].join('\n'),
+      ),
+      note('评论的选中原文、用户问题每轮会自动给我，无需写进提示词。'),
+      form('comment_prompt', [
+        input({
+          name: 'prompt',
+          label: '提示词内容',
+          value: currentPrompt,
+          required: true,
+          inputType: 'multiline_text',
+          rows: 12,
+          width: 'fill',
+          maxLength: 1000, // Feishu input hard cap (range 1–1000); longer prompts → edit master file
+        }),
+        // 两个都是 form 提交按钮（普通 button 在 form 内不保证触发）：保存读输入框内容落盘；
+        // 重置忽略输入框、直接把内置默认写回 master 并同步（handler 端处理）。
+        actions([
+          submitButton('✅ 保存提示词', { a: DM.commentPromptSubmit }, 'primary', 'submit_prompt'),
+          submitButton('↩️ 重置为默认', { a: DM.commentResetPrompt }, 'default', 'reset_prompt'),
+        ]),
+      ]),
+      hr(),
+      md('**📨 每轮评论 @我，我会收到下面消息：**'),
+      md(
+        [
+          '我在飞书云文档的评论里 @了你。文档信息：',
+          '- 链接：{docUrl}',
+          '- file_token：{fileToken}',
+          '- 类型：{fileType}',
+          '- 评论范围：行内评论（针对选中文字） / 全文评论（针对整篇）',
+          '', // 空行结束列表，否则下一行被并进「评论范围」那个 bullet
+          '用户选中的原文：（仅行内评论时附上）',
+          '> ……被评论的那段文字……',
+          '', // 空行结束引用，否则「用户的问题」被并进引用块
+          '用户的问题：……评论正文……',
+        ].join('\n'),
+      ),
+      note(
+        masterFile
+          ? `提示词也可直接编辑 ${masterFile}（改文件后新内容在每篇文档的下一条评论时生效）。`
+          : '提示词也可直接编辑 bot 目录下的 comment-instructions.md。',
+      ),
+      actions([button('⬅️ 返回', { a: DM.commentSettings })]),
+    ],
+    { header: { title: '✍️ 编辑提示词', template: 'blue' }, widthMode: 'fill' },
   );
 }
 
@@ -901,6 +1191,30 @@ export function buildWatchdogCustomCard(cfg: AppConfig): CardObject {
       actions([button('⬅️ 返回设置', { a: DM.settings })]),
     ],
     { header: { title: '⏱ 自定义超时', template: 'blue' } },
+  );
+}
+
+/**
+ * Custom duration threshold for the ordinary task-completion `long` policy.
+ * Kept on a dedicated form card so the main settings card remains button-only.
+ */
+export function buildCompletionReminderCustomCard(cfg: AppConfig): CardObject {
+  const cur = getCompletionReminderConfig(cfg).longTaskMinutes;
+  return card(
+    [
+      md('**自定义长任务阈值**'),
+      note(
+        `任务耗时达到这个时长，结束时额外回复消息并 @ 发起人。范围 ${COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES}–${COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES} 分钟。`,
+      ),
+      form('completion_reminder_custom', [
+        input({ name: 'minutes', label: '时长（分钟）', placeholder: '例如 10', value: String(cur), required: true }),
+        actions([
+          submitButton('✅ 保存', { a: DM.completionReminderCustomSubmit }, 'primary', 'submit_completion_reminder'),
+        ]),
+      ]),
+      actions([button('⬅️ 返回设置', { a: DM.settings })]),
+    ],
+    { header: { title: '🔔 长任务阈值', template: 'blue' } },
   );
 }
 
@@ -1091,13 +1405,13 @@ export function buildPermissionCard(p: Pick<Project, 'name' | 'mode' | 'guestMod
 }
 
 /** Canonical reasoning-effort ladder (low→high), to order the effort dropdown. */
-const EFFORT_ORDER: ReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+const EFFORT_ORDER: readonly ReasoningEffort[] = REASONING_EFFORTS;
 
 /** One-line summary of a project's default model/effort, for the settings cards.
  * Sync (no model list) — shows the raw stored id (e.g. `gpt-5.5`) or「后端默认」. */
 export function modelDefaultSummary(p: Pick<Project, 'defaultModel' | 'defaultEffort'>): string {
   if (!p.defaultModel) return '后端默认（未设）';
-  const eff = p.defaultEffort ? ` · 强度 ${EFFORT_LABEL[p.defaultEffort]}` : '';
+  const eff = p.defaultEffort ? ` · 强度 ${reasoningEffortLabel(p.defaultEffort)}` : '';
   return `${p.defaultModel}${eff}`;
 }
 
@@ -1172,7 +1486,7 @@ export function buildModelDefaultCard(
       selectMenu({
         name: 'effort',
         placeholder: '选择默认推理强度',
-        options: unionEfforts.map((e) => ({ label: `强度：${EFFORT_LABEL[e]}`, value: e })),
+        options: unionEfforts.map((e) => ({ label: `强度：${reasoningEffortLabel(e)}`, value: e })),
         initial: curEffort,
       }),
     );

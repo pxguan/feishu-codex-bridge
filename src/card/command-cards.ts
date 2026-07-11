@@ -19,7 +19,14 @@ export const EFFORT_LABEL: Record<ReasoningEffort, string> = {
   medium: '中',
   high: '高',
   xhigh: '极高',
+  max: '最高',
+  ultra: '超强',
 };
+
+/** Keep model cards forward-compatible when Codex adds a new effort tier. */
+export function reasoningEffortLabel(effort: string): string {
+  return EFFORT_LABEL[effort as ReasoningEffort] ?? (effort || '未知');
+}
 
 // ── /model ────────────────────────────────────────────────────────────────
 
@@ -77,7 +84,7 @@ export function buildModelCard(state: ModelCardState): CardObject {
           actionId: MC.effort,
           placeholder: 'effort',
           initial: state.effort,
-          options: efforts.map((e) => ({ label: `effort：${EFFORT_LABEL[e]}`, value: e })),
+          options: efforts.map((e) => ({ label: `effort：${reasoningEffortLabel(e)}`, value: e })),
         }),
       );
     }
@@ -114,6 +121,12 @@ export interface ResumeCardState {
   createdAt: number;
   /** in-flight guard (anti double-click) */
   launching?: boolean;
+  /** single-session group: resume IN PLACE (no new topic) —— pick rebinds the
+   * group's session key flat instead of reply_in_thread-ing a new topic. */
+  flat?: boolean;
+  /** single-session group only: the session key (chatId / chatId#role) to rebind
+   * on pick. Set together with {@link flat}. */
+  sessionKey?: string;
 }
 
 /** Max length of the session title shown inside a picker button. */
@@ -131,7 +144,13 @@ export function buildResumeCard(state: ResumeCardState): CardObject {
   if (state.threads.length === 0) {
     elements.push(md('_该目录下还没有历史会话。直接 @我 即可新建。_'));
   } else {
-    elements.push(note('点一条即恢复 —— 在新话题里打开历史、可直接继续。'));
+    elements.push(
+      note(
+        state.flat
+          ? '点一条即切回 —— 就地继续，不另起话题。'
+          : '点一条即恢复 —— 在新话题里打开历史、可直接继续。',
+      ),
+    );
     for (const t of state.threads) {
       const title = (t.name?.trim() || t.preview.trim() || '(无摘要)').replace(/\s+/g, ' ');
       const label = `↩️ ${pickerTime(t.updatedAt || t.createdAt)} · ${truncate(title, RESUME_TITLE_MAX)}`;
@@ -146,9 +165,34 @@ export function buildResumeLaunchingCard(state: ResumeCardState): CardObject {
   return card([md('⏳ 正在恢复历史会话…'), note(metaNote(state))], { summary: '恢复中' });
 }
 
-/** Terminal success card — the resumed session opened as a new topic above. */
+/** Terminal success card — resumed as a new topic (multi) or switched in place
+ * (single, `flat`). */
 export function buildResumeDoneCard(state: ResumeCardState): CardObject {
-  return card([md('✅ 已恢复 —— 已在上方新话题打开，可直接继续。'), note(metaNote(state))], { summary: '已恢复' });
+  const line = state.flat
+    ? '↩️ 已切回 —— 就地继续，上面的历史消息保留。'
+    : '✅ 已恢复 —— 已在上方新话题打开，可直接继续。';
+  return card([md(line), note(metaNote(state))], { summary: '已恢复' });
+}
+
+// ── /clear ────────────────────────────────────────────────────────────────
+
+/**
+ * The `/clear` card (single-session groups only) — posted AFTER the group's
+ * session is repointed to a fresh backend thread. It reassures on the one thing
+ * Feishu can't do: the visible chat history above is NOT deleted — the agent
+ * just stops reading it. The parked session stays on disk and is resumable via
+ * `/resume`, so an accidental `/clear` is fully recoverable.
+ */
+export function buildClearedCard(): CardObject {
+  return card(
+    [
+      md('🧹 **已开启全新会话**'),
+      md('✅ 上下文已清空 —— 我从这里重新开始，不再参考上面的对话。'),
+      md('💬 飞书聊天记录不受影响 —— 上面的消息都还在，只是我不再读取它们。'),
+      md('🗂️ 刚才那段已归档 —— 发 `/resume` 随时切回继续。'),
+    ],
+    { summary: '已清空上下文' },
+  );
 }
 
 /** Failure card after a failed resume launch. */
@@ -245,6 +289,8 @@ export function buildHelpCard(scope: HelpScope, noMention = true, isAdmin = fals
     if (showGoal) lines.push(goalLine);
     lines.push('· `/model` → 切换模型 / 推理强度', '· `/context` → 看上下文占比');
     if (showCompact) lines.push(compactLine);
+    if (isAdmin) lines.push('· `/clear` → 清空上下文，开一段全新会话（飞书消息保留）');
+    if (isAdmin && showResume) lines.push('· `/resume` → 切回历史会话');
     if (isAdmin) lines.push('· `/settings` → 群设置（免@ 开关）');
     lines.push('· `/help` → 这张速查卡');
     elements.push(md('💬 **单会话群** — 整群就是一个会话，上下文连续。'), hr(), md(lines.join('\n')));
@@ -309,6 +355,8 @@ export function buildWelcomeCard(
           talkLine(noMention, '交给我处理'),
           ...(showGoal ? [goalLine] : []),
           '· `/model` → 切换模型 / 推理强度',
+          '· `/clear` → 清空上下文，开新会话（管理员，飞书消息保留）',
+          ...(showResume ? ['· `/resume` → 切回历史会话（管理员）'] : []),
           '· `/settings` → 群设置（免@ 开关）',
           '· `/help` → 命令速查卡',
         ].join('\n'),

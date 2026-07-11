@@ -305,7 +305,15 @@ function heatmapElements(p: AccountProfileStats, today?: string): CardElement[] 
 
 /** 推理强度 → 官方中文口径。 */
 export function effortLabel(effort: string): string {
-  const m: Record<string, string> = { minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '超高' };
+  const m: Record<string, string> = {
+    minimal: '极低',
+    low: '低',
+    medium: '中',
+    high: '高',
+    xhigh: '超高',
+    max: '最高',
+    ultra: '超强',
+  };
   return m[effort] ?? effort;
 }
 

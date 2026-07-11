@@ -1,16 +1,20 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { paths } from '../config/paths';
 import { mergeProcessEnv } from '../platform/spawn';
 import {
+  appendServiceErr,
   ensureLogFiles,
   resolveCliBinPath,
   serviceStderrPath,
   serviceStdoutPath,
   type ServiceStatus,
 } from './common';
+
+/** Name of the one-shot Scheduled Task used as the no-PowerShell relaunch fallback. */
+const RELAUNCH_TASK_NAME = 'feishu-codex-bridge-relaunch';
 
 /**
  * Windows background service **without administrator privileges**.
@@ -80,17 +84,55 @@ export function buildLauncherVbs(): string {
   ].join('\r\n');
 }
 
-/** Launch a detached, window-hidden bridge now; record its PID. */
-function startNow(): void {
-  const out = openSync(serviceStdoutPath(), 'a');
-  const err = openSync(serviceStderrPath(), 'a');
+/**
+ * Launch a detached, window-hidden bridge now; record its PID.
+ *
+ * `opts` matters when called from the tree-free relauncher, which the OS parents
+ * under WmiPrvSE/taskeng and may hand a *different* environment than the daemon
+ * had (a foreign USERPROFILE would make the new bridge resolve `~/.feishu-codex-
+ * bridge` — and thus bots.json/sessions — to the WRONG place):
+ *  - `appDir` pins where service.log/err/pid are written (default: this process's
+ *    appDir), so the relauncher writes them to the *daemon's* dir regardless of
+ *    its own env;
+ *  - `envPath` / `userProfile` are carried from the daemon and injected into the
+ *    new bridge's env so it resolves paths and spawns codex/npm correctly even if
+ *    the relauncher itself ran with a stripped-down environment.
+ */
+function startNow(opts: { appDir?: string; envPath?: string; userProfile?: string } = {}): void {
+  const dir = opts.appDir ?? paths.appDir;
+  const out = openSync(join(dir, 'service.log'), 'a');
+  const err = openSync(join(dir, 'service.err.log'), 'a');
+  const overrides: NodeJS.ProcessEnv = { [SERVICE_ENV_FLAG]: '1' };
+  if (opts.envPath) overrides.PATH = opts.envPath;
+  if (opts.userProfile) overrides.USERPROFILE = opts.userProfile;
   const child = spawn(process.execPath, [resolveCliBinPath(), 'run'], {
     detached: true,
     windowsHide: true,
     stdio: ['ignore', out, err],
-    env: mergeProcessEnv(process.env, { [SERVICE_ENV_FLAG]: '1' }),
+    env: mergeProcessEnv(process.env, overrides),
   });
-  if (child.pid) writeFileSync(servicePidFile(), String(child.pid), 'utf8');
+  // Eager-claim service.pid so status/liveness works before the child's own
+  // recordServicePid() lands — BUT only when no LIVE process already owns it. If a
+  // live daemon holds service.pid (a duplicate / racing start that is about to lose
+  // the single-instance lock), overwriting it here — and then deleting it on the
+  // way out via clearServicePid — is exactly what wipes the real daemon's pid and
+  // makes the update/restart buttons silently no-op. Skipping the claim when a live
+  // owner exists lets the lock winner's recordServicePid stay the source of truth.
+  // On the relauncher path the old daemon was force-killed and is already dead, so
+  // cur is stale/dead here → we still claim immediately (unchanged there; test.2).
+  // Read the pid from the SAME dir we'd write to (opts.appDir may differ from this
+  // process's own paths.appDir when the relauncher ran under a foreign profile).
+  if (child.pid) {
+    const pidPath = join(dir, 'service.pid');
+    let cur: number | null = null;
+    try {
+      const n = Number.parseInt(readFileSync(pidPath, 'utf8').trim(), 10);
+      cur = Number.isFinite(n) ? n : null;
+    } catch {
+      cur = null;
+    }
+    if (cur === null || !pidAlive(cur)) writeFileSync(pidPath, String(child.pid), 'utf8');
+  }
   child.unref();
 }
 
@@ -104,31 +146,395 @@ export async function installWinStartup(): Promise<ServiceStatus> {
   const reg = spawnSync(
     'reg',
     ['add', RUN_KEY_PATH, '/v', RUN_KEY_NAME, '/t', 'REG_SZ', '/d', `wscript.exe "${launcherVbsPath()}"`, '/f'],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', windowsHide: true },
   );
   if (reg.status !== 0) {
     throw new Error(`写入登录自启注册表项失败（exit ${reg.status ?? 'unknown'}）：${(reg.stderr || reg.stdout || '').trim()}`);
   }
 
-  startNow();
+  // Only launch if nothing is already running. Unlike launchd/systemd — whose
+  // install does bootout+bootstrap (a clean restart of any live instance) — the
+  // Windows install has no supervisor to displace a live daemon. An unconditional
+  // startNow() while the service (P1) is already up (logon autostart already ran,
+  // a second `feishu-codex-bridge start`, or the Web「启动」button) would spawn a
+  // duplicate P2 that instantly loses the single-instance lock; as P2 exits it
+  // wipes P1's service.pid (see startNow's guarded write + clearServicePid),
+  // leaving isServiceRunning()=false and every update/restart button a silent
+  // no-op — precisely the "updated but not relaunched" symptom. When already live,
+  // we've refreshed the autostart files above; leave the running daemon untouched.
+  if (!winStartupRunning()) startNow();
   return statusWinStartup();
 }
 
 export async function uninstallWinStartup(): Promise<void> {
   // Remove autostart (reg delete is fine even if the value is already gone).
-  spawnSync('reg', ['delete', RUN_KEY_PATH, '/v', RUN_KEY_NAME, '/f'], { stdio: 'ignore' });
+  spawnSync('reg', ['delete', RUN_KEY_PATH, '/v', RUN_KEY_NAME, '/f'], { stdio: 'ignore', windowsHide: true });
   killService();
   rmSync(servicePidFile(), { force: true });
 }
 
+/**
+ * Restart the background service — **without the caller killing anyone.**
+ *
+ * The old body was `killService(); startNow()` inline, but on Windows the caller
+ * is always inside the doomed process tree: the DM-card path runs IN the daemon
+ * (taskkill /T on its own pid = suicide), and the Web path runs in a detached
+ * helper that is still a *child* of the daemon (detached does NOT change
+ * ParentProcessId, so taskkill /T reaps it too). Either way the process meant to
+ * run startNow() dies during the kill, so the new service never comes up —
+ * "updated but not relaunched". macOS/Linux dodge this because launchd/systemd
+ * (external supervisors) do the kill+relaunch; Windows has no such supervisor.
+ *
+ * Fix: hand the whole "kill old → wait for it to die → startNow" sequence to a
+ * **tree-free relauncher** — a fresh process created via WMI (fallback: a
+ * one-shot Scheduled Task) so its parent is WmiPrvSE/taskeng, OUTSIDE the old
+ * daemon's `taskkill /T` tree. This function only writes the request and
+ * launches that relauncher, then returns; it kills nothing, so whoever called it
+ * stays alive (the DM card still renders, the Web helper exits harmlessly). If
+ * no relauncher backend is available we keep the old service running and surface
+ * the failure — a diagnosable "did not restart" beats a silent "service is dead".
+ *
+ * Note: restart is now asynchronous — this returns a snapshot that still shows
+ * the *old* pid; the swap lands a beat later when the relauncher finishes.
+ */
 export async function restartWinStartup(): Promise<ServiceStatus> {
   if (!isInstalled()) {
     throw new Error('登录自启未安装（先运行 `feishu-codex-bridge start`）。');
   }
   await ensureLogFiles();
-  killService();
-  startNow();
+  const oldPid = readServicePid();
+  if (oldPid === null || !pidAlive(oldPid)) {
+    // Nothing alive to displace (foreground/first run) — start inline; no kill
+    // tree to escape, so the caller doing startNow() is safe here.
+    startNow();
+    return statusWinStartup();
+  }
+  const reqPath = relaunchRequestFile();
+  writeRelaunchRequest({
+    oldPid,
+    envPath: process.env.PATH ?? '',
+    userProfile: process.env.USERPROFILE ?? '',
+    nonce: `${process.pid}-${Date.now()}`,
+  });
+  if (!spawnTreeFreeRelauncher(reqPath)) {
+    clearRelaunchRequest();
+    appendServiceErr('relaunch', `no tree-free backend (powershell/schtasks); kept old pid=${oldPid} running, did NOT restart`);
+    throw new Error('无法拉起「树外」重启进程（powershell 与 schtasks 均不可用）；已保留旧服务继续运行，未重启。');
+  }
+  appendServiceErr('relaunch', `submitted async relaunch for oldPid=${oldPid}`);
   return statusWinStartup();
+}
+
+// ── Tree-free relauncher ─────────────────────────────────────────────────────
+// restartWinStartup can't kill from its own process (it's inside the target's
+// taskkill /T tree). So it hands off to a process spawned via WMI/Task Scheduler,
+// which the OS parents under WmiPrvSE/taskeng — outside the tree — and THAT
+// process does kill→wait→startNow via the `__win-relaunch` subcommand below.
+
+/** The request restartWinStartup leaves for the tree-free relauncher to pick up. */
+interface RelaunchRequest {
+  /** PID of the daemon to kill before starting the replacement. */
+  oldPid: number;
+  /** Daemon-side PATH, carried forward because the WmiPrvSE/taskeng-parented
+   *  child's env may lack the interactive user PATH (node/npm/codex resolution). */
+  envPath: string;
+  /** Daemon-side USERPROFILE, carried forward so the NEW bridge resolves
+   *  `~/.feishu-codex-bridge` to the user's dir even if the relauncher ran under a
+   *  foreign profile (WMI/taskeng may not preserve the user's env). */
+  userProfile: string;
+  /** Dedup marker; the relauncher reads it only for the diagnostic trail. */
+  nonce: string;
+}
+
+function relaunchRequestFile(): string {
+  return join(paths.appDir, 'relaunch.json');
+}
+
+function writeRelaunchRequest(req: RelaunchRequest): void {
+  writeFileSync(relaunchRequestFile(), JSON.stringify(req), 'utf8');
+}
+
+/** Delete the pending request — restartWinStartup's no-backend abort, before any claim. */
+function clearRelaunchRequest(): void {
+  rmSync(relaunchRequestFile(), { force: true });
+}
+
+/**
+ * Atomically claim the request at `reqPath`. renameSync is atomic on one
+ * filesystem, so when two relaunchers race (double-clicked update, or the DM and
+ * Web paths firing together) exactly ONE wins the rename and proceeds; the loser
+ * gets ENOENT → null → no-op. Without this both would startNow() → two daemons;
+ * the single-instance lock kills one, and its eager-written service.pid can stick
+ * as a dead pid — resurrecting the very "updated but not relaunched" bug. Takes an
+ * explicit path (passed as the __win-relaunch arg) so the claim never depends on
+ * the relauncher re-deriving appDir from a possibly-foreign env.
+ */
+function claimRelaunchRequest(reqPath: string): RelaunchRequest | null {
+  const claim = `${reqPath}.claim.${process.pid}`;
+  try {
+    renameSync(reqPath, claim);
+  } catch {
+    return null; // lost the race, or nothing pending
+  }
+  try {
+    const r = JSON.parse(readFileSync(claim, 'utf8')) as Partial<RelaunchRequest>;
+    if (typeof r.oldPid === 'number' && Number.isFinite(r.oldPid)) {
+      return {
+        oldPid: r.oldPid,
+        envPath: typeof r.envPath === 'string' ? r.envPath : '',
+        userProfile: typeof r.userProfile === 'string' ? r.userProfile : '',
+        nonce: String(r.nonce ?? ''),
+      };
+    }
+  } catch {
+    /* corrupt claim → nothing usable */
+  }
+  return null;
+}
+
+function clearRelaunchClaim(reqPath: string): void {
+  rmSync(`${reqPath}.claim.${process.pid}`, { force: true });
+}
+
+/**
+ * The PowerShell one-liner that re-enters this CLI as the tree-free relauncher.
+ * Pure, exported for tests. WMI's `Win32_Process.Create` parents the new process
+ * under WmiPrvSE — the whole point: it escapes the old daemon's `taskkill /T`
+ * tree. The inner command is a single PowerShell single-quoted literal (`'`
+ * doubled to escape), so paths with spaces/quotes can't break out — no injection.
+ */
+export function buildRelauncherPowershell(
+  reqPath: string,
+  binPath: string = resolveCliBinPath(),
+  nodePath: string = process.execPath,
+): string {
+  const inner = `"${nodePath}" "${binPath}" __win-relaunch "${reqPath}"`;
+  const lit = `'${inner.replace(/'/g, "''")}'`;
+  // Primary: WMI create (parented by WmiPrvSE → escapes taskkill /T). `-ErrorAction
+  // Stop` turns a runtime WMI failure (PowerShell 2.0 / WMI disabled) into a throw,
+  // so we fall back to a one-shot Scheduled Task (parented by taskeng → also outside
+  // the tree). Every branch WRITES a result string to stdout — the caller runs this
+  // synchronously and logs it, so a submission that doesn't actually launch is
+  // visible (Win32_Process.Create ReturnValue: 0=ok, 2=denied, 3/9/21=other) rather
+  // than a silent no-op.
+  return (
+    // Silence the progress stream: with stderr redirected PowerShell serializes
+    // progress records as noisy #< CLIXML blobs into our captured output.
+    `$ProgressPreference='SilentlyContinue'; $c=${lit}; ` +
+    `try { $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine=$c } -ErrorAction Stop; ` +
+    `Write-Output ('cim rv=' + $r.ReturnValue + ' pid=' + $r.ProcessId) } ` +
+    `catch { Write-Output ('cim-error: ' + $_.Exception.Message); ` +
+    `schtasks /create /tn ${RELAUNCH_TASK_NAME} /tr $c /sc ONCE /st 00:00 /f | Out-Null; $cr=$LASTEXITCODE; ` +
+    `schtasks /run /tn ${RELAUNCH_TASK_NAME} | Out-Null; ` +
+    `Write-Output ('schtasks create=' + $cr + ' run=' + $LASTEXITCODE) }`
+  );
+}
+
+/**
+ * base64(UTF-16LE) of a PowerShell script, for `powershell -EncodedCommand`.
+ * The raw `-Command "<script>"` path mangled the embedded double-quotes around the
+ * node/bin paths as the script crossed Node-spawn → CreateProcess → PowerShell
+ * re-parsing, so WMI got a broken CommandLine and never launched the relauncher
+ * (confirmed on a real box: request left unclaimed, pid unchanged). Encoding the
+ * whole script to base64 makes the spawn arg pure ASCII with nothing to escape.
+ */
+export function encodePowershellCommand(script: string): string {
+  return Buffer.from(script, 'utf16le').toString('base64');
+}
+
+/** Canonical PowerShell path (present on essentially all Windows), or null. */
+function powershellPath(): string | null {
+  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  const p = join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return existsSync(p) ? p : null;
+}
+
+/**
+ * Launch the tree-free relauncher. Primary: PowerShell → WMI. Fallback (no
+ * PowerShell): a one-shot Scheduled Task run by the Task Scheduler service —
+ * also outside our tree, also no admin for a per-user task. The powershell /
+ * schtasks child is itself our child, but that's fine: it only issues the create
+ * and exits; the relauncher it spawns is reparented away and does the killing.
+ * Returns whether a backend was launched.
+ */
+function spawnTreeFreeRelauncher(reqPath: string): boolean {
+  const ps = powershellPath();
+  if (ps) {
+    // Run PowerShell SYNCHRONOUSLY — this is load-bearing, do NOT switch back to a
+    // detached spawn+unref: that version never launched the relauncher on a real box
+    // (the fire-and-forget powershell was torn down before it finished the WMI
+    // create). spawnSync keeps us alive until Create() completes. WMI only *issues*
+    // the launch and returns in <1s, so the brief block is fine, and capturing its
+    // output lets us log Win32_Process.Create's ReturnValue / any error.
+    // -EncodedCommand (base64/UTF-16LE) sidesteps arg-quoting across the boundary.
+    const r = spawnSync(
+      ps,
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encodePowershellCommand(buildRelauncherPowershell(reqPath))],
+      { encoding: 'utf8', windowsHide: true, timeout: 20_000 },
+    );
+    const out = [
+      `exit=${r.status ?? '?'}`,
+      r.error ? `err=${r.error.message}` : '',
+      (r.stdout || '').replace(/\s+/g, ' ').trim(),
+      (r.stderr || '').replace(/\s+/g, ' ').trim(),
+    ]
+      .filter(Boolean)
+      .join(' ');
+    appendServiceErr('relaunch', `powershell submit: ${out.slice(0, 900)}`);
+    // Confirmed launch: WMI ReturnValue 0, or the schtasks fallback's /run succeeded.
+    const stdout = r.stdout || '';
+    if (!r.error && r.status === 0 && (/cim rv=0\b/.test(stdout) || /schtasks .*run=0\b/.test(stdout))) {
+      return true;
+    }
+    appendServiceErr('relaunch', 'powershell did not confirm a launch; trying node-side schtasks fallback');
+    return spawnSchtasksRelauncher(reqPath);
+  }
+  appendServiceErr('relaunch', 'powershell.exe not found; trying schtasks fallback');
+  return spawnSchtasksRelauncher(reqPath);
+}
+
+/**
+ * Fallback: create a per-user (`no /rl highest` → no admin) ONCE task and `/run`
+ * it immediately — the Task Scheduler service executes it, parenting the
+ * relauncher under taskeng, again outside our tree. `/st` needs a value but
+ * `/run` fires now regardless of it. Best-effort; the relauncher deletes the
+ * task on the way out.
+ */
+function spawnSchtasksRelauncher(reqPath: string): boolean {
+  const tr = `"${process.execPath}" "${resolveCliBinPath()}" __win-relaunch "${reqPath}"`;
+  const create = spawnSync(
+    'schtasks',
+    ['/create', '/tn', RELAUNCH_TASK_NAME, '/tr', tr, '/sc', 'ONCE', '/st', '00:00', '/f'],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  if (create.status !== 0) {
+    appendServiceErr('relaunch', `schtasks /create failed exit=${create.status ?? '?'} ${(create.stderr || '').trim()}`);
+    return false;
+  }
+  const run = spawnSync('schtasks', ['/run', '/tn', RELAUNCH_TASK_NAME], { encoding: 'utf8', windowsHide: true });
+  if (run.status !== 0) {
+    appendServiceErr('relaunch', `schtasks /run failed exit=${run.status ?? '?'} ${(run.stderr || '').trim()}`);
+    return false;
+  }
+  return true;
+}
+
+/** Injectable deps for {@link runWinRelaunch} so its ordering is testable off-Windows. */
+export interface WinRelaunchDeps {
+  /** Absolute path of the relaunch request (the __win-relaunch arg). Default =
+   *  relaunchRequestFile() so a manual `feishu-codex-bridge __win-relaunch` still works. */
+  requestPath?: string;
+  /** Atomically claim the request at `reqPath` (single-winner); null = lost / none. */
+  claimRequest?: (reqPath: string) => RelaunchRequest | null;
+  clearRequest?: (reqPath: string) => void;
+  pidAlive?: (pid: number) => boolean;
+  /** Tree-kill the old daemon (default `taskkill /T /F`); returns exit + stderr for the trail. */
+  taskkill?: (pid: number) => { status: number | null; stderr: string };
+  start?: (opts: { appDir: string; envPath: string; userProfile: string }) => void;
+  sleep?: (ms: number) => Promise<void>;
+  /** Max wait for the old daemon to actually die before giving up (avoid double-instance). */
+  graceMs?: number;
+  pollMs?: number;
+  now?: () => number;
+  /** Guarantee the log dir/files exist before appending (default ensureLogFiles). */
+  ensureLogs?: () => Promise<void>;
+  /** Diagnostic sink (default → the request dir's service.err.log); injected so tests stay off the real FS. */
+  logLine?: (line: string) => void;
+}
+
+function defaultTaskkill(pid: number): { status: number | null; stderr: string } {
+  const r = spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { encoding: 'utf8', windowsHide: true });
+  return { status: r.status, stderr: (r.stderr || '').toString() };
+}
+
+/**
+ * `__win-relaunch` subcommand body — runs in the WmiPrvSE/taskeng-parented
+ * process, i.e. OUTSIDE the old daemon's kill tree, which is the whole reason it
+ * can taskkill the old daemon and then *live* to run startNow(). Sequence:
+ *   1. kill the old daemon (tree-kill: takes its codex children with it);
+ *   2. poll until it is really dead — TerminateProcess is async and the old
+ *      process holds the single-instance lock + Web port until it fully exits;
+ *   3. only then startNow() the replacement (which reclaims the now-stale lock —
+ *      the force-killed old process ran no exit handler to release it);
+ *   4. if the old refuses to die (e.g. it was elevated and we are not), abort
+ *      WITHOUT starting a second instance — a clean "not restarted" over a
+ *      double-instance mess. Every step leaves a line in service.err.log.
+ */
+export async function runWinRelaunch(deps: WinRelaunchDeps = {}): Promise<void> {
+  const reqPath = deps.requestPath ?? relaunchRequestFile();
+  // Derive appDir from the request path (env-independent) so logs + service.pid
+  // land in the DAEMON's dir even if this relauncher ran under a foreign profile.
+  const appDir = dirname(reqPath);
+  const claim = deps.claimRequest ?? claimRelaunchRequest;
+  const clearClaim = deps.clearRequest ?? clearRelaunchClaim;
+  const alive = deps.pidAlive ?? pidAlive;
+  const kill = deps.taskkill ?? defaultTaskkill;
+  const start = deps.start ?? startNow;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const graceMs = deps.graceMs ?? 15_000;
+  const pollMs = deps.pollMs ?? 200;
+  const now = deps.now ?? ((): number => Date.now());
+  const ensureLogs = deps.ensureLogs ?? ensureLogFiles;
+  const logLine =
+    deps.logLine ?? ((line: string): void => appendServiceErr('relaunch', line, join(appDir, 'service.err.log')));
+
+  // Non-fatal: a busy/locked log dir must not abort the actual restart (appendServiceErr is best-effort too).
+  try {
+    await ensureLogs();
+  } catch {
+    /* keep going — the kill/start below don't need the log files */
+  }
+  // Atomic single-claim: if another relauncher already grabbed this request
+  // (double-click / DM+Web race), we get null and no-op — exactly one relauncher
+  // ever runs kill→startNow, so we never spawn a second daemon.
+  const req = claim(reqPath);
+  if (!req) {
+    logLine('no relaunch request to claim (already handled by another relauncher, or none)');
+    return;
+  }
+
+  try {
+    logLine(`start oldPid=${req.oldPid} self=${process.pid}`);
+
+    if (alive(req.oldPid)) {
+      const r = kill(req.oldPid);
+      logLine(`taskkill oldPid=${req.oldPid} exit=${r.status ?? '?'} ${r.stderr.trim()}`.trim());
+    }
+
+    const deadline = now() + graceMs;
+    while (now() < deadline && alive(req.oldPid)) {
+      await sleep(pollMs);
+    }
+    if (alive(req.oldPid)) {
+      logLine(
+        `ABORT: oldPid=${req.oldPid} still alive after ${graceMs}ms (elevated / access denied?); not starting new to avoid double instance`,
+      );
+      return;
+    }
+
+    await sleep(300); // let the OS reclaim the old daemon's listen socket before the new one binds
+    start({ appDir, envPath: req.envPath, userProfile: req.userProfile });
+    // Read back the pid startNow wrote to the (correct) appDir so the trail is
+    // self-consistent — otherwise the log only shows the transient relauncher pid.
+    let newPid = '?';
+    try {
+      newPid = readFileSync(join(appDir, 'service.pid'), 'utf8').trim() || '?';
+    } catch {
+      /* not written (e.g. injected start in tests) */
+    }
+    logLine(`relaunched; new daemon pid=${newPid} (appDir=${appDir})`);
+  } finally {
+    clearClaim(reqPath);
+    // Best-effort: drop the one-shot task if the schtasks fallback created one —
+    // on every exit path (success / abort), so Task Scheduler stays tidy.
+    if (process.platform === 'win32') {
+      try {
+        spawnSync('schtasks', ['/delete', '/tn', RELAUNCH_TASK_NAME, '/f'], { stdio: 'ignore', windowsHide: true });
+      } catch {
+        /* fallback task may not exist */
+      }
+    }
+  }
 }
 
 export function statusWinStartup(): ServiceStatus {
@@ -179,8 +585,12 @@ export function clearServicePid(): void {
 }
 
 function isInstalled(): boolean {
+  // windowsHide: without it this spawns a visible console window — and /api/daemon
+  // polls status every 5s while the web console is open, so a black window flashed
+  // once per poll. (Same reason every other Windows spawn here sets it.)
   const r = spawnSync('reg', ['query', RUN_KEY_PATH, '/v', RUN_KEY_NAME], {
     stdio: ['ignore', 'ignore', 'ignore'],
+    windowsHide: true,
   });
   return r.status === 0;
 }
@@ -204,9 +614,15 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-/** Tree-kill the running service bridge (and its codex children), if any. */
+/** Tree-kill the running service bridge (and its codex children), if any. Used
+ * by uninstall (stop). A non-zero taskkill (e.g. Access Denied on an elevated
+ * daemon) used to be swallowed by `stdio:'ignore'` — a prime source of "stopped
+ * in the UI but still running"; now it lands in service.err.log. */
 function killService(): void {
   const pid = readServicePid();
   if (pid === null || !pidAlive(pid)) return;
-  spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+  const r = spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { encoding: 'utf8', windowsHide: true });
+  if (r.status !== 0) {
+    appendServiceErr('kill', `taskkill pid=${pid} exit=${r.status ?? '?'} ${(r.stderr || '').toString().trim()}`);
+  }
 }

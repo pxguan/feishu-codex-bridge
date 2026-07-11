@@ -2,7 +2,14 @@ import { readFile, rm } from 'node:fs/promises';
 import { loadBots, setActiveBots, removeBot } from '../config/bots';
 import { botPaths, botDir } from '../config/paths';
 import { removeSecret } from '../config/keystore';
-import { secretKeyForApp } from '../config/schema';
+import {
+  getCompletionReminderConfig,
+  isComplete,
+  secretKeyForApp,
+  type AppConfig,
+  type CompletionReminderMode,
+  type ResolvedCompletionReminderConfig,
+} from '../config/schema';
 import {
   defaultNoMention,
   effectiveGuestMode,
@@ -11,7 +18,6 @@ import {
 } from '../project/registry';
 import { listSessionsIn } from '../bot/session-store';
 import { loadConfig } from '../config/store';
-import { isComplete } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
 import { diagnoseEventSubscription, type EventDiagnosis } from '../utils/event-diagnosis';
 import { validateAppCredentials } from '../utils/feishu-auth';
@@ -47,7 +53,13 @@ import {
 import type { BackendDepState, BackendProbe, PermissionMode } from '../agent/types';
 import { readRecentLogs } from '../core/logger';
 import { getServiceAdapter } from '../service/adapter';
-import { checkUpdate as checkUpdateImpl, type UpdateCheck } from '../service/update';
+import {
+  checkUpdate as checkUpdateImpl,
+  clearUpdateStatus,
+  readUpdateStatus,
+  type UpdateCheck,
+  type UpdateStatus,
+} from '../service/update';
 import { bridgeVersion } from '../core/version';
 import { collectHostDoctor, toDaemonStatus, type DaemonStatus, type HostDoctor } from './host';
 import type { AdminWriteOp } from './ops';
@@ -65,6 +77,7 @@ import type { AdminWriteOp } from './ops';
  *       setPermissionMode   ← dm.proj.perm.submit（🔐 权限 · 保存）
  *       setNoMention        ← dm.proj.noMention（✋ 免@）
  *       setAutoCompact      ← dm.proj.autoCompact（🗜️ 自动压缩）
+ *       setCompletionReminder ← dm.set.completionReminder（🔔 完成提醒）
  *       doctorBackends      ← dm.doctor 的后端探测段（🩺 诊断）
  *       eventDiagnosis      ← dm.doctor 的事件订阅三态段（M-7）
  *       listSessions        ← dm.projectTopics（🧵 话题钻取）
@@ -101,6 +114,11 @@ export interface AdminService {
   setNoMention(botId: string, projectName: string, on: boolean): Promise<void>;
   /** 🗜️ 自动压缩开关（写），含驱逐活跃会话的既有语义。 */
   setAutoCompact(botId: string, projectName: string, on: boolean): Promise<void>;
+  /** 🔔 每 bot 的普通任务结束提醒（写）；经 bot 进程落盘并热更新 LIVE cfg。 */
+  setCompletionReminder(
+    botId: string,
+    value: { mode: CompletionReminderMode; longTaskMinutes: number },
+  ): Promise<void>;
   /** 🩺 对全部注册后端做环境体检（doctor 探测，绝不抛错）。 */
   doctorBackends(): Promise<AdminBackendStatus[]>;
   /** 事件订阅三态诊断（ok / missing / unpublished / unchecked，绝不抛错）。 */
@@ -200,6 +218,11 @@ export interface AdminService {
   /** 检查 npm 上有无新版（current / latest / hasUpdate / dev）。绝不抛错（latest=null 兜底）。 */
   checkUpdate(): Promise<UpdateCheck>;
   /**
+   * 读最近一次升级的进度/结果（installing/restarting/done/error），供 Web 轮询——尤其
+   * 失败：detached helper 的失败否则对网页端完全静默。无记录返回 null。绝不抛错。
+   */
+  updateStatus(): UpdateStatus | null;
+  /**
    * 升级到最新版（npm i -g + 重启 daemon）。**默认只检测不自动升级**——只有用户
    * 点「升级」按钮才走这里。同 restart 走 detached helper。只读预览抛 NotWiredYetError。
    */
@@ -256,6 +279,8 @@ export interface AdminBot {
   /** 真实 WS 长连接状态（connected / connecting / reconnecting / …）。仅 daemon
    * 进程内（本进程的 channel / 子进程 IPC 上报）可用；预览进程缺省。 */
   connection?: string;
+  /** 每 bot 的普通任务结束提醒 effective 配置（缺省 = failures / 3 分钟）。 */
+  completionReminder: ResolvedCompletionReminderConfig;
 }
 
 /** daemon 进程内的实时运行状态（注入 {@link AdminServiceDeps.liveStatus}）。 */
@@ -494,6 +519,15 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
     return live ?? lockFileRunState(botId);
   }
 
+  /** config 损坏/缺失不能拖垮整个 /api/state；按 schema 的安全默认值降级。 */
+  async function completionReminderFor(botId: string): Promise<ResolvedCompletionReminderConfig> {
+    try {
+      return getCompletionReminderConfig((await loadConfig(botPaths(botId).configFile)) as AppConfig);
+    } catch {
+      return getCompletionReminderConfig({} as AppConfig);
+    }
+  }
+
   function executeWrite(botId: string, action: string, op: AdminWriteOp): Promise<void> {
     if (!deps.executeWrite) throw new NotWiredYetError(action);
     return deps.executeWrite(botId, op);
@@ -505,7 +539,7 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       const configured = reg.bots.some((b) => b.active !== undefined);
       const out: AdminBot[] = [];
       for (const b of reg.bots) {
-        const run = await runState(b.appId);
+        const [run, completionReminder] = await Promise.all([runState(b.appId), completionReminderFor(b.appId)]);
         out.push({
           name: b.name,
           appId: b.appId,
@@ -518,6 +552,7 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
           pid: run.pid,
           startedAt: run.startedAt,
           connection: run.connection,
+          completionReminder,
         });
       }
       return out;
@@ -555,6 +590,17 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
 
     async setAutoCompact(botId: string, projectName: string, on: boolean): Promise<void> {
       await executeWrite(botId, '🗜️ 自动压缩开关', { kind: 'setAutoCompact', project: projectName, on });
+    },
+
+    async setCompletionReminder(
+      botId: string,
+      value: { mode: CompletionReminderMode; longTaskMinutes: number },
+    ): Promise<void> {
+      await executeWrite(botId, '🔔 完成提醒', {
+        kind: 'setCompletionReminder',
+        mode: value.mode,
+        longTaskMinutes: value.longTaskMinutes,
+      });
     },
 
     doctorBackends(): Promise<AdminBackendStatus[]> {
@@ -823,8 +869,14 @@ export function createAdminService(deps: AdminServiceDeps = {}): AdminService {
       }));
     },
 
+    updateStatus(): UpdateStatus | null {
+      return readUpdateStatus();
+    },
+
     async applyUpdate(): Promise<void> {
       if (!deps.applyUpdate) throw new NotWiredYetError('⬆️ 升级');
+      // 清掉上一次的结果，之后 Web 轮询读到的状态才确定属于本次升级（helper 会重写）。
+      clearUpdateStatus();
       deps.applyUpdate();
     },
 

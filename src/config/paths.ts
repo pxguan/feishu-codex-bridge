@@ -69,6 +69,18 @@ export const paths = {
   get processesFile(): string {
     return join(currentBotDir, 'processes.json');
   },
+  /** 云文档评论 @bot 的可编辑提示词 master 文件（当前 bot）。用户直接编辑这一份，
+   * 桥在每条评论运行前把它同步进该文档的评论工作目录（AGENTS.md / CLAUDE.md）。
+   * 首次缺失时由 bot/comments.ts 用内置默认模板自动落地。 */
+  get commentInstructionsFile(): string {
+    return join(currentBotDir, 'comment-instructions.md');
+  },
+  /** 评论工作目录根（**当前 bot**）：每个被评论文档一个 `comment-<type>-<token>` 子目录，
+   * 放同步进去的 AGENTS.md / CLAUDE.md。放 per-bot 目录下，与其它 bot 隔离——否则
+   * 编辑提示词时的「全量同步」会越界改到别的 bot 的评论目录。 */
+  get commentsRootDir(): string {
+    return join(currentBotDir, 'comments');
+  },
   /**
    * Local CLI hook IPC endpoint for the current bot. macOS/Linux use a Unix
    * domain socket file; Windows has none, so Node maps a `\\.\pipe\…` path to a

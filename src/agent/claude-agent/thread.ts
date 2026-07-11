@@ -1,4 +1,5 @@
-import type { Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { readFile } from 'node:fs/promises';
+import type { Options, Query, SDKMessage, SDKUserMessage, SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import { log } from '../../core/logger';
 import type {
   AgentEvent,
@@ -24,6 +25,16 @@ export interface ClaudeThreadConfig {
   permission: ClaudePermissionOptions;
   /** appended to Claude Code's default system prompt (bridge developer guidance). */
   systemPromptAppend?: string;
+  /** Which filesystem settings the SDK loads. The SDK default is none — so
+   * project/user CLAUDE.md, skills and `.claude/settings.json` are NOT read
+   * unless set. The backend passes ['user','project'] to make a claude session
+   * behave like Claude Code in its cwd (read CLAUDE.md + user skills). */
+  settingSources?: SettingSource[];
+  /** Env for the SDK's spawned CLI subprocess. NOTE: the SDK does NOT merge this
+   * with process.env — callers must spread it themselves. The backend passes
+   * `{ ...process.env, FEISHU_CODEX_BRIDGE: '1' }` so inherited cli-bridge hooks
+   * recognize a bridge-owned session and don't self-forward (matches codex). */
+  env?: Record<string, string>;
   /** the SDK's `query()` function, injected by the backend (lazy-loaded via
    * loadBackendDep) so thread.ts carries no static runtime dep on the SDK —
    * the on-demand package can be absent until downloaded. */
@@ -97,17 +108,89 @@ class PushablePrompt {
 function toSdkEffort(e: ReasoningEffort | undefined): Options['effort'] | undefined {
   if (!e) return undefined;
   if (e === 'none' || e === 'minimal') return 'low';
-  return e; // low/medium/high/xhigh pass through
+  if (e === 'ultra') return 'max'; // Claude has no delegation-aware ultra tier
+  return e; // low/medium/high/xhigh/max pass through
 }
 
-function toUserMessage(input: AgentInput): SDKUserMessage {
-  // Text-only for now (image passthrough is a documented gap — see PROGRESS).
+/** Content blocks the SDK accepts in a streaming user message, derived from the
+ * SDK's own MessageParam so this file carries no static dep on `@anthropic-ai/sdk`. */
+type UserContentBlock = Exclude<SDKUserMessage['message']['content'], string>[number];
+
+/** Skip a single image this large (raw bytes): a pathological upload must not
+ * bloat the one stream-json line handed to the CLI. Normal chat images are far
+ * under this, and the CLI down-scales what it forwards to the API. */
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Detect an image's type from its MAGIC BYTES, not its filename — media.ts derives
+ * the on-disk extension from the HTTP content-type, which Feishu may omit (then it
+ * defaults to `.png`), so a JPEG could land as `x.png`; trusting the extension
+ * would mislabel it and the Anthropic API would reject the base64 for not matching
+ * `media_type`. Returns the API media_type for the ONLY four types base64 image
+ * blocks accept, or undefined for anything else (heic/bmp/tiff/unknown — the API
+ * can't take those without transcoding, which the bridge doesn't do).
+ */
+function sniffImageType(b: Buffer): 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' | undefined {
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png'; // ‰PNG
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg'; // JFIF/EXIF
+  if (b.length >= 6 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif'; // GIF8(7|9)a
+  if (b.length >= 12 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  return undefined;
+}
+
+/** Read one downloaded image into a base64 image content block, or undefined when
+ * it can't be shown (unreadable / empty / oversized / a type the API rejects).
+ * Best-effort — never throws, so one bad image can't break the turn. */
+async function toImageBlock(path: string): Promise<UserContentBlock | undefined> {
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(path);
+  } catch (err) {
+    log.warn('agent', 'image-read-failed', { backend: 'claude-agent', err: String(err) });
+    return undefined;
+  }
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) {
+    log.warn('agent', 'image-skip-size', { backend: 'claude-agent', bytes: bytes.byteLength });
+    return undefined;
+  }
+  const mediaType = sniffImageType(bytes);
+  if (!mediaType) {
+    // heic/bmp/tiff or unrecognized bytes — see sniffImageType; log the header so a
+    // surprising type is diagnosable, then skip (best-effort).
+    log.info('agent', 'image-skip-unsupported', { backend: 'claude-agent', head: bytes.toString('hex', 0, 4) });
+    return undefined;
+  }
+  return { type: 'image', source: { type: 'base64', media_type: mediaType, data: bytes.toString('base64') } };
+}
+
+/** A text-only user message (the common, I/O-free path). */
+function textUserMessage(text: string): SDKUserMessage {
+  return { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null } as SDKUserMessage;
+}
+
+/**
+ * Build the SDK user message for a turn. Text-only → a plain string (fast path,
+ * no I/O). With images (input.images = the local paths the bridge downloaded, the
+ * same source codex reads as `localImage`) → an array of content blocks (optional
+ * text + one base64 image block per readable image) so Claude actually SEES the
+ * pixels — parity with codex. If every image drops (unsupported/unreadable), fall
+ * back to plain text so a text-bearing turn is never blanked. Exported for tests.
+ */
+export async function toUserMessage(input: AgentInput): Promise<SDKUserMessage> {
   const text = input.text ?? '';
-  return {
-    type: 'user',
-    message: { role: 'user', content: text },
-    parent_tool_use_id: null,
-  } as SDKUserMessage;
+  const paths = input.images ?? [];
+  if (paths.length === 0) return textUserMessage(text);
+
+  const blocks: UserContentBlock[] = [];
+  if (text) blocks.push({ type: 'text', text });
+  for (const path of paths) {
+    const block = await toImageBlock(path);
+    if (block) blocks.push(block);
+  }
+  const imageCount = blocks.filter((b) => b.type === 'image').length;
+  if (imageCount === 0) return textUserMessage(text); // every image dropped → plain text
+  log.info('agent', 'images-attached', { backend: 'claude-agent', count: imageCount, of: paths.length });
+  return { type: 'user', message: { role: 'user', content: blocks }, parent_tool_use_id: null } as SDKUserMessage;
 }
 
 /** Frame a /goal objective so Claude runs it autonomously to completion in one
@@ -180,6 +263,8 @@ export class ClaudeAgentThread implements AgentThread {
       ...(cfg.systemPromptAppend
         ? { systemPrompt: { type: 'preset', preset: 'claude_code', append: cfg.systemPromptAppend } }
         : {}),
+      ...(cfg.settingSources ? { settingSources: cfg.settingSources } : {}),
+      ...(cfg.env ? { env: cfg.env } : {}),
       // permission tier (permissionMode / sandbox / canUseTool / disallowedTools)
       ...cfg.permission,
       stderr: (d: string) => {
@@ -229,9 +314,19 @@ export class ClaudeAgentThread implements AgentThread {
     const mySink = (item: TurnItem): void => inbox.push(item);
     this.sink = mySink;
 
-    // Fire the turn NOW (push the user message) so inference overlaps the caller's
-    // card setup; messages buffer in `inbox` until the for-await below drains them.
-    this.input.push(toUserMessage(input));
+    // Fire the turn (push the user message) so inference overlaps the caller's
+    // card setup; messages buffer in `inbox` until the for-await below drains
+    // them. Text-only resolves on the next microtask; an image turn reads +
+    // base64-encodes the files first (async), pushed as soon as ready. A build
+    // failure (encoding is best-effort, so this shouldn't fire) still pushes the
+    // text alone rather than leaving the turn waiting forever on `inbox`.
+    void toUserMessage(input).then(
+      (m) => this.input.push(m),
+      (err) => {
+        log.fail('agent', err, { backend: 'claude-agent', phase: 'build-user-message' });
+        this.input.push(textUserMessage(input.text ?? ''));
+      },
+    );
 
     const self = this;
     async function* gen(): AsyncGenerator<AgentEvent> {
@@ -323,7 +418,7 @@ export class ClaudeAgentThread implements AgentThread {
     const mySink = (item: TurnItem): void => inbox.push(item);
     this.sink = mySink;
 
-    this.input.push(toUserMessage({ text: goalPrompt(objective) }));
+    this.input.push(textUserMessage(goalPrompt(objective)));
 
     const self = this;
     async function* gen(): AsyncGenerator<AgentEvent> {
@@ -429,7 +524,7 @@ export class ClaudeAgentThread implements AgentThread {
 
     let compacted = false;
     try {
-      this.input.push(toUserMessage({ text: '/compact' }));
+      this.input.push(textUserMessage('/compact'));
       while (true) {
         const step = await Promise.race([inbox.next(), timeout]);
         if (step === 'timeout') throw new Error(`压缩超时（Claude 未在 ${COMPACT_TIMEOUT_MS / 1000}s 内完成）`);

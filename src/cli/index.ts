@@ -7,6 +7,7 @@ import { runUpdate } from './commands/update';
 import { runBotInit, runBotList, runBotUse, runBotRm } from './commands/bot';
 import { runWeb } from './commands/web';
 import { runDaemonControl } from './commands/daemon-control';
+import { runWinRelaunch } from '../service/win-startup';
 import { secretsGet, secretsSet, secretsList, secretsRemove } from './commands/secrets';
 
 const program = new Command();
@@ -83,6 +84,15 @@ program
   .command('__daemon-control <action>', { hidden: true })
   .action(async (action: string) => {
     await runDaemonControl(action);
+  });
+
+// 内部命令（Windows 专用）：restartWinStartup 经 WMI/计划任务在「daemon 进程树之外」
+// 拉起的 relauncher 入口。它 taskkill 旧 daemon → 等其真死 → startNow 起新，绝不会
+// 像旧的进程内重启那样把自己一起杀掉。不对外暴露。
+program
+  .command('__win-relaunch [requestPath]', { hidden: true })
+  .action(async (requestPath?: string) => {
+    await runWinRelaunch({ requestPath });
   });
 
 // ── 飞书机器人管理 ───────────────────────────────────────────
