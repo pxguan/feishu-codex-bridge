@@ -26,10 +26,10 @@ jobs:
         with:
           fetch-depth: 1
       - name: Run agent
-        uses: pxguan/pullfrog@e75b7cd30c56fde9c3ac9f6aa1817a6c85645070
+        uses: pullfrog/pullfrog@v0
         with:
           prompt: ${{ inputs.prompt }}
-          model: mygateway/glm-5.2  # 自定义网关 provider（fork gatewayProvider 注入，走内网网关）
+          model: big-pickle  # 免费模型（OpenCode Big Pickle），零 key 配置，走 opencode 平台
         env:
           # add at least one provider API key
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -43,9 +43,6 @@ jobs:
           MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          # fork：gatewayProvider() 读这两个 env 注入 mygateway provider（走内网网关）
-          PULLFROG_GATEWAY_URL: ${{ secrets.OCR_LLM_URL }}
-          PULLFROG_GATEWAY_API_KEY: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           
           # for Amazon Bedrock (https://docs.pullfrog.com/bedrock)
           # AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
