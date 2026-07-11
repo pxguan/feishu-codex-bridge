@@ -7,8 +7,10 @@
 language: zh-CN
 
 reviews:
-  # 跳过生成物与噪音文件，不浪费评审额度
+  # 正向限定：只评审 Go 文件（CodeRabbit 建议，比仅排除 ts 更彻底——
+  # 未来新增 .py/.rs 等其他语言文件也不会被评）
   path_filters:
+    - "**/*.go"
     - "!**/node_modules/**"
     - "!**/dist/**"
     - "!**/coverage/**"
