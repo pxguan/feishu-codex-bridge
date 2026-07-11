@@ -26,7 +26,7 @@ jobs:
         with:
           fetch-depth: 1
       - name: Run agent
-        uses: pxguan/pullfrog@v0.1.34-gateway  # fork：含 gatewayProvider() 走内网网关
+        uses: pxguan/pullfrog@5b9061272a870ea616c143b6033e37d1adf27a60  # pin SHA 绕 tag 缓存
         with:
           prompt: ${{ inputs.prompt }}
         env:
